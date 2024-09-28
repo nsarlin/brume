@@ -1,4 +1,4 @@
-use ncclient::RemoteDir;
+use ncclient::remote::RemoteDir;
 use reqwest_dav::Error;
 
 #[tokio::main]
