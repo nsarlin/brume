@@ -9,7 +9,6 @@ use dav::dav_parse_vfs;
 #[allow(unused)]
 pub struct RemoteDir {
     client: Client,
-    dir_name: String,
     vfs: Vfs,
 }
 
@@ -25,10 +24,6 @@ impl RemoteDir {
 
         let root = dav_parse_vfs(elements, &name).unwrap();
 
-        Ok(Self {
-            client,
-            dir_name: name,
-            vfs: root,
-        })
+        Ok(Self { client, vfs: root })
     }
 }

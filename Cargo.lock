@@ -647,7 +647,6 @@ version = "0.1.0"
 dependencies = [
  "reqwest_dav",
  "ron",
- "serde",
  "tokio",
 ]
 
