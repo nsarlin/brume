@@ -31,12 +31,12 @@ pub(crate) fn dav_parse_vfs(mut entities: Vec<ListEntity>, folder_name: &str) ->
 
     let empty_root_node = root_entity.try_into()?;
 
-    match empty_root_node {
-        TreeNode::File(file) => Ok(TreeNode::File(file).into()),
-        TreeNode::Dir(root) => {
-            Ok(TreeNode::Dir(dav_build_tree_inner(root, &mut entities_iter)?).into())
-        }
-    }
+    let root = match empty_root_node {
+        TreeNode::File(file) => TreeNode::File(file),
+        TreeNode::Dir(root) => TreeNode::Dir(dav_build_tree_inner(root, &mut entities_iter)?),
+    };
+
+    Ok(Vfs::new(folder_name, root))
 }
 
 /// Build the tree-like structure of a VFS from a flat list of paths. This function assumes that

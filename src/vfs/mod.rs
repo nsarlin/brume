@@ -6,16 +6,23 @@ pub use dir_tree::*;
 
 /// The virtual representation of a file system, local or remote
 #[derive(Debug)]
-pub struct Vfs(TreeNode);
+#[allow(unused)]
+pub struct Vfs {
+    dir_name: String,
+    root: TreeNode,
+}
 
 impl Vfs {
     pub fn root(&self) -> &TreeNode {
-        &self.0
+        &self.root
     }
 }
 
-impl From<TreeNode> for Vfs {
-    fn from(value: TreeNode) -> Self {
-        Self(value)
+impl Vfs {
+    pub fn new(name: &str, root: TreeNode) -> Self {
+        Self {
+            dir_name: name.to_string(),
+            root,
+        }
     }
 }
