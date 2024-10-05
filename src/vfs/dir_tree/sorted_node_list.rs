@@ -93,7 +93,7 @@ mod test {
 
         let list = SortedNodeList::from_vec(test_nodes);
 
-        let reference: Vec<_> = vec![D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
+        let reference: Vec<_> = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
             .iter()
             .map(TreeNode::from)
             .collect();
@@ -107,7 +107,7 @@ mod test {
 
     #[test]
     fn test_insertion() {
-        let test_nodes = vec![D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
+        let test_nodes = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
             .iter()
             .map(TreeNode::from)
             .collect();
@@ -140,7 +140,7 @@ mod test {
 
     #[test]
     fn test_replacement() {
-        let test_nodes = vec![D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
+        let test_nodes = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
             .iter()
             .map(TreeNode::from)
             .collect();
