@@ -3,13 +3,24 @@
 use reqwest_dav::list_cmd::ListEntity;
 
 use crate::{
-    vfs::{DirTree, FileInfo, TreeNode, Vfs},
+    vfs::{DirTree, FileInfo, TreeNode, Vfs, VirtualPath, VirtualPathError},
     NC_DAV_PATH_STR,
 };
 
+use super::RemoteFsError;
+
+impl From<VirtualPathError> for RemoteFsError {
+    fn from(value: VirtualPathError) -> Self {
+        Self::InvalidPath(value)
+    }
+}
+
 /// Build a vfs from a Dav response. This may fail if the response entities does not represent a
 /// valid tree structure.
-pub(crate) fn dav_parse_vfs(mut entities: Vec<ListEntity>, folder_name: &str) -> Result<Vfs, ()> {
+pub(crate) fn dav_parse_vfs(
+    mut entities: Vec<ListEntity>,
+    folder_name: &str,
+) -> Result<Vfs, RemoteFsError> {
     // By sorting the paths lexicographically, we make sure that children nodes a right after the
     // directory that contain them.
     entities.sort_by(|ent_a, ent_b| {
@@ -24,9 +35,9 @@ pub(crate) fn dav_parse_vfs(mut entities: Vec<ListEntity>, folder_name: &str) ->
         folder_name: folder_name.to_string(),
     });
 
-    let root_entity = entities_iter.next().ok_or(())?;
+    let root_entity = entities_iter.next().ok_or(RemoteFsError::BadStructure)?;
     if !root_entity.name()?.is_empty() {
-        return Err(());
+        return Err(RemoteFsError::BadStructure);
     }
 
     let empty_root_node = root_entity.try_into()?;
@@ -45,7 +56,7 @@ pub(crate) fn dav_parse_vfs(mut entities: Vec<ListEntity>, folder_name: &str) ->
 fn dav_build_tree_inner<I: ExactSizeIterator<Item = DavEntity>>(
     root: DirTree,
     entities: &mut I,
-) -> Result<DirTree, ()> {
+) -> Result<DirTree, RemoteFsError> {
     // This is used to store the currently worked on stack of directories
     let mut dirs: Vec<DirTree> = Vec::with_capacity(entities.len());
     let mut current_dir = root;
@@ -59,10 +70,10 @@ fn dav_build_tree_inner<I: ExactSizeIterator<Item = DavEntity>>(
                 if parent.insert_child(TreeNode::Dir(current_dir)) {
                     current_dir = parent;
                 } else {
-                    return Err(());
+                    return Err(RemoteFsError::BadStructure);
                 }
             } else {
-                return Err(());
+                return Err(RemoteFsError::BadStructure);
             }
         }
 
@@ -82,7 +93,7 @@ fn dav_build_tree_inner<I: ExactSizeIterator<Item = DavEntity>>(
         if parent.insert_child(TreeNode::Dir(current_dir)) {
             current_dir = parent;
         } else {
-            return Err(());
+            return Err(RemoteFsError::BadStructure);
         }
     }
     Ok(current_dir)
@@ -95,7 +106,7 @@ struct DavEntity {
 }
 
 impl TryFrom<DavEntity> for TreeNode {
-    type Error = ();
+    type Error = VirtualPathError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
         let name = value.name()?;
@@ -109,26 +120,14 @@ impl TryFrom<DavEntity> for TreeNode {
 impl DavEntity {
     /// Return the name of the entity, without its path. Can fail if the path is not valid for the
     /// dav folder.
-    fn name(&self) -> Result<&str, ()> {
-        let path = self.relative_path(&self.folder_name)?;
-
-        if path.ends_with('/') {
-            Ok(path.split('/').nth_back(1).unwrap_or(""))
-        } else {
-            Ok(path.split('/').last().unwrap_or(""))
-        }
+    fn name(&self) -> Result<&str, VirtualPathError> {
+        self.path().map(|path| path.name())
     }
 
     /// Return the name of the direct parent of the entity. Can fail if the path is not valid for
     /// the dav folder.
-    fn parent(&self) -> Result<Option<&str>, ()> {
-        let path = self.relative_path(&self.folder_name)?;
-
-        if path.ends_with('/') {
-            Ok(path.split('/').nth_back(2))
-        } else {
-            Ok(path.split('/').nth_back(1))
-        }
+    fn parent(&self) -> Result<Option<&str>, VirtualPathError> {
+        Ok(self.path()?.parent().map(|parent| parent.name()))
     }
 
     /// Return the relative url from the server root of the entity
@@ -136,16 +135,15 @@ impl DavEntity {
         dav_entity_href(&self.entity)
     }
 
-    /// Return the relative path of the entity, from `folder_name`. `folder_name` should be a full
-    /// path from the dav root url.
-    fn relative_path<'a>(&'a self, folder_name: &str) -> Result<&'a str, ()> {
-        let absolute_path = self.href();
-        if let Some(without_dav_path) = absolute_path.strip_prefix(NC_DAV_PATH_STR) {
-            if let Some(without_folder) = without_dav_path.strip_prefix(folder_name) {
-                return Ok(without_folder);
-            }
-        }
-        Err(())
+    /// Return the relative path of the entity from the "dav root", removing the dav url and the
+    /// name of the folder.
+    fn path(&self) -> Result<VirtualPath, VirtualPathError> {
+        let dav_path: VirtualPath = self.href().try_into()?;
+
+        dav_path
+            // Ok to unwrap because NC_DAV_PATH is known to be valid
+            .chroot(&NC_DAV_PATH_STR.try_into().unwrap())?
+            .chroot(&format!("{}{}", "/", self.folder_name).as_str().try_into()?)
     }
 }
 
