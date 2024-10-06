@@ -1,9 +1,8 @@
-use ncclient::remote::RemoteDir;
-use reqwest_dav::Error;
+use ncclient::remote::{RemoteFs, RemoteFsError};
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
-    let remote = RemoteDir::new("http://localhost:8080", "admin", "admin").await?;
+async fn main() -> Result<(), RemoteFsError> {
+    let remote = RemoteFs::new("http://localhost:8080", "admin", "admin").await?;
 
     dbg!(remote);
 

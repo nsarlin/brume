@@ -1,8 +1,10 @@
 //! An in-memory representation of a local or remote FileSystem
 
 pub mod dir_tree;
+pub mod virtual_path;
 
 pub use dir_tree::*;
+pub use virtual_path::*;
 
 /// The virtual representation of a file system, local or remote
 #[derive(Debug)]
