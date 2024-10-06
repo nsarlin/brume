@@ -1,18 +1,22 @@
 //! Utilities to parse a dav response
 
+use chrono::{DateTime, Utc};
 use reqwest_dav::list_cmd::ListEntity;
 
 use crate::{
-    vfs::{DirTree, FileInfo, TreeNode, Vfs, VirtualPath, VirtualPathError},
+    vfs::{DirTree, FileInfo, TreeNode, Vfs, VirtualPath, VirtualPathBuf, VirtualPathError},
     NC_DAV_PATH_STR,
 };
 
-use super::RemoteFsError;
+use super::{RemoteFsError, RemoteSyncInfo};
 
-impl From<VirtualPathError> for RemoteFsError {
-    fn from(value: VirtualPathError) -> Self {
-        Self::InvalidPath(value)
-    }
+/// Error encountered when parsing a tag in the WebDAV response
+#[derive(Debug)]
+pub enum TagError {
+    /// The tag was not present
+    MissingTag,
+    /// The tag was not a valid number
+    InvalidTag(String),
 }
 
 /// Build a vfs from a Dav response. This may fail if the response entities does not represent a
@@ -20,7 +24,7 @@ impl From<VirtualPathError> for RemoteFsError {
 pub(crate) fn dav_parse_vfs(
     mut entities: Vec<ListEntity>,
     folder_name: &str,
-) -> Result<Vfs, RemoteFsError> {
+) -> Result<Vfs<RemoteSyncInfo>, RemoteFsError> {
     // By sorting the paths lexicographically, we make sure that children nodes a right after the
     // directory that contain them.
     entities.sort_by(|ent_a, ent_b| {
@@ -54,11 +58,11 @@ pub(crate) fn dav_parse_vfs(
 /// this list have already been sorted in a way that a directory is directly followed by its
 /// children.
 fn dav_build_tree_inner<I: ExactSizeIterator<Item = DavEntity>>(
-    root: DirTree,
+    root: DirTree<RemoteSyncInfo>,
     entities: &mut I,
-) -> Result<DirTree, RemoteFsError> {
+) -> Result<DirTree<RemoteSyncInfo>, RemoteFsError> {
     // This is used to store the currently worked on stack of directories
-    let mut dirs: Vec<DirTree> = Vec::with_capacity(entities.len());
+    let mut dirs: Vec<DirTree<RemoteSyncInfo>> = Vec::with_capacity(entities.len());
     let mut current_dir = root;
 
     for entity in entities {
@@ -105,14 +109,19 @@ struct DavEntity {
     folder_name: String,
 }
 
-impl TryFrom<DavEntity> for TreeNode {
-    type Error = VirtualPathError;
+impl TryFrom<DavEntity> for TreeNode<RemoteSyncInfo> {
+    type Error = RemoteFsError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
         let name = value.name()?;
+        let tag = value.tag()?;
+        let last_modified = value.last_modified();
+
+        let sync = RemoteSyncInfo::new(last_modified, tag);
+
         match value.entity {
-            ListEntity::File(_) => Ok(TreeNode::File(FileInfo::new(name))),
-            ListEntity::Folder(_) => Ok(TreeNode::Dir(DirTree::new(name))),
+            ListEntity::File(_) => Ok(TreeNode::File(FileInfo::new(name, sync))),
+            ListEntity::Folder(_) => Ok(TreeNode::Dir(DirTree::new(name, sync))),
         }
     }
 }
@@ -137,14 +146,37 @@ impl DavEntity {
 
     /// Return the relative path of the entity from the "dav root", removing the dav url and the
     /// name of the folder.
-    fn path(&self) -> Result<VirtualPath, VirtualPathError> {
-        let dav_path: VirtualPath = self.href().try_into()?;
+    fn path(&self) -> Result<&VirtualPath, VirtualPathError> {
+        let dav_path: &VirtualPath = self.href().try_into()?;
+        // Ok to unwrap because NC_DAV_PATH is known to be valid
+        let mut path_to_folder = VirtualPathBuf::new(NC_DAV_PATH_STR).unwrap();
+        path_to_folder.push(&self.folder_name);
 
-        dav_path
-            // Ok to unwrap because NC_DAV_PATH is known to be valid
-            .chroot(&NC_DAV_PATH_STR.try_into().unwrap())?
-            .chroot(&format!("{}{}", "/", self.folder_name).as_str().try_into()?)
+        dav_path.chroot(&path_to_folder)
     }
+
+    fn tag(&self) -> Result<u128, TagError> {
+        let tag_opt = match &self.entity {
+            ListEntity::File(file) => file.tag.as_ref(),
+            ListEntity::Folder(folder) => folder.tag.as_ref(),
+        };
+
+        tag_opt
+            .ok_or(TagError::MissingTag)
+            .and_then(|tag| parse_dav_tag(tag).map_err(|_| TagError::InvalidTag(tag.to_string())))
+    }
+
+    fn last_modified(&self) -> DateTime<Utc> {
+        match &self.entity {
+            ListEntity::File(file) => file.last_modified,
+            ListEntity::Folder(folder) => folder.last_modified,
+        }
+    }
+}
+
+fn parse_dav_tag(tag: &str) -> Result<u128, ()> {
+    let trimmed = tag.trim_matches('"');
+    u128::from_str_radix(trimmed, 16).map_err(|_| ())
 }
 
 /// Return the relative url from the server root of the entity
@@ -159,20 +191,19 @@ fn dav_entity_href(entity: &ListEntity) -> &str {
 mod test {
     use reqwest_dav::list_cmd::ListEntity;
 
-    use crate::vfs::TreeNode;
-
     use super::dav_parse_vfs;
 
     #[test]
     fn test_parse_vfs() {
         use crate::test_utils::TestNode::{D, F};
-        let reference = TreeNode::from(&D(
+        let reference = D(
             "",
             vec![
                 D("Doc", vec![F("f1.md"), F("f2.pdf")]),
                 D("a", vec![D("b", vec![D("c", vec![])])]),
             ],
-        ));
+        )
+        .into_node();
 
         let dav_folder = "[
     Folder(

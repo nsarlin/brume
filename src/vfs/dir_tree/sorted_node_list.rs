@@ -3,16 +3,16 @@ use super::TreeNode;
 /// A list of nodes, sorted. This struct is a wrapper over a `Vec<TreeNode>` that keeps the sorting
 /// invariant.
 #[derive(Debug, Clone)]
-pub(super) struct SortedNodeList(Vec<TreeNode>);
+pub(super) struct SortedNodeList<SyncInfo>(Vec<TreeNode<SyncInfo>>);
 
-impl SortedNodeList {
+impl<SyncInfo> SortedNodeList<SyncInfo> {
     /// Creates a new empty list
     pub(super) fn new() -> Self {
         Self(Vec::new())
     }
 
     /// Creates a list from a vec of [`TreeNode`]
-    pub(super) fn from_vec(mut vec: Vec<TreeNode>) -> Self {
+    pub(super) fn from_vec(mut vec: Vec<TreeNode<SyncInfo>>) -> Self {
         // Sort and remove duplicates
         vec.sort_by(TreeNode::name_cmp);
         vec.dedup_by(|a, b| a.name_eq(b));
@@ -24,7 +24,7 @@ impl SortedNodeList {
     ///
     /// Return false if there is already a node with this name and the provided node was not
     /// inserted. Returns true otherwise.
-    pub(super) fn insert(&mut self, value: TreeNode) -> bool {
+    pub(super) fn insert(&mut self, value: TreeNode<SyncInfo>) -> bool {
         match self
             .0
             .binary_search_by(|candidate| candidate.name_cmp(&value))
@@ -37,10 +37,22 @@ impl SortedNodeList {
         }
     }
 
+    /// Returns the length of the list
+    pub(super) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns an iterator over [`TreeNode`], by reference.
+    pub(super) fn iter(&self) -> std::slice::Iter<TreeNode<SyncInfo>> {
+        self.0.iter()
+    }
+}
+
+impl<SyncInfo: Clone> SortedNodeList<SyncInfo> {
     /// Insert a new [`TreeNode`] inside an existing list, and eventually overwrite exisisting node.
     ///
     /// Return the replaced node if present, or None if there was no node with this name.
-    pub(super) fn replace(&mut self, value: TreeNode) -> Option<TreeNode> {
+    pub(super) fn replace(&mut self, value: TreeNode<SyncInfo>) -> Option<TreeNode<SyncInfo>> {
         match self
             .0
             .binary_search_by(|candidate| candidate.name_cmp(&value))
@@ -56,24 +68,11 @@ impl SortedNodeList {
             }
         }
     }
-
-    /// Returns the length of the list
-    pub(super) fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns an iterator over [`TreeNode`], by reference.
-    pub(super) fn iter(&self) -> std::slice::Iter<TreeNode> {
-        self.0.iter()
-    }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        test_utils::TestNode::{D, F},
-        vfs::TreeNode,
-    };
+    use crate::test_utils::TestNode::{D, F};
 
     use super::SortedNodeList;
 
@@ -88,14 +87,14 @@ mod test {
             D("b", vec![]),
         ]
         .iter()
-        .map(TreeNode::from)
+        .map(|val| val.into_node())
         .collect();
 
         let list = SortedNodeList::from_vec(test_nodes);
 
         let reference: Vec<_> = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
             .iter()
-            .map(TreeNode::from)
+            .map(|val| val.into_node())
             .collect();
 
         assert!(list
@@ -109,15 +108,15 @@ mod test {
     fn test_insertion() {
         let test_nodes = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
             .iter()
-            .map(TreeNode::from)
+            .map(|val| val.into_node())
             .collect();
 
         let mut list = SortedNodeList::from_vec(test_nodes);
 
-        assert!(!list.insert(F("b").into()));
-        assert!(list.insert(D("e", vec![]).into()));
-        assert!(!list.insert(D("a", vec![]).into()));
-        assert!(list.insert(F("f3").into()));
+        assert!(!list.insert(F("b").into_node()));
+        assert!(list.insert(D("e", vec![]).into_node()));
+        assert!(!list.insert(D("a", vec![]).into_node()));
+        assert!(list.insert(F("f3").into_node()));
 
         let reference: Vec<_> = vec![
             D("a", vec![]),
@@ -128,7 +127,7 @@ mod test {
             F("f3"),
         ]
         .iter()
-        .map(TreeNode::from)
+        .map(|val| val.into_node())
         .collect();
 
         assert!(list
@@ -142,15 +141,15 @@ mod test {
     fn test_replacement() {
         let test_nodes = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
             .iter()
-            .map(TreeNode::from)
+            .map(|val| val.into_node())
             .collect();
 
         let mut list = SortedNodeList::from_vec(test_nodes);
 
-        assert!(list.replace(F("b").into()).is_some());
-        assert!(list.replace(D("e", vec![]).into()).is_none());
-        assert!(list.replace(D("a", vec![]).into()).is_some());
-        assert!(list.replace(F("f3").into()).is_none());
+        assert!(list.replace(F("b").into_node()).is_some());
+        assert!(list.replace(D("e", vec![]).into_node()).is_none());
+        assert!(list.replace(D("a", vec![]).into_node()).is_some());
+        assert!(list.replace(F("f3").into_node()).is_none());
 
         let reference: Vec<_> = vec![
             D("a", vec![]),
@@ -161,7 +160,7 @@ mod test {
             F("f3"),
         ]
         .iter()
-        .map(TreeNode::from)
+        .map(|val| val.into_node())
         .collect();
 
         assert!(list
