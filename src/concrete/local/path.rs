@@ -114,10 +114,9 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
 mod test {
     use chrono::Utc;
 
-    use crate::{
-        local::{path::node_from_path_rec, LocalSyncInfo},
-        vfs::{DirTree, TreeNode},
-    };
+    use super::*;
+
+    use crate::vfs::{DirTree, TreeNode};
 
     #[test]
     fn test_parse_path() {
