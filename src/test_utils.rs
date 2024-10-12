@@ -1,7 +1,7 @@
 use std::{ffi::OsStr, io, time::SystemTime};
 
 use crate::{
-    local::path::LocalPath,
+    concrete::local::path::LocalPath,
     vfs::{DirTree, FileInfo, IsModified, ModificationState, TreeNode},
 };
 

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use path::{node_from_path_rec, LocalPath};
 
 use crate::{
-    remote::RemoteSyncInfo,
+    concrete::remote::RemoteSyncInfo,
     vfs::{DirTree, FileInfo, IsModified, ModificationState, TreeNode, Vfs},
     Error,
 };

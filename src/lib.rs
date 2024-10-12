@@ -1,5 +1,4 @@
-pub mod local;
-pub mod remote;
+pub mod concrete;
 #[cfg(test)]
 mod test_utils;
 pub mod vfs;

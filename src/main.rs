@@ -1,4 +1,4 @@
-use ncclient::remote::{RemoteFs, RemoteFsError};
+use ncclient::concrete::remote::{RemoteFs, RemoteFsError};
 
 #[tokio::main]
 async fn main() -> Result<(), RemoteFsError> {
