@@ -20,8 +20,8 @@ jobs:
     - name: Build
       run: cargo build
     - name: Format
-      run: cargo +nightly fmt
+      run: cargo +nightly fmt --check --all
     - name: Clippy
-      run: cargo clippy
+      run: cargo clippy --all-targets
     - name: Run tests
       run: cargo test

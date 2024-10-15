@@ -14,7 +14,7 @@ pub(crate) enum TestNode {
 }
 
 impl TestNode {
-    pub(crate) fn into_node_recursive_diff(&self) -> TreeNode<RecursiveTestSyncInfo> {
+    pub(crate) fn into_node_recursive_diff(self) -> TreeNode<RecursiveTestSyncInfo> {
         match self {
             TestNode::F(name) => {
                 let sync = RecursiveTestSyncInfo::new(0);
@@ -26,22 +26,22 @@ impl TestNode {
                     name,
                     sync,
                     children
-                        .iter()
+                        .into_iter()
                         .map(|child| child.into_node_recursive_diff())
                         .collect(),
                 ))
             }
             TestNode::FH(name, hash) => {
-                let sync = RecursiveTestSyncInfo::new(*hash);
+                let sync = RecursiveTestSyncInfo::new(hash);
                 TreeNode::File(FileInfo::new(name, sync))
             }
             TestNode::DH(name, hash, children) => {
-                let sync = RecursiveTestSyncInfo::new(*hash);
+                let sync = RecursiveTestSyncInfo::new(hash);
                 TreeNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
                     children
-                        .iter()
+                        .into_iter()
                         .map(|child| child.into_node_recursive_diff())
                         .collect(),
                 ))
@@ -49,11 +49,11 @@ impl TestNode {
         }
     }
 
-    pub(crate) fn into_node(&self) -> TreeNode<ShallowTestSyncInfo> {
+    pub(crate) fn into_node(self) -> TreeNode<ShallowTestSyncInfo> {
         self.into_node_shallow_diff()
     }
 
-    pub(crate) fn into_node_shallow_diff(&self) -> TreeNode<ShallowTestSyncInfo> {
+    pub(crate) fn into_node_shallow_diff(self) -> TreeNode<ShallowTestSyncInfo> {
         match self {
             TestNode::F(name) => {
                 let sync = ShallowTestSyncInfo::new(0);
@@ -64,25 +64,31 @@ impl TestNode {
                 TreeNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
-                    children.iter().map(|child| child.into_node()).collect(),
+                    children
+                        .into_iter()
+                        .map(|child| child.into_node())
+                        .collect(),
                 ))
             }
             TestNode::FH(name, hash) => {
-                let sync = ShallowTestSyncInfo::new(*hash);
+                let sync = ShallowTestSyncInfo::new(hash);
                 TreeNode::File(FileInfo::new(name, sync))
             }
             TestNode::DH(name, hash, children) => {
-                let sync = ShallowTestSyncInfo::new(*hash);
+                let sync = ShallowTestSyncInfo::new(hash);
                 TreeNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
-                    children.iter().map(|child| child.into_node()).collect(),
+                    children
+                        .into_iter()
+                        .map(|child| child.into_node())
+                        .collect(),
                 ))
             }
         }
     }
 
-    pub(crate) fn into_dir_recursive_diff(&self) -> DirTree<RecursiveTestSyncInfo> {
+    pub(crate) fn into_dir_recursive_diff(self) -> DirTree<RecursiveTestSyncInfo> {
         match self {
             TestNode::F(_) => {
                 panic!()
@@ -94,7 +100,7 @@ impl TestNode {
                     name,
                     sync,
                     children
-                        .iter()
+                        .into_iter()
                         .map(|child| child.into_node_recursive_diff())
                         .collect(),
                 )
@@ -103,12 +109,12 @@ impl TestNode {
                 panic!()
             }
             TestNode::DH(name, hash, children) => {
-                let sync = RecursiveTestSyncInfo::new(*hash);
+                let sync = RecursiveTestSyncInfo::new(hash);
                 DirTree::new_with_children(
                     name,
                     sync,
                     children
-                        .iter()
+                        .into_iter()
                         .map(|child| child.into_node_recursive_diff())
                         .collect(),
                 )
@@ -116,11 +122,11 @@ impl TestNode {
         }
     }
 
-    pub(crate) fn _into_dir(&self) -> DirTree<ShallowTestSyncInfo> {
+    pub(crate) fn _into_dir(self) -> DirTree<ShallowTestSyncInfo> {
         self.into_dir_shallow_diff()
     }
 
-    pub(crate) fn into_dir_shallow_diff(&self) -> DirTree<ShallowTestSyncInfo> {
+    pub(crate) fn into_dir_shallow_diff(self) -> DirTree<ShallowTestSyncInfo> {
         match self {
             TestNode::F(_) => {
                 panic!()
@@ -130,18 +136,24 @@ impl TestNode {
                 DirTree::new_with_children(
                     name,
                     sync,
-                    children.iter().map(|child| child.into_node()).collect(),
+                    children
+                        .into_iter()
+                        .map(|child| child.into_node())
+                        .collect(),
                 )
             }
             TestNode::FH(_, _) => {
                 panic!()
             }
             TestNode::DH(name, hash, children) => {
-                let sync = ShallowTestSyncInfo::new(*hash);
+                let sync = ShallowTestSyncInfo::new(hash);
                 DirTree::new_with_children(
                     name,
                     sync,
-                    children.iter().map(|child| child.into_node()).collect(),
+                    children
+                        .into_iter()
+                        .map(|child| child.into_node())
+                        .collect(),
                 )
             }
         }
@@ -184,7 +196,7 @@ impl LocalPath for TestNode {
                 "expected a dir",
             )),
             TestNode::D(_, children) | TestNode::DH(_, _, children) => {
-                Ok(children.iter().cloned().map(|val| Ok(val)))
+                Ok(children.iter().cloned().map(Ok))
             }
         }
     }
