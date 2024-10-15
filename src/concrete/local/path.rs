@@ -127,13 +127,13 @@ mod test {
             D("a", vec![D("b", vec![D("c", vec![])])]),
         ];
 
-        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now().into()));
+        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
         node_from_path_rec(&mut root, &base).unwrap();
 
         let parsed = TreeNode::Dir(root);
 
         let reference = &D("", base).into_node();
 
-        assert!(parsed.structural_eq(&reference));
+        assert!(parsed.structural_eq(reference));
     }
 }

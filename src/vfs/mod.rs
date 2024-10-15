@@ -8,30 +8,30 @@ pub use diff::*;
 pub use dir_tree::*;
 pub use virtual_path::*;
 
+use crate::concrete::ConcreteFS;
+
 /// The virtual representation of a file system, local or remote.
 ///
 /// `SyncInfo` is a metadata type that will be stored with FS nodes and used for more efficient VFS
 /// comparison, using their implementation of the [`IsModified`] trait.
 #[derive(Debug)]
-pub struct Vfs<SyncInfo> {
-    _dir_name: String,
-    root: TreeNode<SyncInfo>,
+pub struct Vfs<Concrete: ConcreteFS> {
+    concrete: Concrete,
+    root: TreeNode<Concrete::SyncInfo>,
 }
 
-impl<SyncInfo> Vfs<SyncInfo> {
+impl<Concrete: ConcreteFS> Vfs<Concrete> {
     /// Return the root node of the VFS
-    pub fn root(&self) -> &TreeNode<SyncInfo> {
+    pub fn root(&self) -> &TreeNode<Concrete::SyncInfo> {
         &self.root
     }
 
     /// Structural comparison of two VFS, looking at the names of files and directories, but
     /// ignoring the content of files.
-    pub fn structural_eq<OtherSyncInfo>(&self, other: &Vfs<OtherSyncInfo>) -> bool {
+    pub fn structural_eq<OtherConcrete: ConcreteFS>(&self, other: &Vfs<OtherConcrete>) -> bool {
         self.root.structural_eq(other.root())
     }
-}
 
-impl<SyncInfo: Clone> Vfs<SyncInfo> {
     /// Diff two VFS by comparing their nodes.
     ///
     /// This function returns a list of differences.
@@ -39,22 +39,24 @@ impl<SyncInfo: Clone> Vfs<SyncInfo> {
     /// [`modification_state`]. The result of the SyncInfo comparison on node is trusted.
     ///
     /// [`modification_state`]: IsModified::modification_state
-    pub fn diff<OtherSyncInfo: IsModified<SyncInfo> + Clone>(
+    pub fn diff<OtherConcrete: ConcreteFS>(
         &self,
-        other: &Vfs<OtherSyncInfo>,
-    ) -> Result<Vec<VfsNodeDiff<OtherSyncInfo>>, DiffError>
+        other: &Vfs<OtherConcrete>,
+    ) -> Result<Vec<VfsNodeDiff<OtherConcrete::SyncInfo>>, DiffError>
     where
-        SyncInfo: IsModified<OtherSyncInfo>,
+        Concrete::SyncInfo: IsModified<OtherConcrete::SyncInfo> + Clone,
+        OtherConcrete::SyncInfo: Clone,
     {
         self.root.diff(other.root(), VirtualPath::root())
     }
+
+    pub fn concrete(&self) -> &Concrete {
+        &self.concrete
+    }
 }
 
-impl<SyncInfo> Vfs<SyncInfo> {
-    pub fn new(name: &str, root: TreeNode<SyncInfo>) -> Self {
-        Self {
-            _dir_name: name.to_string(),
-            root,
-        }
+impl<Concrete: ConcreteFS> Vfs<Concrete> {
+    pub fn new(concrete: Concrete, root: TreeNode<Concrete::SyncInfo>) -> Self {
+        Self { concrete, root }
     }
 }

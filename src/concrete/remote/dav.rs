@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use reqwest_dav::list_cmd::ListEntity;
 
 use crate::{
-    vfs::{DirTree, FileInfo, TreeNode, Vfs, VirtualPath, VirtualPathBuf, VirtualPathError},
+    vfs::{DirTree, FileInfo, TreeNode, VirtualPath, VirtualPathBuf, VirtualPathError},
     NC_DAV_PATH_STR,
 };
 
@@ -24,7 +24,7 @@ pub enum TagError {
 pub(crate) fn dav_parse_vfs(
     mut entities: Vec<ListEntity>,
     folder_name: &str,
-) -> Result<Vfs<RemoteSyncInfo>, RemoteFsError> {
+) -> Result<TreeNode<RemoteSyncInfo>, RemoteFsError> {
     // By sorting the paths lexicographically, we make sure that children nodes a right after the
     // directory that contain them.
     entities.sort_by(|ent_a, ent_b| {
@@ -51,7 +51,7 @@ pub(crate) fn dav_parse_vfs(
         TreeNode::Dir(root) => TreeNode::Dir(dav_build_tree_inner(root, &mut entities_iter)?),
     };
 
-    Ok(Vfs::new(folder_name, root))
+    Ok(root)
 }
 
 /// Build the tree-like structure of a VFS from a flat list of paths. This function assumes that
@@ -275,7 +275,7 @@ mod test {
 
         let res = dav_parse_vfs(elements, "admin").unwrap();
 
-        assert!(res.root().structural_eq(&reference))
+        assert!(res.structural_eq(&reference))
     }
 
     #[test]

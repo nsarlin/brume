@@ -86,14 +86,14 @@ mod test {
             F("a"),
             D("b", vec![]),
         ]
-        .iter()
+        .into_iter()
         .map(|val| val.into_node())
         .collect();
 
         let list = SortedNodeList::from_vec(test_nodes);
 
         let reference: Vec<_> = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
-            .iter()
+            .into_iter()
             .map(|val| val.into_node())
             .collect();
 
@@ -107,7 +107,7 @@ mod test {
     #[test]
     fn test_insertion() {
         let test_nodes = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
-            .iter()
+            .into_iter()
             .map(|val| val.into_node())
             .collect();
 
@@ -126,7 +126,7 @@ mod test {
             F("f2"),
             F("f3"),
         ]
-        .iter()
+        .into_iter()
         .map(|val| val.into_node())
         .collect();
 
@@ -140,7 +140,7 @@ mod test {
     #[test]
     fn test_replacement() {
         let test_nodes = [D("a", vec![]), D("b", vec![]), F("f1"), F("f2")]
-            .iter()
+            .into_iter()
             .map(|val| val.into_node())
             .collect();
 
@@ -159,7 +159,7 @@ mod test {
             F("f2"),
             F("f3"),
         ]
-        .iter()
+        .into_iter()
         .map(|val| val.into_node())
         .collect();
 

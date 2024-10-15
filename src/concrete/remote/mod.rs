@@ -1,16 +1,19 @@
 //! Manipulation of a remote filesystem with WebDAV
 
+use bytes::Buf;
 use chrono::{DateTime, Utc};
-use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
+use reqwest_dav::{re_exports::reqwest, Auth, Client, ClientBuilder, Depth};
 
 mod dav;
 
 use crate::{
-    vfs::{IsModified, ModificationState, Vfs, VirtualPathError},
+    vfs::{IsModified, ModificationState, Vfs, VirtualPath, VirtualPathError},
     NC_DAV_PATH_STR,
 };
 
 use dav::{dav_parse_vfs, TagError};
+
+use super::ConcreteFS;
 
 /// An error during synchronisation with the remote file system
 #[derive(Debug)]
@@ -31,6 +34,12 @@ impl From<reqwest_dav::Error> for RemoteFsError {
     }
 }
 
+impl From<reqwest::Error> for RemoteFsError {
+    fn from(value: reqwest::Error) -> Self {
+        Self::ProtocolError(value.into())
+    }
+}
+
 impl From<VirtualPathError> for RemoteFsError {
     fn from(value: VirtualPathError) -> Self {
         Self::InvalidPath(value)
@@ -46,26 +55,58 @@ impl From<TagError> for RemoteFsError {
 /// The remote FileSystem, accessed with the dav protocol
 #[derive(Debug)]
 pub struct RemoteFs {
-    _client: Client,
-    _vfs: Vfs<RemoteSyncInfo>,
+    client: Client,
+    name: String,
 }
 
 impl RemoteFs {
-    pub async fn new(url: &str, login: &str, password: &str) -> Result<Self, RemoteFsError> {
+    pub fn new(url: &str, login: &str, password: &str) -> Result<Self, RemoteFsError> {
         let name = login.to_string();
         let client = ClientBuilder::new()
             .set_host(format!("{}{}{}/", url, NC_DAV_PATH_STR, &name))
             .set_auth(Auth::Basic(login.to_string(), password.to_string()))
             .build()?;
 
-        let elements = client.list("", Depth::Infinity).await?;
-
-        let vfs = dav_parse_vfs(elements, &name)?;
-
         Ok(Self {
-            _client: client,
-            _vfs: vfs,
+            client,
+            name: name.to_string(),
         })
+    }
+}
+
+impl ConcreteFS for RemoteFs {
+    type SyncInfo = RemoteSyncInfo;
+
+    type Error = RemoteFsError;
+
+    async fn load_virtual(self) -> Result<Vfs<Self>, Self::Error> {
+        let elements = self.client.list("", Depth::Infinity).await?;
+
+        let vfs_root = dav_parse_vfs(elements, &self.name)?;
+
+        Ok(Vfs::new(self, vfs_root))
+    }
+
+    async fn open(&self, path: &VirtualPath) -> Result<impl std::io::Read, Self::Error> {
+        Ok(self.client.get(path.into()).await?.bytes().await?.reader())
+    }
+
+    async fn write<Stream: std::io::Read>(
+        &self,
+        path: &VirtualPath,
+        data: &mut Stream,
+    ) -> Result<(), Self::Error> {
+        let mut buf = Vec::new();
+
+        data.read_to_end(&mut buf).unwrap(); // TODO: handle io error
+        self.client
+            .put(path.into(), buf)
+            .await
+            .map_err(|e| e.into())
+    }
+
+    async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        self.client.mkcol(path.into()).await.map_err(|e| e.into())
     }
 }
 

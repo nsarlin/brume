@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, ops::Deref};
+use std::{borrow::Borrow, ops::Deref, path::Path};
 
 /// A wrapper type that allows doing path operations on strings, without considerations for any
 /// concrete file system. These paths are supposed to be absolute and should start with a '/'.
@@ -137,6 +137,12 @@ impl<'a> PartialEq<&'a VirtualPath> for VirtualPathBuf {
 impl<'a> PartialEq<VirtualPathBuf> for &'a VirtualPath {
     fn eq(&self, other: &VirtualPathBuf) -> bool {
         self.path == other.path
+    }
+}
+
+impl AsRef<Path> for VirtualPath {
+    fn as_ref(&self) -> &Path {
+        self.path.as_ref()
     }
 }
 

@@ -2,47 +2,67 @@
 
 pub mod path;
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use path::{node_from_path_rec, LocalPath};
 
 use crate::{
     concrete::remote::RemoteSyncInfo,
-    vfs::{DirTree, FileInfo, IsModified, ModificationState, TreeNode, Vfs},
+    vfs::{DirTree, FileInfo, IsModified, ModificationState, TreeNode, Vfs, VirtualPath},
     Error,
 };
+
+use super::ConcreteFS;
 
 /// Represent a local directory and its content
 #[derive(Debug)]
 pub struct LocalDir {
-    _path: PathBuf,
-    _vfs: Vfs<LocalSyncInfo>,
+    path: PathBuf,
 }
 
 impl LocalDir {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let path = path.as_ref();
-        let sync = LocalSyncInfo::new(path.modification_time().map_err(|_| Error)?.into());
-        let root = if path.is_file() {
+
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl ConcreteFS for LocalDir {
+    type SyncInfo = LocalSyncInfo;
+
+    type Error = Error;
+
+    async fn load_virtual(self) -> Result<Vfs<Self>, Self::Error> {
+        let sync = LocalSyncInfo::new(self.path.modification_time().map_err(|_| Error)?.into());
+        let root = if self.path.is_file() {
             TreeNode::File(FileInfo::new(
-                path.file_name().and_then(|s| s.to_str()).ok_or(Error)?,
+                self.path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or(Error)?,
                 sync,
             ))
-        } else if path.is_dir() {
+        } else if self.path.is_dir() {
             let mut root = DirTree::new(
-                path.file_name().and_then(|s| s.to_str()).ok_or(Error)?,
+                self.path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or(Error)?,
                 sync,
             );
             node_from_path_rec(
                 &mut root,
-                &path
+                &self
+                    .path
                     .read_dir()
-                    .map(|entry_iter| {
-                        entry_iter
-                            .into_iter()
-                            .map(|entry_res| entry_res.map(|entry| entry.path()))
-                    })
                     .map_err(|_| Error)?
                     .map(|entry| entry.unwrap())
                     .collect::<Vec<_>>(),
@@ -52,13 +72,29 @@ impl LocalDir {
             return Err(Error);
         };
 
-        Ok(Self {
-            _path: path.to_path_buf(),
-            _vfs: Vfs::new(
-                path.file_name().and_then(|s| s.to_str()).ok_or(Error)?,
-                root,
-            ),
-        })
+        Ok(Vfs::new(self, root))
+    }
+
+    async fn open(&self, path: &VirtualPath) -> Result<impl std::io::Read, Self::Error> {
+        File::open(self.path.join(path)).map_err(|_| Error)
+    }
+
+    // TODO: rewrite using tokio::fs
+    async fn write<Stream: std::io::Read>(
+        &self,
+        path: &VirtualPath,
+        data: &mut Stream,
+    ) -> Result<(), Self::Error> {
+        let mut f = File::create(self.path.join(path)).map_err(|_| Error)?;
+        let mut buf = Vec::new();
+
+        data.read_to_end(&mut buf).unwrap(); // TODO: handle io error
+
+        f.write_all(&buf).map_err(|_| Error)
+    }
+
+    async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        fs::create_dir(self.path.join(path)).map_err(|_| Error)
     }
 }
 
