@@ -1,7 +1,8 @@
 use std::{
     ffi::OsStr,
-    fs::{self},
-    io,
+    fmt::Debug,
+    fs,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -14,13 +15,17 @@ use crate::{
 use super::LocalSyncInfo;
 
 /// A path mapped to a local file-system that can be queried.
-pub(crate) trait LocalPath {
+pub(crate) trait LocalPath: Debug {
     type DirEntry: LocalPath;
     fn is_file(&self) -> bool;
     fn is_dir(&self) -> bool;
     fn file_name(&self) -> Option<&OsStr>;
     fn read_dir(&self) -> io::Result<impl Iterator<Item = io::Result<Self::DirEntry>>>;
     fn modification_time(&self) -> io::Result<SystemTime>;
+
+    fn invalid_path_error(&self) -> io::Error {
+        io::Error::new(ErrorKind::InvalidData, format!("Invalid path: {self:?}"))
+    }
 }
 
 impl LocalPath for Path {
@@ -73,37 +78,34 @@ impl LocalPath for PathBuf {
     }
 }
 
-/// Creates a VFS node by recursively scanning a path
+/// Creates a VFS node by recursively scanning a list of path
 pub(crate) fn node_from_path_rec<P: LocalPath>(
     parent: &mut DirTree<LocalSyncInfo>,
     children: &[P],
 ) -> Result<(), Error> {
     for path in children {
-        let sync = LocalSyncInfo::new(path.modification_time().map_err(|_| Error)?.into());
+        let sync = LocalSyncInfo::new(path.modification_time()?.into());
         if path.is_file() {
             let node = TreeNode::File(FileInfo::new(
-                path.file_name().and_then(|s| s.to_str()).ok_or(Error)?,
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or(path.invalid_path_error())?,
                 sync,
             ));
             parent.insert_child(node);
         } else if path.is_dir() {
             let mut node = DirTree::new(
-                path.file_name().and_then(|s| s.to_str()).ok_or(Error)?,
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or(path.invalid_path_error())?,
                 sync,
             );
 
-            node_from_path_rec(
-                &mut node,
-                &path
-                    .read_dir()
-                    .map_err(|_| Error)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| Error)?,
-            )?;
+            node_from_path_rec(&mut node, &path.read_dir()?.collect::<Result<Vec<_>, _>>()?)?;
 
             parent.insert_child(TreeNode::Dir(node));
         } else {
-            return Err(Error);
+            return Err(path.invalid_path_error().into());
         }
     }
 

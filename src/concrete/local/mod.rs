@@ -4,15 +4,15 @@ pub mod path;
 
 use std::{
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
 use path::{node_from_path_rec, LocalPath};
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    concrete::remote::RemoteSyncInfo,
     vfs::{DirTree, FileInfo, IsModified, ModificationState, TreeNode, Vfs, VirtualPath},
     Error,
 };
@@ -40,43 +40,34 @@ impl ConcreteFS for LocalDir {
 
     type Error = Error;
 
-    async fn load_virtual(self) -> Result<Vfs<Self>, Self::Error> {
-        let sync = LocalSyncInfo::new(self.path.modification_time().map_err(|_| Error)?.into());
+    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
+        let sync = LocalSyncInfo::new(self.path.modification_time()?.into());
         let root = if self.path.is_file() {
             TreeNode::File(FileInfo::new(
                 self.path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .ok_or(Error)?,
+                    .ok_or(self.path.invalid_path_error())?,
                 sync,
             ))
         } else if self.path.is_dir() {
-            let mut root = DirTree::new(
-                self.path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .ok_or(Error)?,
-                sync,
-            );
-            node_from_path_rec(
-                &mut root,
-                &self
-                    .path
-                    .read_dir()
-                    .map_err(|_| Error)?
-                    .map(|entry| entry.unwrap())
-                    .collect::<Vec<_>>(),
-            )?;
+            let mut root = DirTree::new("", sync);
+            let children = self
+                .path
+                .read_dir()?
+                .map(|entry| entry.unwrap())
+                .collect::<Vec<_>>();
+            node_from_path_rec(&mut root, &children)?;
             TreeNode::Dir(root)
         } else {
-            return Err(Error);
+            return Err(self.path.invalid_path_error().into());
         };
 
-        Ok(Vfs::new(self, root))
+        Ok(Vfs::new(root))
     }
 
     async fn open(&self, path: &VirtualPath) -> Result<impl std::io::Read, Self::Error> {
-        File::open(self.path.join(path)).map_err(|_| Error)
+        File::open(self.path.join(path)).map_err(|e| e.into())
     }
 
     // TODO: rewrite using tokio::fs
@@ -85,16 +76,24 @@ impl ConcreteFS for LocalDir {
         path: &VirtualPath,
         data: &mut Stream,
     ) -> Result<(), Self::Error> {
-        let mut f = File::create(self.path.join(path)).map_err(|_| Error)?;
+        let mut f = File::create(self.path.join(path))?;
         let mut buf = Vec::new();
 
-        data.read_to_end(&mut buf).unwrap(); // TODO: handle io error
+        data.read_to_end(&mut buf)?;
 
-        f.write_all(&buf).map_err(|_| Error)
+        f.write_all(&buf).map_err(|e| e.into())
     }
 
     async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
-        fs::create_dir(self.path.join(path)).map_err(|_| Error)
+        fs::create_dir(self.path.join(path)).map_err(|e| e.into())
+    }
+
+    async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
+        let mut reader = self.open(path).await?;
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+
+        Ok(xxh3_64(&data))
     }
 }
 
@@ -104,7 +103,7 @@ impl ConcreteFS for LocalDir {
 /// handle the recursion ourselves.
 #[derive(Debug, Clone)]
 pub struct LocalSyncInfo {
-    pub last_modified: DateTime<Utc>,
+    last_modified: DateTime<Utc>,
 }
 
 impl LocalSyncInfo {
@@ -123,12 +122,12 @@ impl IsModified<Self> for LocalSyncInfo {
     }
 }
 
-impl IsModified<RemoteSyncInfo> for LocalSyncInfo {
-    fn modification_state(&self, reference: &RemoteSyncInfo) -> ModificationState {
-        if self.last_modified != reference.last_modified() {
-            ModificationState::Modified
-        } else {
-            ModificationState::ShallowUnmodified
-        }
+impl<'a> From<&'a LocalSyncInfo> for LocalSyncInfo {
+    fn from(value: &'a LocalSyncInfo) -> Self {
+        value.to_owned()
     }
+}
+
+impl<'a> From<&'a LocalSyncInfo> for () {
+    fn from(_value: &'a LocalSyncInfo) -> Self {}
 }

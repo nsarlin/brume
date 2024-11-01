@@ -1,8 +1,10 @@
 //! Manipulation of a remote filesystem with WebDAV
 
+use std::io::{self, Read};
+
 use bytes::Buf;
-use chrono::{DateTime, Utc};
 use reqwest_dav::{re_exports::reqwest, Auth, Client, ClientBuilder, Depth};
+use xxhash_rust::xxh3::xxh3_64;
 
 mod dav;
 
@@ -26,6 +28,8 @@ pub enum RemoteFsError {
     BadStructure,
     /// A dav protocol error occured during communication with the remote server
     ProtocolError(reqwest_dav::Error),
+    /// Io error while sending or receiving a file
+    IoError(io::Error),
 }
 
 impl From<reqwest_dav::Error> for RemoteFsError {
@@ -49,6 +53,12 @@ impl From<VirtualPathError> for RemoteFsError {
 impl From<TagError> for RemoteFsError {
     fn from(value: TagError) -> Self {
         Self::InvalidTag(value)
+    }
+}
+
+impl From<io::Error> for RemoteFsError {
+    fn from(value: io::Error) -> Self {
+        Self::IoError(value)
     }
 }
 
@@ -79,12 +89,12 @@ impl ConcreteFS for RemoteFs {
 
     type Error = RemoteFsError;
 
-    async fn load_virtual(self) -> Result<Vfs<Self>, Self::Error> {
+    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
         let elements = self.client.list("", Depth::Infinity).await?;
 
         let vfs_root = dav_parse_vfs(elements, &self.name)?;
 
-        Ok(Vfs::new(self, vfs_root))
+        Ok(Vfs::new(vfs_root))
     }
 
     async fn open(&self, path: &VirtualPath) -> Result<impl std::io::Read, Self::Error> {
@@ -108,33 +118,32 @@ impl ConcreteFS for RemoteFs {
     async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
         self.client.mkcol(path.into()).await.map_err(|e| e.into())
     }
+
+    async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
+        let mut reader = self.open(path).await?;
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+
+        Ok(xxh3_64(&data))
+    }
 }
 
 /// Metadata used to detect modifications of a remote FS node
 ///
 /// If possible, the nodes are compared using the nextcloud [etag] field, which is modified by the
 /// server if a node or its content is modified. When comparing to a [`LocalSyncInfo`] which does
-/// not have this tag, we resort to the modification time.
+/// not have this tag, we resort to the modification time (*TODO*: not true anymore).
 ///
 /// [etag]: https://docs.nextcloud.com/desktop/3.13/architecture.html#synchronization-by-time-versus-etag
-/// [`LocalSyncInfo`]: crate::local::LocalSyncInfo
+/// [`LocalSyncInfo`]: crate::concrete::local::LocalSyncInfo
 #[derive(Debug, Clone)]
 pub struct RemoteSyncInfo {
-    last_modified: DateTime<Utc>,
     tag: u128,
 }
 
 impl RemoteSyncInfo {
-    pub fn new(last_modified: DateTime<Utc>, tag: u128) -> Self {
-        Self { last_modified, tag }
-    }
-
-    pub fn last_modified(&self) -> DateTime<Utc> {
-        self.last_modified
-    }
-
-    pub fn tag(&self) -> u128 {
-        self.tag
+    pub fn new(tag: u128) -> Self {
+        Self { tag }
     }
 }
 
@@ -146,4 +155,14 @@ impl IsModified<Self> for RemoteSyncInfo {
             ModificationState::RecursiveUnmodified
         }
     }
+}
+
+impl<'a> From<&'a RemoteSyncInfo> for RemoteSyncInfo {
+    fn from(value: &'a RemoteSyncInfo) -> Self {
+        value.to_owned()
+    }
+}
+
+impl<'a> From<&'a RemoteSyncInfo> for () {
+    fn from(_value: &'a RemoteSyncInfo) -> Self {}
 }
