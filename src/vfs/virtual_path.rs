@@ -1,3 +1,5 @@
+//! Representation of path objects that are not necessarily linked to the local filesystem.
+
 use std::{borrow::Borrow, ops::Deref, path::Path};
 
 /// A wrapper type that allows doing path operations on strings, without considerations for any
@@ -19,6 +21,21 @@ impl VirtualPath {
     pub const fn root() -> &'static Self {
         // safety: because of `#[repr(transparent)]`, &'a str can be safely converted to &'a Self
         unsafe { &*("/" as *const str as *const Self) }
+    }
+
+    /// Check if this path represent a "root"
+    pub fn is_root(&self) -> bool {
+        &self.path == "/"
+    }
+
+    /// Return the number of elements in the path
+    pub fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    /// alias for [`Self::is_root`]
+    pub fn is_empty(&self) -> bool {
+        self.is_root()
     }
 
     /// Create a path from a &str, without any validation
@@ -50,7 +67,18 @@ impl VirtualPath {
         }
     }
 
-    /// Returns the name of the element pointed by this path
+    /// Return true if the node pointed by "self" is contained in "other", eventualy recursively
+    pub fn is_inside(&self, other: &VirtualPath) -> bool {
+        if let Some(suffix) = self.path.strip_prefix(other.trimmed_path()) {
+            // Check for false positives caused by files that are in the same dir and start with the
+            // same name. For example: /some/file and /some/file_long should return false
+            suffix.starts_with('/')
+        } else {
+            false
+        }
+    }
+
+    /// Return the name of the element pointed by this path
     pub fn name(&self) -> &str {
         let path = self.trimmed_path();
 
@@ -61,7 +89,7 @@ impl VirtualPath {
             .unwrap_or("")
     }
 
-    /// Returns the parent of this path, if any
+    /// Return the parent of this path, if any
     pub fn parent(&self) -> Option<&Self> {
         let path = self.trimmed_path();
 
@@ -73,6 +101,58 @@ impl VirtualPath {
                 prefix.try_into().unwrap()
             }
         })
+    }
+
+    /// Return the top level directory of this path, for example "a" in "/a/b/c". Return `None` is
+    /// the provided path is the root
+    pub fn top_level(&self) -> Option<&str> {
+        if self.is_root() {
+            return None;
+        }
+
+        let noroot = &self.path[1..];
+
+        if let Some(end_pos) = noroot.find('/') {
+            Some(&noroot[..end_pos])
+        } else {
+            Some(self.name())
+        }
+    }
+
+    /// Return the path split in two components, the top level and the rest. For example, the path
+    /// "a/b/c" will return Some("a", "/b/c"). Return None when called on a root path.
+    pub fn top_level_split(&self) -> Option<(&str, &Self)> {
+        if self.is_root() {
+            return None;
+        }
+
+        let noroot = &self.path[1..];
+
+        if let Some(end_pos) = noroot.find('/') {
+            // Ok to unwrap here because the path is known to be valid
+            let top_level = &noroot[..end_pos];
+            let remainder = self.path[(end_pos + 1)..].try_into().unwrap();
+            Some((top_level, remainder))
+        } else {
+            Some((self.name(), Self::root()))
+        }
+    }
+
+    /// Return an iterator over the components of the path
+    pub fn iter(&self) -> VirtualPathIterator {
+        VirtualPathIterator { path: self }
+    }
+}
+
+impl PartialOrd for VirtualPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.path.cmp(&other.path))
+    }
+}
+
+impl Ord for VirtualPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.path.cmp(&other.path)
     }
 }
 
@@ -143,6 +223,22 @@ impl<'a> PartialEq<VirtualPathBuf> for &'a VirtualPath {
 impl AsRef<Path> for VirtualPath {
     fn as_ref(&self) -> &Path {
         self.path.as_ref()
+    }
+}
+
+pub struct VirtualPathIterator<'a> {
+    path: &'a VirtualPath,
+}
+
+impl<'a> Iterator for VirtualPathIterator<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (top_level, remainder) = self.path.top_level_split()?;
+
+        self.path = remainder;
+
+        Some(top_level)
     }
 }
 
@@ -286,5 +382,92 @@ mod test {
         base.push("/path");
 
         assert_eq!(base, reference);
+    }
+
+    #[test]
+    fn test_top_level() {
+        let base = VirtualPathBuf::new("/a/random/path").unwrap();
+
+        assert_eq!(base.top_level().unwrap(), "a");
+
+        let root = VirtualPath::root();
+
+        assert!(root.top_level().is_none());
+    }
+
+    #[test]
+    fn test_top_level_split() {
+        let base = VirtualPathBuf::new("/a/random/path").unwrap();
+
+        assert_eq!(
+            base.top_level_split().unwrap(),
+            ("a", VirtualPathBuf::new("/random/path").unwrap().as_ref())
+        );
+
+        let base = VirtualPathBuf::new("/a/random/path/").unwrap();
+
+        assert_eq!(
+            base.top_level_split().unwrap(),
+            ("a", VirtualPathBuf::new("/random/path/").unwrap().as_ref())
+        );
+
+        let base = VirtualPathBuf::new("/a/").unwrap();
+
+        assert_eq!(base.top_level_split().unwrap(), ("a", VirtualPath::root()));
+
+        let base = VirtualPathBuf::new("/a").unwrap();
+
+        assert_eq!(base.top_level_split().unwrap(), ("a", VirtualPath::root()));
+
+        let root = VirtualPath::root();
+
+        assert!(root.top_level_split().is_none());
+    }
+
+    #[test]
+    fn test_is_inside() {
+        let base = VirtualPathBuf::new("/a/b").unwrap();
+        let elem = VirtualPathBuf::new("/a/b/c").unwrap();
+
+        assert!(elem.is_inside(&base));
+
+        let elem = VirtualPathBuf::new("/a/b/c/d/e").unwrap();
+
+        assert!(elem.is_inside(&base));
+
+        let elem = VirtualPathBuf::new("/a/f/g").unwrap();
+
+        assert!(!elem.is_inside(&base));
+
+        let elem = VirtualPathBuf::new("/a/baba").unwrap();
+
+        assert!(!elem.is_inside(&base));
+    }
+
+    #[test]
+    fn test_iter() {
+        let elem = VirtualPathBuf::new("/a/b/c").unwrap();
+        let mut iter = elem.iter();
+
+        assert_eq!(iter.next(), Some("a"));
+        assert_eq!(iter.next(), Some("b"));
+        assert_eq!(iter.next(), Some("c"));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_len() {
+        let elem = VirtualPathBuf::new("/a/b/c").unwrap();
+
+        assert_eq!(elem.len(), 3);
+
+        let elem = VirtualPathBuf::new("/a").unwrap();
+
+        assert_eq!(elem.len(), 1);
+
+        let elem = VirtualPathBuf::new("/").unwrap();
+
+        assert_eq!(elem.len(), 0);
+        assert!(elem.is_empty());
     }
 }
