@@ -1,7 +1,7 @@
 //! File operations on real local or remote file systems
 
 pub mod local;
-pub mod remote;
+pub mod nextcloud;
 
 use std::{future::Future, io::Read};
 
