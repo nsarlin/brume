@@ -493,8 +493,11 @@ impl<SyncInfo> TreeNode<SyncInfo> {
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
     {
-        // TODO: handle error ?
-        assert_eq!(self.name(), other.name());
+        if self.name() != other.name() {
+            let mut path = parent_path.to_owned();
+            path.push(self.name());
+            return Err(Error::InvalidPath(path));
+        }
 
         match (self, other) {
             (TreeNode::Dir(dself), TreeNode::Dir(dother)) => {

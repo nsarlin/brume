@@ -10,7 +10,7 @@ use crate::{
     Error,
 };
 
-use super::{Vfs, VirtualPath, VirtualPathBuf};
+use super::{VirtualPath, VirtualPathBuf};
 
 /// Error encountered during a diff operation
 #[derive(Error, Debug)]
@@ -89,8 +89,9 @@ impl VfsNodePatch {
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
     {
-        // TODO: handle error
-        assert_eq!(self.path(), other.path());
+        if self.path() != other.path() {
+            return Err(Error::InvalidPath(self.path().to_owned()));
+        }
 
         let mut reconcilied = SortedList::new();
 
