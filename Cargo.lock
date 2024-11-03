@@ -648,6 +648,7 @@ dependencies = [
  "chrono",
  "reqwest_dav",
  "ron",
+ "thiserror",
  "tokio",
  "xxhash-rust",
 ]

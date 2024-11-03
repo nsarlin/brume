@@ -1,6 +1,7 @@
 //! Utilities to parse a dav response
 
 use reqwest_dav::list_cmd::ListEntity;
+use thiserror::Error;
 
 use crate::{
     sorted_list::{Sortable, SortedList},
@@ -11,11 +12,11 @@ use crate::{
 use super::{RemoteFsError, RemoteSyncInfo};
 
 /// Error encountered when parsing a tag in the WebDAV response
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum TagError {
-    /// The tag was not present
+    #[error("the tag is not present")]
     MissingTag,
-    /// The tag was not a valid number
+    #[error("the tag is not a valid number: {0}")]
     InvalidTag(String),
 }
 

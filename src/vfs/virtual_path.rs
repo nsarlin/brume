@@ -2,6 +2,8 @@
 
 use std::{borrow::Borrow, ops::Deref, path::Path};
 
+use thiserror::Error;
+
 /// A wrapper type that allows doing path operations on strings, without considerations for any
 /// concrete file system. These paths are supposed to be absolute and should start with a '/'.
 #[derive(Debug, Eq, PartialEq)]
@@ -10,9 +12,11 @@ pub struct VirtualPath {
     path: str,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum VirtualPathError {
+    #[error("this string cannot be converted into a path: {0}")]
     InvalidPath(String),
+    #[error("the path {subpath} is not a valid subpath for {base}")]
     NotASubpath { base: String, subpath: String },
 }
 

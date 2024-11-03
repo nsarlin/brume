@@ -35,8 +35,7 @@ pub async fn concrete_eq_file<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
     path: &VirtualPath,
 ) -> Result<bool, Error>
 where
-    Error: From<Concrete::Error>,
-    Error: From<OtherConcrete::Error>,
+    Error: From<Concrete::Error> + From<OtherConcrete::Error>,
 {
     let (self_hash, other_hash) = tokio::join!(concrete_self.hash(path), concrete_other.hash(path));
 

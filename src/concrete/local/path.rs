@@ -7,10 +7,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{
-    vfs::{DirTree, FileInfo, TreeNode},
-    Error,
-};
+use crate::vfs::{DirTree, FileInfo, TreeNode};
 
 use super::LocalSyncInfo;
 
@@ -82,7 +79,7 @@ impl LocalPath for PathBuf {
 pub(crate) fn node_from_path_rec<P: LocalPath>(
     parent: &mut DirTree<LocalSyncInfo>,
     children: &[P],
-) -> Result<(), Error> {
+) -> Result<(), io::Error> {
     for path in children {
         let sync = LocalSyncInfo::new(path.modification_time()?.into());
         if path.is_file() {
@@ -105,7 +102,7 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
 
             parent.insert_child(TreeNode::Dir(node));
         } else {
-            return Err(path.invalid_path_error().into());
+            return Err(path.invalid_path_error());
         }
     }
 

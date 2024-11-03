@@ -69,10 +69,10 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// not point to a valid directory node.
     pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, Error> {
         self.find_node(path)
-            .ok_or(Error::InvalidPath)
+            .ok_or(Error::InvalidPath(path.to_owned()))
             .and_then(|node| match node {
                 TreeNode::Dir(dir) => Ok(dir),
-                TreeNode::File(_) => Err(Error::InvalidPath),
+                TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
             })
     }
 
@@ -80,9 +80,9 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// not point to a valid file.
     pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<SyncInfo>, Error> {
         self.find_node(path)
-            .ok_or(Error::InvalidPath)
+            .ok_or(Error::InvalidPath(path.to_owned()))
             .and_then(|node| match node {
-                TreeNode::Dir(_) => Err(Error::InvalidPath),
+                TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
                 TreeNode::File(file) => Ok(file),
             })
     }
@@ -110,10 +110,10 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// not point to a valid directory node.
     pub fn find_dir_mut(&mut self, path: &VirtualPath) -> Result<&mut DirTree<SyncInfo>, Error> {
         self.find_node_mut(path)
-            .ok_or(Error::InvalidPath)
+            .ok_or(Error::InvalidPath(path.to_owned()))
             .and_then(|node| match node {
                 TreeNode::Dir(dir) => Ok(dir),
-                TreeNode::File(_) => Err(Error::InvalidPath),
+                TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
             })
     }
 
@@ -121,9 +121,9 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// not point to a valid file.
     pub fn find_file_mut(&mut self, path: &VirtualPath) -> Result<&mut FileInfo<SyncInfo>, Error> {
         self.find_node_mut(path)
-            .ok_or(Error::InvalidPath)
+            .ok_or(Error::InvalidPath(path.to_owned()))
             .and_then(|node| match node {
-                TreeNode::Dir(_) => Err(Error::InvalidPath),
+                TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
                 TreeNode::File(file) => Ok(file),
             })
     }
@@ -204,12 +204,12 @@ impl<SyncInfo> DirTree<SyncInfo> {
                 if removed {
                     Ok(())
                 } else {
-                    Err(Error::InvalidPath)
+                    Err(Error::InvalidPath(path.to_owned()))
                 }
             })
         } else if let Some(NodeKind::File) = kind {
             // If the path is the root but we requested a file removal, it is an error
-            Err(Error::InvalidPath)
+            Err(Error::InvalidPath(path.to_owned()))
         } else {
             // Else remove all the content of the current dir
             self.children = SortedNodeList::new();
@@ -423,13 +423,13 @@ impl<SyncInfo> TreeNode<SyncInfo> {
     pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, Error> {
         self.find_node(path).and_then(|node| match node {
             TreeNode::Dir(dir) => Ok(dir),
-            TreeNode::File(_) => Err(Error::InvalidPath),
+            TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
         })
     }
 
     pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<SyncInfo>, Error> {
         self.find_node(path).and_then(|node| match node {
-            TreeNode::Dir(_) => Err(Error::InvalidPath),
+            TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
             TreeNode::File(file) => Ok(file),
         })
     }
@@ -439,12 +439,14 @@ impl<SyncInfo> TreeNode<SyncInfo> {
             Ok(self)
         } else {
             match self {
-                TreeNode::Dir(dir) => dir.find_node(path).ok_or(Error::InvalidPath),
+                TreeNode::Dir(dir) => dir
+                    .find_node(path)
+                    .ok_or(Error::InvalidPath(path.to_owned())),
                 TreeNode::File(file) => {
                     if path.len() == 1 && file.name() == path.name() {
                         Ok(self)
                     } else {
-                        Err(Error::InvalidPath)
+                        Err(Error::InvalidPath(path.to_owned()))
                     }
                 }
             }
