@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    DiffError, IsModified, ModificationState, SortedPatchList, VfsNodePatch, VirtualPath,
+    DiffError, IsModified, ModificationState, SortedUpdateList, VfsNodeUpdate, VirtualPath,
     VirtualPathBuf,
 };
 
@@ -243,7 +243,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         concrete_self: &Concrete,
         concrete_other: &OtherConcrete,
         parent_path: &VirtualPath,
-    ) -> Result<SortedPatchList, Error>
+    ) -> Result<SortedUpdateList, Error>
     where
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
@@ -267,7 +267,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
                     ret.insert(self_item.to_removed_diff(&dir_path));
                     self_item_opt = self_iter.next()
                 }
-                // We can use `unchecked_extend` because we know that the patches will be produced
+                // We can use `unchecked_extend` because we know that the updates will be produced
                 // in order
                 Ordering::Equal => {
                     ret.unchecked_extend(
@@ -320,7 +320,7 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
         &self,
         other: &DirTree<SyncInfo>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedPatchList, DiffError> {
+    ) -> Result<SortedUpdateList, DiffError> {
         let mut dir_path = parent_path.to_owned();
         dir_path.push(self.name());
 
@@ -328,6 +328,8 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
             // The SyncInfo tells us that nothing has been modified for this dir, but can't
             // speak about its children. So we need to walk them.
             ModificationState::ShallowUnmodified => {
+                // Since the current dir is unmodifed, both self and other should have the same
+                // number of children with the same names.
                 if self.children.len() != other.children.len() {
                     return Err(DiffError::InvalidSyncInfo(dir_path));
                 }
@@ -338,13 +340,13 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
                     .map(|(self_child, other_child)| self_child.diff(other_child, &dir_path))
                     .collect::<Result<Vec<_>, _>>()?;
 
-                // Since the children list is sorted, we know that the resulting diffs, will be also
-                // sorted, so we can call `unchecked_flatten`
+                // Since the children list is sorted, we know that the resulting updates will be
+                // also sorted, so we can call `unchecked_flatten`
                 Ok(SortedList::unchecked_flatten(diffs))
             }
             // The SyncInfo tells us that nothing has been modified recursively, so we can
             // stop there
-            ModificationState::RecursiveUnmodified => Ok(SortedPatchList::new()),
+            ModificationState::RecursiveUnmodified => Ok(SortedUpdateList::new()),
             // The directory has been modified, so we have to walk it recursively to find
             // the modified nodes
             ModificationState::Modified => {
@@ -363,7 +365,7 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
                     },
                 )?;
 
-                // Since the children lists are sorted, we know that the produced patches will be
+                // Since the children lists are sorted, we know that the produced updates will be
                 // too, so we can directly create the sorted list from the result
                 let diffs = SortedList::unchecked_flatten(diff_list);
 
@@ -475,10 +477,10 @@ impl<SyncInfo> TreeNode<SyncInfo> {
     }
 
     /// Create a diff where this node has been removed from the VFS
-    pub fn to_removed_diff(&self, parent_path: &VirtualPath) -> VfsNodePatch {
+    pub fn to_removed_diff(&self, parent_path: &VirtualPath) -> VfsNodeUpdate {
         match self {
-            TreeNode::Dir(_) => VfsNodePatch::DirRemoved(self.path(parent_path)),
-            TreeNode::File(_) => VfsNodePatch::FileRemoved(self.path(parent_path)),
+            TreeNode::Dir(_) => VfsNodeUpdate::DirRemoved(self.path(parent_path)),
+            TreeNode::File(_) => VfsNodeUpdate::FileRemoved(self.path(parent_path)),
         }
     }
 
@@ -488,7 +490,7 @@ impl<SyncInfo> TreeNode<SyncInfo> {
         concrete_self: &Concrete,
         concrete_other: &OtherConcrete,
         parent_path: &VirtualPath,
-    ) -> Result<SortedPatchList, Error>
+    ) -> Result<SortedUpdateList, Error>
     where
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
@@ -511,13 +513,13 @@ impl<SyncInfo> TreeNode<SyncInfo> {
                 file_path.push(fself.name());
 
                 if !concrete_eq_file(concrete_self, concrete_other, &file_path).await? {
-                    let diff = VfsNodePatch::FileModified(file_path);
-                    Ok(SortedPatchList::from([diff]))
+                    let diff = VfsNodeUpdate::FileModified(file_path);
+                    Ok(SortedUpdateList::from([diff]))
                 } else {
-                    Ok(SortedPatchList::new())
+                    Ok(SortedUpdateList::new())
                 }
             }
-            (nself, nother) => Ok(SortedPatchList::from_vec(vec![
+            (nself, nother) => Ok(SortedUpdateList::from_vec(vec![
                 nself.to_removed_diff(parent_path),
                 nother.to_created_diff(parent_path),
             ])),
@@ -527,10 +529,10 @@ impl<SyncInfo> TreeNode<SyncInfo> {
 
 impl<SyncInfo> TreeNode<SyncInfo> {
     /// Create a diff where this node has been inserted into the VFS
-    pub fn to_created_diff(&self, parent_path: &VirtualPath) -> VfsNodePatch {
+    pub fn to_created_diff(&self, parent_path: &VirtualPath) -> VfsNodeUpdate {
         match self {
-            TreeNode::Dir(_) => VfsNodePatch::DirCreated(self.path(parent_path)),
-            TreeNode::File(_) => VfsNodePatch::FileCreated(self.path(parent_path)),
+            TreeNode::Dir(_) => VfsNodeUpdate::DirCreated(self.path(parent_path)),
+            TreeNode::File(_) => VfsNodeUpdate::FileCreated(self.path(parent_path)),
         }
     }
 }
@@ -543,7 +545,7 @@ impl<SyncInfo: IsModified<SyncInfo>> TreeNode<SyncInfo> {
         &self,
         other: &TreeNode<SyncInfo>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedPatchList, DiffError> {
+    ) -> Result<SortedUpdateList, DiffError> {
         if self.name() != other.name() {
             return Err(DiffError::InvalidSyncInfo(parent_path.to_owned()));
         }
@@ -556,13 +558,13 @@ impl<SyncInfo: IsModified<SyncInfo>> TreeNode<SyncInfo> {
                     let mut file_path = parent_path.to_owned();
                     file_path.push(fself.name());
 
-                    let diff = VfsNodePatch::FileModified(file_path);
-                    Ok(SortedPatchList::from_vec(vec![diff]))
+                    let diff = VfsNodeUpdate::FileModified(file_path);
+                    Ok(SortedUpdateList::from_vec(vec![diff]))
                 } else {
-                    Ok(SortedPatchList::new())
+                    Ok(SortedUpdateList::new())
                 }
             }
-            (nself, nother) => Ok(SortedPatchList::from_vec(vec![
+            (nself, nother) => Ok(SortedUpdateList::from_vec(vec![
                 nself.to_removed_diff(parent_path),
                 nother.to_created_diff(parent_path),
             ])),
@@ -804,7 +806,7 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsNodePatch::FileModified(
+            vec![VfsNodeUpdate::FileModified(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap()
             )]
             .into()
@@ -824,7 +826,7 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsNodePatch::FileRemoved(
+            vec![VfsNodeUpdate::FileRemoved(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap()
             )]
             .into()
@@ -845,8 +847,8 @@ mod test {
         assert_eq!(
             diff,
             vec![
-                VfsNodePatch::FileRemoved(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-                VfsNodePatch::FileCreated(VirtualPathBuf::new("/Doc/f3.pdf").unwrap())
+                VfsNodeUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+                VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/Doc/f3.pdf").unwrap())
             ]
             .into()
         );
@@ -866,8 +868,8 @@ mod test {
         assert_eq!(
             diff,
             vec![
-                VfsNodePatch::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
-                VfsNodePatch::DirCreated(VirtualPathBuf::new("/a/ba").unwrap(),)
+                VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
+                VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/a/ba").unwrap(),)
             ]
             .into()
         );
@@ -899,7 +901,7 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsNodePatch::FileModified(
+            vec![VfsNodeUpdate::FileModified(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap()
             )]
             .into()
@@ -919,7 +921,7 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsNodePatch::FileRemoved(
+            vec![VfsNodeUpdate::FileRemoved(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap()
             )]
             .into()
@@ -940,8 +942,8 @@ mod test {
         assert_eq!(
             diff,
             vec![
-                VfsNodePatch::FileRemoved(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-                VfsNodePatch::FileCreated(VirtualPathBuf::new("/Doc/f3.pdf").unwrap())
+                VfsNodeUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+                VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/Doc/f3.pdf").unwrap())
             ]
             .into()
         );
@@ -961,8 +963,8 @@ mod test {
         assert_eq!(
             diff,
             vec![
-                VfsNodePatch::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
-                VfsNodePatch::DirCreated(VirtualPathBuf::new("/a/ba").unwrap(),)
+                VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
+                VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/a/ba").unwrap(),)
             ]
             .into()
         );
@@ -1005,9 +1007,9 @@ mod test {
             .unwrap();
 
         let reference_diff = [
-            VfsNodePatch::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodePatch::FileCreated(VirtualPathBuf::new("/a/b/test.log").unwrap()),
-            VfsNodePatch::DirRemoved(VirtualPathBuf::new("/e/g").unwrap()),
+            VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+            VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/a/b/test.log").unwrap()),
+            VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/e/g").unwrap()),
         ]
         .into();
 

@@ -1,11 +1,11 @@
 //! An in-memory representation of a FileSystem, local or remote
 
 pub mod dir_tree;
-pub mod patch;
+pub mod update;
 pub mod virtual_path;
 
 pub use dir_tree::*;
-pub use patch::*;
+pub use update::*;
 pub use virtual_path::*;
 
 /// The virtual representation of a file system, local or remote.
@@ -38,7 +38,7 @@ impl<SyncInfo: IsModified<SyncInfo> + Clone> Vfs<SyncInfo> {
     /// [`modification_state`]. The result of the SyncInfo comparison on node is trusted.
     ///
     /// [`modification_state`]: IsModified::modification_state
-    pub fn diff(&self, other: &Vfs<SyncInfo>) -> Result<SortedPatchList, DiffError> {
+    pub fn diff(&self, other: &Vfs<SyncInfo>) -> Result<SortedUpdateList, DiffError> {
         self.root.diff(other.root(), VirtualPath::root())
     }
 }

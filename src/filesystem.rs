@@ -3,7 +3,7 @@
 
 use crate::{
     concrete::ConcreteFS,
-    vfs::{SortedPatchList, Vfs},
+    vfs::{SortedUpdateList, Vfs},
     Error,
 };
 
@@ -20,7 +20,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         }
     }
 
-    pub async fn update_vfs(&mut self) -> Result<SortedPatchList, Error>
+    pub async fn update_vfs(&mut self) -> Result<SortedUpdateList, Error>
     where
         Error: From<Concrete::Error>,
     {
