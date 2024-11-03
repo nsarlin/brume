@@ -2,6 +2,7 @@ use thiserror::Error;
 use vfs::{DiffError, VirtualPathBuf};
 
 pub mod concrete;
+pub mod filesystem;
 mod sorted_list;
 #[cfg(test)]
 mod test_utils;

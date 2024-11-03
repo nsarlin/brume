@@ -38,10 +38,7 @@ impl<SyncInfo: IsModified<SyncInfo> + Clone> Vfs<SyncInfo> {
     /// [`modification_state`]. The result of the SyncInfo comparison on node is trusted.
     ///
     /// [`modification_state`]: IsModified::modification_state
-    pub fn diff(&self, other: &Vfs<SyncInfo>) -> Result<SortedPatchList, DiffError>
-    where
-        SyncInfo: for<'a> From<&'a SyncInfo>,
-    {
+    pub fn diff(&self, other: &Vfs<SyncInfo>) -> Result<SortedPatchList, DiffError> {
         self.root.diff(other.root(), VirtualPath::root())
     }
 }
@@ -49,5 +46,11 @@ impl<SyncInfo: IsModified<SyncInfo> + Clone> Vfs<SyncInfo> {
 impl<SyncInfo> Vfs<SyncInfo> {
     pub fn new(root: TreeNode<SyncInfo>) -> Self {
         Self { root }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            root: TreeNode::Dir(DirTree::new_invalid("")),
+        }
     }
 }
