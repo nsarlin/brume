@@ -1,10 +1,14 @@
 //! Manipulation of a Nextcloud filesystem with WebDAV
 
-use std::io::{self, Read};
+use std::io::{self, ErrorKind};
 
-use bytes::Buf;
-use reqwest_dav::{re_exports::reqwest, Auth, Client, ClientBuilder, Depth};
+use bytes::Bytes;
+use futures::{Stream, TryStream, TryStreamExt};
+use reqwest::Body;
+use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::StreamReader;
 use xxhash_rust::xxh3::xxh3_64;
 
 mod dav;
@@ -80,20 +84,31 @@ impl ConcreteFS for NextcloudFs {
         Ok(Vfs::new(vfs_root))
     }
 
-    async fn open(&self, path: &VirtualPath) -> Result<impl std::io::Read, Self::Error> {
-        Ok(self.client.get(path.into()).await?.bytes().await?.reader())
-    }
-
-    async fn write<Stream: std::io::Read>(
+    async fn open(
         &self,
         path: &VirtualPath,
-        data: &mut Stream,
-    ) -> Result<(), Self::Error> {
-        let mut buf = Vec::new();
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>>, Self::Error> {
+        Ok(self
+            .client
+            .get(path.into())
+            .await?
+            .bytes_stream()
+            .map_err(|e| e.into()))
+    }
 
-        data.read_to_end(&mut buf)?;
+    async fn write<Data: TryStream + Send + 'static>(
+        &self,
+        path: &VirtualPath,
+        data: Data,
+    ) -> Result<(), Self::Error>
+    where
+        Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        Bytes: From<Data::Ok>,
+    {
+        let body = Body::wrap_stream(data);
+
         self.client
-            .put(path.into(), buf)
+            .put(path.into(), body)
             .await
             .map_err(|e| e.into())
     }
@@ -103,9 +118,12 @@ impl ConcreteFS for NextcloudFs {
     }
 
     async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
-        let mut reader = self.open(path).await?;
+        let stream = self.open(path).await?;
+        let mut reader =
+            StreamReader::new(stream.map_err(|_| io::Error::new(ErrorKind::Other, "")));
+
         let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
+        reader.read_to_end(&mut data).await?;
 
         Ok(xxh3_64(&data))
     }

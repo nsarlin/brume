@@ -1,9 +1,8 @@
-use std::{
-    ffi::OsStr,
-    io::{self, Cursor},
-    time::SystemTime,
-};
+use std::{ffi::OsStr, time::SystemTime};
 
+use bytes::Bytes;
+use futures::{stream, Stream, TryStream};
+use tokio::io::{self};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
@@ -216,21 +215,30 @@ impl ConcreteFS for TestNode {
         Ok(Vfs::new(root))
     }
 
-    async fn open(&self, path: &VirtualPath) -> Result<impl io::Read, Self::Error> {
+    async fn open(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>>, Self::Error> {
         match self.get_node(path) {
             TestNode::F(_) => panic!(),
             TestNode::D(_, _) => panic!(),
             TestNode::FH(_, _) => panic!(),
             TestNode::DH(_, _, _) => panic!(),
-            TestNode::FF(_, content) => Ok(Cursor::new(content)),
+            TestNode::FF(_, content) => Ok(stream::iter(
+                content.iter().map(|b| Ok(Bytes::from(vec![*b]))),
+            )),
         }
     }
 
-    async fn write<Stream: io::Read>(
+    async fn write<Data: TryStream + Send + 'static + Unpin>(
         &self,
         _path: &VirtualPath,
-        _data: &mut Stream,
-    ) -> Result<(), Self::Error> {
+        _data: Data,
+    ) -> Result<(), Self::Error>
+    where
+        Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        Bytes: From<Data::Ok>,
+    {
         todo!()
     }
 
