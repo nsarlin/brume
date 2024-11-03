@@ -1,4 +1,4 @@
-//! Manipulation of a remote filesystem with WebDAV
+//! Manipulation of a Nextcloud filesystem with WebDAV
 
 use std::io::{self, Read};
 
@@ -18,42 +18,42 @@ use dav::{dav_parse_vfs, TagError};
 
 use super::ConcreteFS;
 
-/// An error during synchronisation with the remote file system
+/// An error during synchronisation with the nextcloud file system
 #[derive(Error, Debug)]
-pub enum RemoteFsError {
+pub enum NextcloudFsError {
     #[error("a path provided by the server is invalid")]
     InvalidPath(#[from] VirtualPathError),
     #[error("a tag provided by the server is invalid")]
     InvalidTag(#[from] TagError),
-    #[error("the structure of the remote FS is not valid")]
+    #[error("the structure of the nextcloud FS is not valid")]
     BadStructure,
-    #[error("a dav protocol error occured during communication with the remote server")]
+    #[error("a dav protocol error occured during communication with the nextcloud server")]
     ProtocolError(#[from] reqwest_dav::Error),
     #[error("io error while sending or receiving a file")]
     IoError(#[from] io::Error),
 }
 
-impl From<reqwest::Error> for RemoteFsError {
+impl From<reqwest::Error> for NextcloudFsError {
     fn from(value: reqwest::Error) -> Self {
         Self::ProtocolError(value.into())
     }
 }
 
-impl From<RemoteFsError> for crate::Error {
-    fn from(value: RemoteFsError) -> Self {
+impl From<NextcloudFsError> for crate::Error {
+    fn from(value: NextcloudFsError) -> Self {
         Self::ConcreteFsError(Box::new(value))
     }
 }
 
-/// The remote FileSystem, accessed with the dav protocol
+/// The nextcloud FileSystem, accessed with the dav protocol
 #[derive(Debug)]
-pub struct RemoteFs {
+pub struct NextcloudFs {
     client: Client,
     name: String,
 }
 
-impl RemoteFs {
-    pub fn new(url: &str, login: &str, password: &str) -> Result<Self, RemoteFsError> {
+impl NextcloudFs {
+    pub fn new(url: &str, login: &str, password: &str) -> Result<Self, NextcloudFsError> {
         let name = login.to_string();
         let client = ClientBuilder::new()
             .set_host(format!("{}{}{}/", url, NC_DAV_PATH_STR, &name))
@@ -67,10 +67,10 @@ impl RemoteFs {
     }
 }
 
-impl ConcreteFS for RemoteFs {
-    type SyncInfo = RemoteSyncInfo;
+impl ConcreteFS for NextcloudFs {
+    type SyncInfo = NextcloudSyncInfo;
 
-    type Error = RemoteFsError;
+    type Error = NextcloudFsError;
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
         let elements = self.client.list("", Depth::Infinity).await?;
@@ -111,24 +111,24 @@ impl ConcreteFS for RemoteFs {
     }
 }
 
-/// Metadata used to detect modifications of a remote FS node
+/// Metadata used to detect modifications of a nextcloud FS node
 ///
 /// The nodes are compared using the nextcloud [etag] field, which is modified by the
 /// server if a node or its content is modified.
 ///
 /// [etag]: https://docs.nextcloud.com/desktop/3.13/architecture.html#synchronization-by-time-versus-etag
 #[derive(Debug, Clone)]
-pub struct RemoteSyncInfo {
+pub struct NextcloudSyncInfo {
     tag: u128,
 }
 
-impl RemoteSyncInfo {
+impl NextcloudSyncInfo {
     pub fn new(tag: u128) -> Self {
         Self { tag }
     }
 }
 
-impl IsModified<Self> for RemoteSyncInfo {
+impl IsModified<Self> for NextcloudSyncInfo {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         if self.tag != reference.tag {
             ModificationState::Modified
@@ -138,12 +138,12 @@ impl IsModified<Self> for RemoteSyncInfo {
     }
 }
 
-impl<'a> From<&'a RemoteSyncInfo> for RemoteSyncInfo {
-    fn from(value: &'a RemoteSyncInfo) -> Self {
+impl<'a> From<&'a NextcloudSyncInfo> for NextcloudSyncInfo {
+    fn from(value: &'a NextcloudSyncInfo) -> Self {
         value.to_owned()
     }
 }
 
-impl<'a> From<&'a RemoteSyncInfo> for () {
-    fn from(_value: &'a RemoteSyncInfo) -> Self {}
+impl<'a> From<&'a NextcloudSyncInfo> for () {
+    fn from(_value: &'a NextcloudSyncInfo) -> Self {}
 }

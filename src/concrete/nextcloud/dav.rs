@@ -9,7 +9,7 @@ use crate::{
     NC_DAV_PATH_STR,
 };
 
-use super::{RemoteFsError, RemoteSyncInfo};
+use super::{NextcloudFsError, NextcloudSyncInfo};
 
 /// Error encountered when parsing a tag in the WebDAV response
 #[derive(Error, Debug)]
@@ -35,7 +35,7 @@ impl Sortable for ListEntity {
 pub(crate) fn dav_parse_vfs(
     entities: Vec<ListEntity>,
     folder_name: &str,
-) -> Result<TreeNode<RemoteSyncInfo>, RemoteFsError> {
+) -> Result<TreeNode<NextcloudSyncInfo>, NextcloudFsError> {
     let entities = SortedList::from_vec(entities);
 
     let mut entities_iter = entities.into_iter().map(|entity| DavEntity {
@@ -43,9 +43,9 @@ pub(crate) fn dav_parse_vfs(
         folder_name: folder_name.to_string(),
     });
 
-    let root_entity = entities_iter.next().ok_or(RemoteFsError::BadStructure)?;
+    let root_entity = entities_iter.next().ok_or(NextcloudFsError::BadStructure)?;
     if !root_entity.name()?.is_empty() {
-        return Err(RemoteFsError::BadStructure);
+        return Err(NextcloudFsError::BadStructure);
     }
 
     let empty_root_node = root_entity.try_into()?;
@@ -62,11 +62,11 @@ pub(crate) fn dav_parse_vfs(
 /// this list have already been sorted in a way that a directory is directly followed by its
 /// children.
 fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
-    root: DirTree<RemoteSyncInfo>,
+    root: DirTree<NextcloudSyncInfo>,
     entities: &mut I,
-) -> Result<DirTree<RemoteSyncInfo>, RemoteFsError> {
+) -> Result<DirTree<NextcloudSyncInfo>, NextcloudFsError> {
     // This is used to store the currently worked on stack of directories
-    let mut dirs: Vec<DirTree<RemoteSyncInfo>> = Vec::with_capacity(entities.len());
+    let mut dirs: Vec<DirTree<NextcloudSyncInfo>> = Vec::with_capacity(entities.len());
     let mut current_dir = root;
 
     for entity in entities {
@@ -78,10 +78,10 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
                 if parent.insert_child(TreeNode::Dir(current_dir)) {
                     current_dir = parent;
                 } else {
-                    return Err(RemoteFsError::BadStructure);
+                    return Err(NextcloudFsError::BadStructure);
                 }
             } else {
-                return Err(RemoteFsError::BadStructure);
+                return Err(NextcloudFsError::BadStructure);
             }
         }
 
@@ -101,7 +101,7 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
         if parent.insert_child(TreeNode::Dir(current_dir)) {
             current_dir = parent;
         } else {
-            return Err(RemoteFsError::BadStructure);
+            return Err(NextcloudFsError::BadStructure);
         }
     }
     Ok(current_dir)
@@ -154,14 +154,14 @@ impl DavEntity {
     }
 }
 
-impl TryFrom<DavEntity> for TreeNode<RemoteSyncInfo> {
-    type Error = RemoteFsError;
+impl TryFrom<DavEntity> for TreeNode<NextcloudSyncInfo> {
+    type Error = NextcloudFsError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
         let name = value.name()?;
         let tag = value.tag()?;
 
-        let sync = RemoteSyncInfo::new(tag);
+        let sync = NextcloudSyncInfo::new(tag);
 
         match value.entity {
             ListEntity::File(_) => Ok(TreeNode::File(FileInfo::new(name, sync))),

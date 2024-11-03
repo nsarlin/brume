@@ -33,10 +33,10 @@ pub enum ModificationState {
 ///
 /// This trait is implemented for the "SyncInfo" types, to
 /// allow different node comparison stategies (for example based on timestamp or a revision id
-/// value). See [`RemoteSyncInfo`] and [`LocalSyncInfo`] for examples.
+/// value). See [`NextcloudSyncInfo`] and [`LocalSyncInfo`] for examples.
 ///
 /// [`LocalSyncInfo`]: crate::concrete::local::LocalSyncInfo
-/// [`RemoteSyncInfo`]: crate::concrete::remote::RemoteSyncInfo
+/// [`NextcloudSyncInfo`]: crate::concrete::nextcloud::NextcloudSyncInfo
 pub trait IsModified<Ref> {
     /// Tell if a node have been modified, and if possible also recusively answers for its children
     fn modification_state(&self, reference: &Ref) -> ModificationState;

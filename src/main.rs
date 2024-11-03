@@ -2,14 +2,14 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use ncclient::{
-    concrete::{local::LocalDir, remote::RemoteFs},
+    concrete::{local::LocalDir, nextcloud::NextcloudFs},
     filesystem::FileSystem,
     Error,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let remote = Arc::new(Mutex::new(FileSystem::new(RemoteFs::new(
+    let remote = Arc::new(Mutex::new(FileSystem::new(NextcloudFs::new(
         "http://localhost:8080",
         "admin",
         "admin",
