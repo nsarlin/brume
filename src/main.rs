@@ -1,48 +1,50 @@
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use ncclient::{
-    concrete::{local::LocalDir, remote::RemoteFs, ConcreteFS},
-    vfs::{VfsNodePatch, VirtualPath},
+    concrete::{local::LocalDir, remote::RemoteFs},
+    filesystem::FileSystem,
     Error,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let remote = Arc::new(RemoteFs::new("http://localhost:8080", "admin", "admin")?);
-    let local = Arc::new(LocalDir::new("/tmp/test")?);
+    let remote = Arc::new(Mutex::new(FileSystem::new(RemoteFs::new(
+        "http://localhost:8080",
+        "admin",
+        "admin",
+    )?)));
+    let local = Arc::new(Mutex::new(FileSystem::new(LocalDir::new("/tmp/test")?)));
 
-    let (vfs_remote, vfs_local) = {
-        let local = local.clone();
-        let remote = remote.clone();
+    let (remote_diff, local_diff) = {
+        let local = Arc::clone(&local);
+        let remote = Arc::clone(&remote);
 
         // Unwrap to propagate panics
-        let (vfs_remote, vfs_local) = tokio::try_join!(
-            tokio::spawn(async move { remote.load_virtual().await }),
-            tokio::spawn(async move { local.load_virtual().await }),
+        let (remote_diff, local_diff) = tokio::try_join!(
+            tokio::spawn(async move {
+                let mut remote = remote.lock().await;
+                remote.update_vfs().await
+            }),
+            tokio::spawn(async move {
+                let mut local = local.lock().await;
+                local.update_vfs().await
+            }),
         )
         .unwrap();
 
-        (vfs_remote?, vfs_local?)
+        (remote_diff?, local_diff?)
     };
-
-    println!("{vfs_local:?}");
-
-    let remote_diff: VfsNodePatch = vfs_remote.root().to_created_diff(VirtualPath::root());
-    let local_diff: VfsNodePatch = vfs_local.root().to_created_diff(VirtualPath::root());
 
     println!("{local_diff:?}");
     println!("====");
     println!("{remote_diff:?}");
 
-    let reconciled = local_diff
-        .reconcile(
-            &remote_diff,
-            &vfs_local,
-            &vfs_remote,
-            local.as_ref(),
-            remote.as_ref(),
-        )
-        .await?;
+    let reconciled = {
+        let remote = remote.lock().await;
+        let local = local.lock().await;
+        local_diff.reconcile(remote_diff, &local, &remote).await?
+    };
 
     println!("====");
     println!("{reconciled:?}");

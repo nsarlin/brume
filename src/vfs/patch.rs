@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 
 use crate::{
     concrete::{concrete_eq_file, ConcreteFS},
+    filesystem::FileSystem,
     sorted_list::{Sortable, SortedList},
     Error,
 };
@@ -81,10 +82,8 @@ impl VfsNodePatch {
     pub async fn reconcile<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
         &self,
         other: &VfsNodePatch,
-        vfs_self: &Vfs<Concrete::SyncInfo>,
-        vfs_other: &Vfs<OtherConcrete::SyncInfo>,
-        concrete_self: &Concrete,
-        concrete_other: &OtherConcrete,
+        fs_self: &FileSystem<Concrete>,
+        fs_other: &FileSystem<OtherConcrete>,
     ) -> Result<SortedList<ReconciliedPatch>, Error>
     where
         Error: From<Concrete::Error>,
@@ -95,13 +94,16 @@ impl VfsNodePatch {
 
         let mut reconcilied = SortedList::new();
 
+        let concrete_self = fs_self.concrete();
+        let concrete_other = fs_other.concrete();
+
         match (self, other) {
             (VfsNodePatch::DirCreated(pself), VfsNodePatch::DirCreated(pother)) => {
                 // If the same dir has been created on both sides, we need to check if they are
                 // equivalent. If they are not, we generate patches that are only allowed to created
                 // nodes.
-                let dir_self = vfs_self.root().find_dir(pself)?;
-                let dir_other = vfs_other.root().find_dir(pother)?;
+                let dir_self = fs_self.vfs().root().find_dir(pself)?;
+                let dir_other = fs_other.vfs().root().find_dir(pother)?;
 
                 let reconcilied = dir_self
                     .concrete_diff(
@@ -151,10 +153,8 @@ impl SortedPatchList {
     async fn merge<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
         &self,
         other: SortedPatchList,
-        vfs_self: &Vfs<Concrete::SyncInfo>,
-        vfs_other: &Vfs<OtherConcrete::SyncInfo>,
-        concrete_self: &Concrete,
-        concrete_other: &OtherConcrete,
+        fs_self: &FileSystem<Concrete>,
+        fs_other: &FileSystem<OtherConcrete>,
     ) -> Result<SortedList<ReconciliedPatch>, Error>
     where
         Error: From<Concrete::Error>,
@@ -179,16 +179,7 @@ impl SortedPatchList {
                 }
 
                 Ordering::Equal => {
-                    ret.extend(
-                        Box::pin(self_item.reconcile(
-                            other_item,
-                            vfs_self,
-                            vfs_other,
-                            concrete_self,
-                            concrete_other,
-                        ))
-                        .await?,
-                    );
+                    ret.extend(Box::pin(self_item.reconcile(other_item, fs_self, fs_other)).await?);
                     self_item_opt = self_iter.next();
                     other_item_opt = other_iter.next();
                 }
@@ -225,18 +216,14 @@ impl SortedPatchList {
     pub async fn reconcile<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
         &self,
         other: SortedPatchList,
-        vfs_self: &Vfs<Concrete::SyncInfo>,
-        vfs_other: &Vfs<OtherConcrete::SyncInfo>,
-        concrete_self: &Concrete,
-        concrete_other: &OtherConcrete,
+        fs_self: &FileSystem<Concrete>,
+        fs_other: &FileSystem<OtherConcrete>,
     ) -> Result<SortedList<ReconciliedPatch>, Error>
     where
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
     {
-        let merged = self
-            .merge(other, vfs_self, vfs_other, concrete_self, concrete_other)
-            .await?;
+        let merged = self.merge(other, fs_self, fs_other).await?;
 
         Ok(merged.resolve_ancestor_conflicts())
     }
@@ -371,7 +358,8 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_vfs = Vfs::new(local_base.clone().into_node());
+        let mut local_fs = FileSystem::new(local_base);
+        local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
             "",
@@ -382,7 +370,8 @@ mod test {
             ],
         );
 
-        let remote_vfs = Vfs::new(remote_base.clone().into_node());
+        let mut remote_fs = FileSystem::new(remote_base);
+        remote_fs.update_vfs().await.unwrap();
 
         let local_diff = SortedList::from([
             VfsNodePatch::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
@@ -393,13 +382,7 @@ mod test {
         let remote_diff = local_diff.clone();
 
         let reconcilied = local_diff
-            .reconcile(
-                remote_diff,
-                &local_vfs,
-                &remote_vfs,
-                &local_base,
-                &remote_base,
-            )
+            .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 
@@ -417,7 +400,8 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_vfs = Vfs::new(local_base.clone().into_node());
+        let mut local_fs = FileSystem::new(local_base);
+        local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
             "",
@@ -427,7 +411,8 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let remote_vfs = Vfs::new(remote_base.clone().into_node());
+        let mut remote_fs = FileSystem::new(remote_base);
+        remote_fs.update_vfs().await.unwrap();
 
         let local_diff = SortedList::from([
             VfsNodePatch::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
@@ -439,13 +424,7 @@ mod test {
         )]);
 
         let reconcilied = local_diff
-            .reconcile(
-                remote_diff,
-                &local_vfs,
-                &remote_vfs,
-                &local_base,
-                &remote_base,
-            )
+            .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 
@@ -475,7 +454,8 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_vfs = Vfs::new(local_base.clone().into_node());
+        let mut local_fs = FileSystem::new(local_base);
+        local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
             "",
@@ -488,7 +468,8 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let remote_vfs = Vfs::new(remote_base.clone().into_node());
+        let mut remote_fs = FileSystem::new(remote_base);
+        remote_fs.update_vfs().await.unwrap();
 
         let local_diff = SortedList::from([
             VfsNodePatch::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
@@ -501,13 +482,7 @@ mod test {
         ]);
 
         let reconcilied = local_diff
-            .reconcile(
-                remote_diff,
-                &local_vfs,
-                &remote_vfs,
-                &local_base,
-                &remote_base,
-            )
+            .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 
@@ -530,7 +505,8 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_vfs = Vfs::new(local_base.clone().into_node());
+        let mut local_fs = FileSystem::new(local_base);
+        local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
             "",
@@ -543,7 +519,8 @@ mod test {
                 D("e", vec![]),
             ],
         );
-        let remote_vfs = Vfs::new(remote_base.clone().into_node());
+        let mut remote_fs = FileSystem::new(remote_base);
+        remote_fs.update_vfs().await.unwrap();
 
         let local_diff =
             SortedList::from([VfsNodePatch::DirCreated(VirtualPathBuf::new("/").unwrap())]);
@@ -551,13 +528,7 @@ mod test {
         let remote_diff = local_diff.clone();
 
         let reconcilied = local_diff
-            .reconcile(
-                remote_diff,
-                &local_vfs,
-                &remote_vfs,
-                &local_base,
-                &remote_base,
-            )
+            .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 

@@ -39,6 +39,14 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
+    /// Create a new directory with syncinfo in the [`SyncInfoState::Invalid`] state
+    pub fn new_invalid(name: &str) -> Self {
+        Self {
+            info: DirInfo::new_invalid(name),
+            children: SortedNodeList::new(),
+        }
+    }
+
     /// Create a new directory with the provided name and child nodes
     pub fn new_with_children(
         name: &str,
@@ -61,7 +69,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         self.info.name()
     }
 
-    pub fn sync_info(&self) -> &SyncInfo {
+    pub fn sync_info(&self) -> &SyncInfoState<SyncInfo> {
         self.info.sync_info()
     }
 
@@ -312,10 +320,7 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
         &self,
         other: &DirTree<SyncInfo>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedPatchList, DiffError>
-    where
-        SyncInfo: for<'a> From<&'a SyncInfo>,
-    {
+    ) -> Result<SortedPatchList, DiffError> {
         let mut dir_path = parent_path.to_owned();
         dir_path.push(self.name());
 
@@ -535,10 +540,7 @@ impl<SyncInfo: IsModified<SyncInfo>> TreeNode<SyncInfo> {
         &self,
         other: &TreeNode<SyncInfo>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedPatchList, DiffError>
-    where
-        SyncInfo: for<'a> From<&'a SyncInfo>,
-    {
+    ) -> Result<SortedPatchList, DiffError> {
         if self.name() != other.name() {
             return Err(DiffError::InvalidSyncInfo(parent_path.to_owned()));
         }

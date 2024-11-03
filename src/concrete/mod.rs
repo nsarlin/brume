@@ -6,13 +6,13 @@ pub mod remote;
 use std::{future::Future, io::Read};
 
 use crate::{
-    vfs::{Vfs, VirtualPath},
+    vfs::{IsModified, Vfs, VirtualPath},
     Error,
 };
 
 /// Definition of the operations needed for a concrete FS backend
 pub trait ConcreteFS: Sized {
-    type SyncInfo;
+    type SyncInfo: IsModified<Self::SyncInfo> + Clone;
     type Error;
 
     fn load_virtual(&self) -> impl Future<Output = Result<Vfs<Self::SyncInfo>, Self::Error>>;
