@@ -91,7 +91,7 @@ impl ConcreteFS for RemoteFs {
     ) -> Result<(), Self::Error> {
         let mut buf = Vec::new();
 
-        data.read_to_end(&mut buf).unwrap(); // TODO: handle io error
+        data.read_to_end(&mut buf)?;
         self.client
             .put(path.into(), buf)
             .await
@@ -113,12 +113,10 @@ impl ConcreteFS for RemoteFs {
 
 /// Metadata used to detect modifications of a remote FS node
 ///
-/// If possible, the nodes are compared using the nextcloud [etag] field, which is modified by the
-/// server if a node or its content is modified. When comparing to a [`LocalSyncInfo`] which does
-/// not have this tag, we resort to the modification time (*TODO*: not true anymore).
+/// The nodes are compared using the nextcloud [etag] field, which is modified by the
+/// server if a node or its content is modified.
 ///
 /// [etag]: https://docs.nextcloud.com/desktop/3.13/architecture.html#synchronization-by-time-versus-etag
-/// [`LocalSyncInfo`]: crate::concrete::local::LocalSyncInfo
 #[derive(Debug, Clone)]
 pub struct RemoteSyncInfo {
     tag: u128,
