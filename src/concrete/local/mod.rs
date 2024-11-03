@@ -4,7 +4,7 @@ pub mod path;
 
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -38,7 +38,7 @@ impl LocalDir {
 impl ConcreteFS for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
-    type Error = Error;
+    type Error = io::Error;
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
         let sync = LocalSyncInfo::new(self.path.modification_time()?.into());
@@ -60,14 +60,14 @@ impl ConcreteFS for LocalDir {
             node_from_path_rec(&mut root, &children)?;
             TreeNode::Dir(root)
         } else {
-            return Err(self.path.invalid_path_error().into());
+            return Err(self.path.invalid_path_error());
         };
 
         Ok(Vfs::new(root))
     }
 
     async fn open(&self, path: &VirtualPath) -> Result<impl std::io::Read, Self::Error> {
-        File::open(self.path.join(path)).map_err(|e| e.into())
+        File::open(self.path.join(path))
     }
 
     // TODO: rewrite using tokio::fs
@@ -81,11 +81,11 @@ impl ConcreteFS for LocalDir {
 
         data.read_to_end(&mut buf)?;
 
-        f.write_all(&buf).map_err(|e| e.into())
+        f.write_all(&buf)
     }
 
     async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
-        fs::create_dir(self.path.join(path)).map_err(|e| e.into())
+        fs::create_dir(self.path.join(path))
     }
 
     async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
@@ -94,6 +94,12 @@ impl ConcreteFS for LocalDir {
         reader.read_to_end(&mut data)?;
 
         Ok(xxh3_64(&data))
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        Self::ConcreteFsError(Box::new(value))
     }
 }
 

@@ -1,6 +1,5 @@
-use std::io;
-
-use concrete::remote::RemoteFsError;
+use thiserror::Error;
+use vfs::{DiffError, VirtualPathBuf};
 
 pub mod concrete;
 mod sorted_list;
@@ -10,21 +9,12 @@ pub mod vfs;
 
 const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
-    Local(io::Error),
-    Remote(RemoteFsError),
-    InvalidPath,
-}
-
-impl From<io::Error> for Error {
-    fn from(value: io::Error) -> Self {
-        Self::Local(value)
-    }
-}
-
-impl From<RemoteFsError> for Error {
-    fn from(value: RemoteFsError) -> Self {
-        Self::Remote(value)
-    }
+    #[error("error from the concrete fs")]
+    ConcreteFsError(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("invalid path provided")]
+    InvalidPath(VirtualPathBuf),
+    #[error("failed to get VFS diff")]
+    InvalidSyncInfo(#[from] DiffError),
 }

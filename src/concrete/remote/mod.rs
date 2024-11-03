@@ -4,6 +4,7 @@ use std::io::{self, Read};
 
 use bytes::Buf;
 use reqwest_dav::{re_exports::reqwest, Auth, Client, ClientBuilder, Depth};
+use thiserror::Error;
 use xxhash_rust::xxh3::xxh3_64;
 
 mod dav;
@@ -18,24 +19,18 @@ use dav::{dav_parse_vfs, TagError};
 use super::ConcreteFS;
 
 /// An error during synchronisation with the remote file system
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum RemoteFsError {
-    /// A path provided by the server is invalid
-    InvalidPath(VirtualPathError),
-    /// A tag provided by the server is invalid
-    InvalidTag(TagError),
-    /// The structure of the remote FS is not valid
+    #[error("a path provided by the server is invalid")]
+    InvalidPath(#[from] VirtualPathError),
+    #[error("a tag provided by the server is invalid")]
+    InvalidTag(#[from] TagError),
+    #[error("the structure of the remote FS is not valid")]
     BadStructure,
-    /// A dav protocol error occured during communication with the remote server
-    ProtocolError(reqwest_dav::Error),
-    /// Io error while sending or receiving a file
-    IoError(io::Error),
-}
-
-impl From<reqwest_dav::Error> for RemoteFsError {
-    fn from(value: reqwest_dav::Error) -> Self {
-        Self::ProtocolError(value)
-    }
+    #[error("a dav protocol error occured during communication with the remote server")]
+    ProtocolError(#[from] reqwest_dav::Error),
+    #[error("io error while sending or receiving a file")]
+    IoError(#[from] io::Error),
 }
 
 impl From<reqwest::Error> for RemoteFsError {
@@ -44,21 +39,9 @@ impl From<reqwest::Error> for RemoteFsError {
     }
 }
 
-impl From<VirtualPathError> for RemoteFsError {
-    fn from(value: VirtualPathError) -> Self {
-        Self::InvalidPath(value)
-    }
-}
-
-impl From<TagError> for RemoteFsError {
-    fn from(value: TagError) -> Self {
-        Self::InvalidTag(value)
-    }
-}
-
-impl From<io::Error> for RemoteFsError {
-    fn from(value: io::Error) -> Self {
-        Self::IoError(value)
+impl From<RemoteFsError> for crate::Error {
+    fn from(value: RemoteFsError) -> Self {
+        Self::ConcreteFsError(Box::new(value))
     }
 }
 

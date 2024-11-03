@@ -12,9 +12,9 @@ use crate::{
 use super::{Vfs, VirtualPath, VirtualPathBuf};
 
 /// Error encountered during a diff operation
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum DiffError {
-    /// The sync info are not valid, for example wrongly indicating that a node is unmodified
+    #[error("the sync info for the path {0:?} are not valid")]
     InvalidSyncInfo(VirtualPathBuf),
 }
 
