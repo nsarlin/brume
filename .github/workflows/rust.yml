@@ -25,3 +25,7 @@ jobs:
       run: cargo clippy --all-targets -- -Dwarnings
     - name: Run tests
       run: cargo test
+    - name: Check doc
+      env:
+        RUSTDOCFLAGS: "-D warnings"
+      run: cargo doc --no-deps
