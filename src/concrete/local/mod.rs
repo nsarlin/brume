@@ -3,13 +3,19 @@
 pub mod path;
 
 use std::{
-    fs::{self, File},
-    io::{self, Read, Write},
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures::{Stream, TryStream, TryStreamExt};
 use path::{node_from_path_rec, LocalPath};
+use tokio::{
+    fs::{self, File},
+    io::AsyncReadExt,
+};
+use tokio_util::io::{ReaderStream, StreamReader};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
@@ -66,32 +72,43 @@ impl ConcreteFS for LocalDir {
         Ok(Vfs::new(root))
     }
 
-    async fn open(&self, path: &VirtualPath) -> Result<impl std::io::Read, Self::Error> {
-        File::open(self.path.join(path))
-    }
-
-    // TODO: rewrite using tokio::fs
-    async fn write<Stream: std::io::Read>(
+    async fn open(
         &self,
         path: &VirtualPath,
-        data: &mut Stream,
-    ) -> Result<(), Self::Error> {
-        let mut f = File::create(self.path.join(path))?;
-        let mut buf = Vec::new();
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>>, Self::Error> {
+        File::open(self.path.join(path))
+            .await
+            .map(ReaderStream::new)
+    }
 
-        data.read_to_end(&mut buf)?;
+    async fn write<Data: TryStream + Send + 'static + Unpin>(
+        &self,
+        path: &VirtualPath,
+        data: Data,
+    ) -> Result<(), Self::Error>
+    where
+        Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        Bytes: From<Data::Ok>,
+    {
+        let mut f = File::create(self.path.join(path)).await?;
+        let mut reader = StreamReader::new(
+            data.map_ok(Bytes::from)
+                .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+        );
 
-        f.write_all(&buf)
+        tokio::io::copy(&mut reader, &mut f).await.map(|_| ())
     }
 
     async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
-        fs::create_dir(self.path.join(path))
+        fs::create_dir(self.path.join(path)).await
     }
 
     async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
-        let mut reader = self.open(path).await?;
+        let stream = self.open(path).await?;
+        let mut reader = StreamReader::new(stream.map_err(|e| io::Error::new(ErrorKind::Other, e)));
+
         let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
+        reader.read_to_end(&mut data).await?;
 
         Ok(xxh3_64(&data))
     }
