@@ -73,7 +73,7 @@ impl VfsNodeUpdate {
         }
     }
 
-    /// Updates from two synchronized VFS are "reconcilied" before being applied.
+    /// Updates from two synchronized VFS are "reconciled" before being applied.
     ///
     /// The goal of this process is to:
     /// - remove duplicates (if the same modification has been done outside of the sync process on
@@ -84,7 +84,7 @@ impl VfsNodeUpdate {
         other: &VfsNodeUpdate,
         fs_self: &FileSystem<Concrete>,
         fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedList<ReconciliedUpdate>, Error>
+    ) -> Result<SortedList<ReconciledUpdate>, Error>
     where
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
@@ -93,7 +93,7 @@ impl VfsNodeUpdate {
             return Err(Error::InvalidPath(self.path().to_owned()));
         }
 
-        let mut reconcilied = SortedList::new();
+        let mut reconciled = SortedList::new();
 
         let concrete_self = fs_self.concrete();
         let concrete_other = fs_other.concrete();
@@ -106,7 +106,7 @@ impl VfsNodeUpdate {
                 let dir_self = fs_self.vfs().root().find_dir(pself)?;
                 let dir_other = fs_other.vfs().root().find_dir(pother)?;
 
-                let reconcilied = dir_self
+                let reconciled = dir_self
                     .concrete_diff(
                         dir_other,
                         concrete_self,
@@ -115,25 +115,25 @@ impl VfsNodeUpdate {
                     )
                     .await?
                     .iter()
-                    .map(ReconciliedUpdate::new_creation_only)
+                    .map(ReconciledUpdate::new_creation_only)
                     .collect();
                 // Since we iterate on sorted updates, the result will be sorted too
-                Ok(SortedList::unchecked_from_vec(reconcilied))
+                Ok(SortedList::unchecked_from_vec(reconciled))
             }
-            (VfsNodeUpdate::DirRemoved(_), VfsNodeUpdate::DirRemoved(_)) => Ok(reconcilied),
+            (VfsNodeUpdate::DirRemoved(_), VfsNodeUpdate::DirRemoved(_)) => Ok(reconciled),
             (VfsNodeUpdate::FileModified(_), VfsNodeUpdate::FileModified(_))
             | (VfsNodeUpdate::FileCreated(_), VfsNodeUpdate::FileCreated(_)) => {
                 if concrete_eq_file(concrete_self, concrete_other, self.path()).await? {
-                    Ok(reconcilied)
+                    Ok(reconciled)
                 } else {
-                    reconcilied.insert(ReconciliedUpdate::Conflict(self.path().to_owned()));
-                    Ok(reconcilied)
+                    reconciled.insert(ReconciledUpdate::Conflict(self.path().to_owned()));
+                    Ok(reconciled)
                 }
             }
-            (VfsNodeUpdate::FileRemoved(_), VfsNodeUpdate::FileRemoved(_)) => Ok(reconcilied),
+            (VfsNodeUpdate::FileRemoved(_), VfsNodeUpdate::FileRemoved(_)) => Ok(reconciled),
             _ => {
-                reconcilied.insert(ReconciliedUpdate::Conflict(self.path().to_owned()));
-                Ok(reconcilied)
+                reconciled.insert(ReconciledUpdate::Conflict(self.path().to_owned()));
+                Ok(reconciled)
             }
         }
     }
@@ -157,7 +157,7 @@ impl SortedUpdateList {
         other: SortedUpdateList,
         fs_self: &FileSystem<Concrete>,
         fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedList<ReconciliedUpdate>, Error>
+    ) -> Result<SortedList<ReconciledUpdate>, Error>
     where
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
@@ -176,7 +176,7 @@ impl SortedUpdateList {
             match self_item.key().cmp(other_item.key()) {
                 Ordering::Less => {
                     // Propagate the update from self to other
-                    ret.push(ReconciliedUpdate::synchronize_other(self_item));
+                    ret.push(ReconciledUpdate::synchronize_other(self_item));
                     self_item_opt = self_iter.next()
                 }
 
@@ -187,7 +187,7 @@ impl SortedUpdateList {
                 }
                 Ordering::Greater => {
                     // Propagate the update from other to self
-                    ret.push(ReconciliedUpdate::synchronize_self(other_item));
+                    ret.push(ReconciledUpdate::synchronize_self(other_item));
                     other_item_opt = other_iter.next();
                 }
             }
@@ -196,12 +196,12 @@ impl SortedUpdateList {
         // Handle the remaining items that are present in an iterator and not the
         // other one
         while let Some(self_item) = self_item_opt {
-            ret.push(ReconciliedUpdate::synchronize_other(self_item));
+            ret.push(ReconciledUpdate::synchronize_other(self_item));
             self_item_opt = self_iter.next();
         }
 
         while let Some(other_item) = other_item_opt {
-            ret.push(ReconciliedUpdate::synchronize_self(other_item));
+            ret.push(ReconciledUpdate::synchronize_self(other_item));
             other_item_opt = other_iter.next();
         }
 
@@ -214,13 +214,13 @@ impl SortedUpdateList {
     /// This is done in two steps:
     /// - First reconcile individual elements by calling [`Self::merge`]
     /// - Then find conflicts with a directory and one of its elements with
-    ///   [`SortedList<ReconciliedUpdate>::resolve_ancestor_conflicts`]
+    ///   [`SortedList<ReconciledUpdate>::resolve_ancestor_conflicts`]
     pub async fn reconcile<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
         &self,
         other: SortedUpdateList,
         fs_self: &FileSystem<Concrete>,
         fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedList<ReconciliedUpdate>, Error>
+    ) -> Result<SortedList<ReconciledUpdate>, Error>
     where
         Error: From<Concrete::Error>,
         Error: From<OtherConcrete::Error>,
@@ -257,20 +257,20 @@ impl SynchronizableUpdate {
 
 /// Output of the update reconciliation process. See [`VfsNodeUpdate::reconcile`]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ReconciliedUpdate {
+pub enum ReconciledUpdate {
     Syncronize(SynchronizableUpdate),
     Conflict(VirtualPathBuf),
 }
 
-impl ReconciliedUpdate {
+impl ReconciledUpdate {
     pub fn path(&self) -> &VirtualPath {
         match self {
-            ReconciliedUpdate::Syncronize(update) => update.update.path(),
-            ReconciliedUpdate::Conflict(path) => path.as_ref(),
+            ReconciledUpdate::Syncronize(update) => update.update.path(),
+            ReconciledUpdate::Conflict(path) => path.as_ref(),
         }
     }
 
-    /// Create a new Reconcilied update that will only be able to "create" nodes.
+    /// Create a new Reconciled update that will only be able to "create" nodes.
     ///
     /// This means that:
     /// - DirCreated/FileCreated will be applied on SelfFs
@@ -295,16 +295,16 @@ impl ReconciliedUpdate {
 
     /// Create a new `Synchronize` update with [`UpdateTarget::SelfFs`]
     pub fn synchronize_self(update: &VfsNodeUpdate) -> Self {
-        ReconciliedUpdate::Syncronize(SynchronizableUpdate::new(UpdateTarget::SelfFs, update))
+        ReconciledUpdate::Syncronize(SynchronizableUpdate::new(UpdateTarget::SelfFs, update))
     }
 
     /// Create a new `Synchronize` update with [`UpdateTarget::OtherFs`]
     pub fn synchronize_other(update: &VfsNodeUpdate) -> Self {
-        ReconciliedUpdate::Syncronize(SynchronizableUpdate::new(UpdateTarget::OtherFs, update))
+        ReconciledUpdate::Syncronize(SynchronizableUpdate::new(UpdateTarget::OtherFs, update))
     }
 }
 
-impl Sortable for ReconciliedUpdate {
+impl Sortable for ReconciledUpdate {
     type Key = VirtualPath;
 
     fn key(&self) -> &Self::Key {
@@ -312,7 +312,7 @@ impl Sortable for ReconciliedUpdate {
     }
 }
 
-impl SortedList<ReconciliedUpdate> {
+impl SortedList<ReconciledUpdate> {
     /// Find conflicts between updates on an element and a directory on its path.
     ///
     /// For example, `DirRemoved("/a/b")` and `FileModified("/a/b/c/d")` will generate conflicts on
@@ -328,12 +328,12 @@ impl SortedList<ReconciliedUpdate> {
                 iter.next_if(|next_update| next_update.path().is_inside(update.path()))
             {
                 conflict = true;
-                next_update = ReconciliedUpdate::Conflict(next_update.path().to_owned());
+                next_update = ReconciledUpdate::Conflict(next_update.path().to_owned());
                 updates.push(next_update);
             }
 
             if conflict {
-                update = ReconciliedUpdate::Conflict(update.path().to_owned())
+                update = ReconciledUpdate::Conflict(update.path().to_owned())
             }
 
             resolved.push(update);
@@ -383,12 +383,12 @@ mod test {
 
         let remote_diff = local_diff.clone();
 
-        let reconcilied = local_diff
+        let reconciled = local_diff
             .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 
-        assert!(reconcilied.is_empty());
+        assert!(reconciled.is_empty());
     }
 
     /// Check that diffs only present on one side are all kept
@@ -425,24 +425,24 @@ mod test {
             VirtualPathBuf::new("/a/b").unwrap(),
         )]);
 
-        let reconcilied = local_diff
+        let reconciled = local_diff
             .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 
-        let reconcilied_ref = SortedList::from([
-            ReconciliedUpdate::synchronize_other(&VfsNodeUpdate::FileModified(
+        let reconciled_ref = SortedList::from([
+            ReconciledUpdate::synchronize_other(&VfsNodeUpdate::FileModified(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             )),
-            ReconciliedUpdate::synchronize_self(&VfsNodeUpdate::DirRemoved(
+            ReconciledUpdate::synchronize_self(&VfsNodeUpdate::DirRemoved(
                 VirtualPathBuf::new("/a/b").unwrap(),
             )),
-            ReconciliedUpdate::synchronize_other(&VfsNodeUpdate::DirCreated(
+            ReconciledUpdate::synchronize_other(&VfsNodeUpdate::DirCreated(
                 VirtualPathBuf::new("/e").unwrap(),
             )),
         ]);
 
-        assert_eq!(reconcilied, reconcilied_ref);
+        assert_eq!(reconciled, reconciled_ref);
     }
 
     /// Test conflict detection
@@ -483,18 +483,18 @@ mod test {
             VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/a/b/test.log").unwrap()),
         ]);
 
-        let reconcilied = local_diff
+        let reconciled = local_diff
             .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 
-        let reconcilied_ref = SortedList::from([
-            ReconciliedUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            ReconciliedUpdate::Conflict(VirtualPathBuf::new("/a/b").unwrap()),
-            ReconciliedUpdate::Conflict(VirtualPathBuf::new("/a/b/test.log").unwrap()),
+        let reconciled_ref = SortedList::from([
+            ReconciledUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+            ReconciledUpdate::Conflict(VirtualPathBuf::new("/a/b").unwrap()),
+            ReconciledUpdate::Conflict(VirtualPathBuf::new("/a/b/test.log").unwrap()),
         ]);
 
-        assert_eq!(reconcilied, reconcilied_ref);
+        assert_eq!(reconciled, reconciled_ref);
     }
 
     #[tokio::test]
@@ -529,21 +529,21 @@ mod test {
 
         let remote_diff = local_diff.clone();
 
-        let reconcilied = local_diff
+        let reconciled = local_diff
             .reconcile(remote_diff, &local_fs, &remote_fs)
             .await
             .unwrap();
 
-        let reconcilied_ref = SortedList::from([
-            ReconciliedUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            ReconciliedUpdate::synchronize_self(&VfsNodeUpdate::FileCreated(
+        let reconciled_ref = SortedList::from([
+            ReconciledUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+            ReconciledUpdate::synchronize_self(&VfsNodeUpdate::FileCreated(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),
-            ReconciliedUpdate::synchronize_other(&VfsNodeUpdate::DirCreated(
+            ReconciledUpdate::synchronize_other(&VfsNodeUpdate::DirCreated(
                 VirtualPathBuf::new("/e/g").unwrap(),
             )),
         ]);
 
-        assert_eq!(reconcilied, reconcilied_ref);
+        assert_eq!(reconciled, reconciled_ref);
     }
 }
