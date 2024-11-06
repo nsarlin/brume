@@ -1,4 +1,4 @@
-//! File operations on real local or remote file systems
+//! Definition of the file operations on real local or remote file systems
 
 pub mod local;
 pub mod nextcloud;

@@ -103,14 +103,12 @@ impl VfsNodeUpdate {
                 // If the same dir has been created on both sides, we need to check if they are
                 // equivalent. If they are not, we generate updates that are only allowed to created
                 // nodes.
-                let dir_self = fs_self.vfs().root().find_dir(pself)?;
-                let dir_other = fs_other.vfs().root().find_dir(pother)?;
+                let dir_self = fs_self.find_dir(pself)?;
+                let dir_other = fs_other.find_dir(pother)?;
 
                 let reconciled = dir_self
-                    .concrete_diff(
-                        dir_other,
-                        concrete_self,
-                        concrete_other,
+                    .diff(
+                        &dir_other,
                         self.path().parent().unwrap_or(VirtualPath::root()),
                     )
                     .await?

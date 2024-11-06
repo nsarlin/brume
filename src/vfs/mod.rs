@@ -1,4 +1,4 @@
-//! An in-memory representation of a FileSystem, local or remote
+//! An in-memory representation of a FileSystem using a tree structure
 
 pub mod dir_tree;
 pub mod update;
@@ -33,7 +33,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
 impl<SyncInfo: IsModified<SyncInfo> + Clone> Vfs<SyncInfo> {
     /// Diff two VFS by comparing their nodes.
     ///
-    /// This function returns a list of differences.
+    /// This function returns a sorted list of [`VfsNodeUpdate`].
     /// The node comparison is based on the `SyncInfo` and might be recursive based on the result of
     /// [`modification_state`]. The result of the SyncInfo comparison on node is trusted.
     ///
