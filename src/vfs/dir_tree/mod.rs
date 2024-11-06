@@ -3,13 +3,10 @@
 mod dir;
 mod file;
 
-use std::cmp::Ordering;
-
 pub use dir::*;
 pub use file::*;
 
 use crate::{
-    concrete::{concrete_eq_file, ConcreteFS},
     sorted_list::{Sortable, SortedList},
     Error,
 };
@@ -71,6 +68,10 @@ impl<SyncInfo> DirTree<SyncInfo> {
 
     pub fn sync_info(&self) -> &SyncInfoState<SyncInfo> {
         self.info.sync_info()
+    }
+
+    pub fn children(&self) -> &SortedNodeList<SyncInfo> {
+        &self.children
     }
 
     /// Return a reference to the dir at the given path. Return an error if the path does
@@ -236,73 +237,6 @@ impl<SyncInfo> DirTree<SyncInfo> {
                 .zip(other.children.iter())
                 .all(|(child_self, child_other)| child_self.structural_eq(child_other))
     }
-
-    pub async fn concrete_diff<Concrete: ConcreteFS, OtherSyncInfo, OtherConcrete: ConcreteFS>(
-        &self,
-        other: &DirTree<OtherSyncInfo>,
-        concrete_self: &Concrete,
-        concrete_other: &OtherConcrete,
-        parent_path: &VirtualPath,
-    ) -> Result<SortedUpdateList, Error>
-    where
-        Error: From<Concrete::Error>,
-        Error: From<OtherConcrete::Error>,
-    {
-        // Here we cannot use `iter_zip_map` or an async variant of it because it does not seem
-        // possible to express the lifetimes required by the async closures
-
-        let mut dir_path = parent_path.to_owned();
-        dir_path.push(self.name());
-
-        let mut ret = SortedList::new();
-        let mut self_iter = self.children.iter();
-        let mut other_iter = other.children.iter();
-
-        let mut self_item_opt = self_iter.next();
-        let mut other_item_opt = other_iter.next();
-
-        while let (Some(self_item), Some(other_item)) = (self_item_opt, other_item_opt) {
-            match self_item.key().cmp(other_item.key()) {
-                Ordering::Less => {
-                    ret.insert(self_item.to_removed_diff(&dir_path));
-                    self_item_opt = self_iter.next()
-                }
-                // We can use `unchecked_extend` because we know that the updates will be produced
-                // in order
-                Ordering::Equal => {
-                    ret.unchecked_extend(
-                        Box::pin(self_item.concrete_diff(
-                            other_item,
-                            concrete_self,
-                            concrete_other,
-                            &dir_path,
-                        ))
-                        .await?,
-                    );
-                    self_item_opt = self_iter.next();
-                    other_item_opt = other_iter.next();
-                }
-                Ordering::Greater => {
-                    ret.insert(other_item.to_created_diff(&dir_path));
-                    other_item_opt = other_iter.next();
-                }
-            }
-        }
-
-        // Handle the remaining nodes that are present in an iterator and not the
-        // other one
-        while let Some(self_item) = self_item_opt {
-            ret.insert(self_item.to_removed_diff(&dir_path));
-            self_item_opt = self_iter.next();
-        }
-
-        while let Some(other_item) = other_item_opt {
-            ret.insert(other_item.to_created_diff(&dir_path));
-            other_item_opt = other_iter.next();
-        }
-
-        Ok(ret)
-    }
 }
 
 impl<SyncInfo: Clone> DirTree<SyncInfo> {
@@ -428,32 +362,34 @@ impl<SyncInfo> TreeNode<SyncInfo> {
     }
 
     pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, Error> {
-        self.find_node(path).and_then(|node| match node {
-            TreeNode::Dir(dir) => Ok(dir),
-            TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
-        })
+        self.find_node(path)
+            .ok_or(Error::InvalidPath(path.to_owned()))
+            .and_then(|node| match node {
+                TreeNode::Dir(dir) => Ok(dir),
+                TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
+            })
     }
 
     pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<SyncInfo>, Error> {
-        self.find_node(path).and_then(|node| match node {
-            TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
-            TreeNode::File(file) => Ok(file),
-        })
+        self.find_node(path)
+            .ok_or(Error::InvalidPath(path.to_owned()))
+            .and_then(|node| match node {
+                TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
+                TreeNode::File(file) => Ok(file),
+            })
     }
 
-    pub fn find_node(&self, path: &VirtualPath) -> Result<&Self, Error> {
+    pub fn find_node(&self, path: &VirtualPath) -> Option<&Self> {
         if path.is_root() {
-            Ok(self)
+            Some(self)
         } else {
             match self {
-                TreeNode::Dir(dir) => dir
-                    .find_node(path)
-                    .ok_or(Error::InvalidPath(path.to_owned())),
+                TreeNode::Dir(dir) => dir.find_node(path),
                 TreeNode::File(file) => {
                     if path.len() == 1 && file.name() == path.name() {
-                        Ok(self)
+                        Some(self)
                     } else {
-                        Err(Error::InvalidPath(path.to_owned()))
+                        None
                     }
                 }
             }
@@ -483,48 +419,6 @@ impl<SyncInfo> TreeNode<SyncInfo> {
             TreeNode::File(_) => VfsNodeUpdate::FileRemoved(self.path(parent_path)),
         }
     }
-
-    pub async fn concrete_diff<Concrete: ConcreteFS, OtherSyncInfo, OtherConcrete: ConcreteFS>(
-        &self,
-        other: &TreeNode<OtherSyncInfo>,
-        concrete_self: &Concrete,
-        concrete_other: &OtherConcrete,
-        parent_path: &VirtualPath,
-    ) -> Result<SortedUpdateList, Error>
-    where
-        Error: From<Concrete::Error>,
-        Error: From<OtherConcrete::Error>,
-    {
-        if self.name() != other.name() {
-            let mut path = parent_path.to_owned();
-            path.push(self.name());
-            return Err(Error::InvalidPath(path));
-        }
-
-        match (self, other) {
-            (TreeNode::Dir(dself), TreeNode::Dir(dother)) => {
-                dself
-                    .concrete_diff(dother, concrete_self, concrete_other, parent_path)
-                    .await
-            }
-            (TreeNode::File(fself), TreeNode::File(_fother)) => {
-                // Diff the file based on their hash
-                let mut file_path = parent_path.to_owned();
-                file_path.push(fself.name());
-
-                if !concrete_eq_file(concrete_self, concrete_other, &file_path).await? {
-                    let diff = VfsNodeUpdate::FileModified(file_path);
-                    Ok(SortedUpdateList::from([diff]))
-                } else {
-                    Ok(SortedUpdateList::new())
-                }
-            }
-            (nself, nother) => Ok(SortedUpdateList::from_vec(vec![
-                nself.to_removed_diff(parent_path),
-                nother.to_created_diff(parent_path),
-            ])),
-        }
-    }
 }
 
 impl<SyncInfo> TreeNode<SyncInfo> {
@@ -540,7 +434,10 @@ impl<SyncInfo> TreeNode<SyncInfo> {
 impl<SyncInfo: IsModified<SyncInfo>> TreeNode<SyncInfo> {
     /// Diff two nodes based on their content.
     ///
-    /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem.
+    /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem. To
+    /// diff using the true content of files, use [`FileSystemNode::diff`].
+    ///
+    /// [`FileSystemNode::diff`]: crate::filesystem::FileSystemNode
     pub fn diff(
         &self,
         other: &TreeNode<SyncInfo>,
@@ -575,10 +472,7 @@ impl<SyncInfo: IsModified<SyncInfo>> TreeNode<SyncInfo> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        test_utils::TestNode::{D, DH, F, FF, FH},
-        vfs::Vfs,
-    };
+    use crate::test_utils::TestNode::{D, DH, F, FH};
 
     #[test]
     fn test_find() {
@@ -968,51 +862,5 @@ mod test {
             ]
             .into()
         );
-    }
-
-    #[tokio::test]
-    async fn test_concrete_diff() {
-        let local_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let local_vfs = Vfs::new(local_base.clone().into_node());
-
-        let remote_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hell"), FF("f2.pdf", b"world")]),
-                D(
-                    "a",
-                    vec![D("b", vec![D("c", vec![]), FF("test.log", b"value")])],
-                ),
-                D("e", vec![]),
-            ],
-        );
-        let remote_vfs = Vfs::new(remote_base.clone().into_node());
-
-        let diff = local_vfs
-            .root()
-            .concrete_diff(
-                remote_vfs.root(),
-                &local_base,
-                &remote_base,
-                VirtualPath::root(),
-            )
-            .await
-            .unwrap();
-
-        let reference_diff = [
-            VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/a/b/test.log").unwrap()),
-            VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/e/g").unwrap()),
-        ]
-        .into();
-
-        assert_eq!(diff, reference_diff);
     }
 }
