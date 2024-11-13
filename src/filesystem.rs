@@ -2,12 +2,15 @@
 
 use std::cmp::Ordering;
 
+use futures::future::try_join_all;
+use tokio::try_join;
+
 use crate::{
     concrete::{concrete_eq_file, ConcreteFS, ConcreteUpdateApplicationError},
     sorted_vec::{Sortable, SortedVec},
     update::{
-        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, ReconciliationError, VfsNodeUpdate,
-        VfsUpdateList,
+        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, ReconciledUpdate,
+        ReconciliationError, UpdateTarget, VfsNodeUpdate, VfsUpdateList,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
     Error, NameMismatchError,
@@ -82,12 +85,63 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         })
     }
 
+    /// Apply a list of updates on the two provided concrete FS.
+    ///
+    /// The target of the update will be chosen based on the value of the [`UpdateTarget`] of the
+    /// [`ApplicableUpdate`]. Conflict files will always be created on the FileSystem in `self`.
+    ///
+    /// [`ApplicableUpdate`]: crate::update::ApplicableUpdate
+    // TODO: handle conflicts
+    pub async fn apply_updates_list_concrete<OtherConcrete: ConcreteFS>(
+        &self,
+        other_fs: &FileSystem<OtherConcrete>,
+        updates: SortedVec<ReconciledUpdate>,
+    ) -> Result<
+        (
+            Vec<AppliedUpdate<Concrete::SyncInfo>>,
+            Vec<AppliedUpdate<OtherConcrete::SyncInfo>>,
+        ),
+        ConcreteUpdateApplicationError,
+    > {
+        let handle_conflicts: Vec<_> = updates
+            .into_iter()
+            .filter_map(|update| match update {
+                ReconciledUpdate::Applicable(update) => Some(update),
+                ReconciledUpdate::Conflict(path) => {
+                    println!("WARNING: conflict on {path:?}");
+                    None
+                }
+            })
+            .collect();
+
+        let (self_updates, other_updates): (Vec<_>, Vec<_>) = handle_conflicts
+            .into_iter()
+            .partition(|update| match update.target() {
+                UpdateTarget::SelfFs => true,
+                UpdateTarget::OtherFs => false,
+            });
+
+        let self_futures = try_join_all(
+            self_updates
+                .into_iter()
+                .map(|update| self.apply_update_concrete(other_fs, update.into())),
+        );
+
+        let other_futures = try_join_all(
+            other_updates
+                .into_iter()
+                .map(|update| other_fs.apply_update_concrete(self, update.into())),
+        );
+
+        try_join!(self_futures, other_futures)
+    }
+
     /// Apply an update on the concrete fs.
     ///
     /// The file contents will be taken from `ref_fs`
     // TODO: handle if ref_fs is not sync ?
     pub async fn apply_update_concrete<OtherConcrete: ConcreteFS>(
-        &mut self,
+        &self,
         ref_fs: &FileSystem<OtherConcrete>,
         update: VfsNodeUpdate,
     ) -> Result<AppliedUpdate<Concrete::SyncInfo>, ConcreteUpdateApplicationError> {

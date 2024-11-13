@@ -4,7 +4,6 @@ use tokio::sync::Mutex;
 use ncclient::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFsError},
     filesystem::FileSystem,
-    update::{ReconciledUpdate, UpdateTarget},
     Error,
 };
 
@@ -50,24 +49,22 @@ async fn main() -> Result<(), Error> {
         println!("====");
         println!("{reconciled:?}");
 
-        for update in reconciled.into_iter() {
-            match update {
-                ReconciledUpdate::Applicable(update) => match update.target() {
-                    UpdateTarget::SelfFs => {
-                        let mut local = local.lock().await;
-                        let remote = remote.lock().await;
-                        let applied = local.apply_update_concrete(&remote, update.into()).await?;
-                        local.vfs_mut().apply_update(applied)?;
-                    }
-                    UpdateTarget::OtherFs => {
-                        let local = local.lock().await;
-                        let mut remote = remote.lock().await;
-                        let applied = remote.apply_update_concrete(&local, update.into()).await?;
-                        remote.vfs_mut().apply_update(applied)?;
-                    }
-                },
-                ReconciledUpdate::Conflict(path) => println!("WARNING: conflict on {path:?}"),
-            }
+        let (local_applied, remote_applied) = {
+            let local = local.lock().await;
+            let remote = remote.lock().await;
+            local
+                .apply_updates_list_concrete(&remote, reconciled)
+                .await?
+        };
+
+        for applied in local_applied.into_iter() {
+            let mut local = local.lock().await;
+            local.vfs_mut().apply_update(applied)?;
+        }
+
+        for applied in remote_applied.into_iter() {
+            let mut remote = remote.lock().await;
+            remote.vfs_mut().apply_update(applied)?;
         }
 
         println!("sync done");
