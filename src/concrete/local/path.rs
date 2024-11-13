@@ -7,7 +7,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::vfs::{DirTree, FileInfo, TreeNode};
+use crate::vfs::{DirTree, FileMeta, VfsNode};
 
 use super::LocalSyncInfo;
 
@@ -83,7 +83,7 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
     for path in children {
         let sync = LocalSyncInfo::new(path.modification_time()?.into());
         if path.is_file() {
-            let node = TreeNode::File(FileInfo::new(
+            let node = VfsNode::File(FileMeta::new(
                 path.file_name()
                     .and_then(|s| s.to_str())
                     .ok_or(path.invalid_path_error())?,
@@ -100,7 +100,7 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
 
             node_from_path_rec(&mut node, &path.read_dir()?.collect::<Result<Vec<_>, _>>()?)?;
 
-            parent.insert_child(TreeNode::Dir(node));
+            parent.insert_child(VfsNode::Dir(node));
         } else {
             return Err(path.invalid_path_error());
         }
@@ -115,7 +115,7 @@ mod test {
 
     use super::*;
 
-    use crate::vfs::{DirTree, TreeNode};
+    use crate::vfs::{DirTree, VfsNode};
 
     #[test]
     fn test_parse_path() {
@@ -129,7 +129,7 @@ mod test {
         let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
         node_from_path_rec(&mut root, &base).unwrap();
 
-        let parsed = TreeNode::Dir(root);
+        let parsed = VfsNode::Dir(root);
 
         let reference = &D("", base).into_node();
 

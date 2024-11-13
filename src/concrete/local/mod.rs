@@ -19,11 +19,12 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    vfs::{DirTree, FileInfo, IsModified, ModificationState, TreeNode, Vfs, VirtualPath},
+    update::{IsModified, ModificationState},
+    vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
     Error,
 };
 
-use super::ConcreteFS;
+use super::{ConcreteFS, ConcreteFsError};
 
 /// Represent a local directory and its content
 #[derive(Debug)]
@@ -39,6 +40,13 @@ impl LocalDir {
             path: path.to_path_buf(),
         })
     }
+
+    pub fn full_path(&self, path: &VirtualPath) -> PathBuf {
+        let path: &str = path.into();
+        let trimmed = path.trim_start_matches('/');
+
+        self.path.join(trimmed)
+    }
 }
 
 impl ConcreteFS for LocalDir {
@@ -49,7 +57,7 @@ impl ConcreteFS for LocalDir {
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
         let sync = LocalSyncInfo::new(self.path.modification_time()?.into());
         let root = if self.path.is_file() {
-            TreeNode::File(FileInfo::new(
+            VfsNode::File(FileMeta::new(
                 self.path
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -64,7 +72,7 @@ impl ConcreteFS for LocalDir {
                 .map(|entry| entry.unwrap())
                 .collect::<Vec<_>>();
             node_from_path_rec(&mut root, &children)?;
-            TreeNode::Dir(root)
+            VfsNode::Dir(root)
         } else {
             return Err(self.path.invalid_path_error());
         };
@@ -75,32 +83,51 @@ impl ConcreteFS for LocalDir {
     async fn open(
         &self,
         path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>>, Self::Error> {
-        File::open(self.path.join(path))
-            .await
-            .map(ReaderStream::new)
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
+        let full_path = self.full_path(path);
+        File::open(&full_path).await.map(ReaderStream::new)
     }
 
     async fn write<Data: TryStream + Send + 'static + Unpin>(
         &self,
         path: &VirtualPath,
         data: Data,
-    ) -> Result<(), Self::Error>
+    ) -> Result<Self::SyncInfo, Self::Error>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
     {
-        let mut f = File::create(self.path.join(path)).await?;
+        let full_path = self.full_path(path);
+        let mut f = File::create(&full_path).await?;
         let mut reader = StreamReader::new(
             data.map_ok(Bytes::from)
                 .map_err(|e| io::Error::new(ErrorKind::Other, e)),
         );
 
-        tokio::io::copy(&mut reader, &mut f).await.map(|_| ())
+        tokio::io::copy(&mut reader, &mut f).await?;
+
+        full_path
+            .modification_time()
+            .map(|time| LocalSyncInfo::new(time.into()))
     }
 
-    async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
-        fs::create_dir(self.path.join(path)).await
+    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        let full_path = self.full_path(path);
+        fs::remove_file(&full_path).await
+    }
+
+    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::Error> {
+        let full_path = self.full_path(path);
+        fs::create_dir(&full_path).await?;
+
+        full_path
+            .modification_time()
+            .map(|time| LocalSyncInfo::new(time.into()))
+    }
+
+    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        let full_path = self.full_path(path);
+        fs::remove_dir_all(&full_path).await
     }
 
     async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
@@ -114,9 +141,9 @@ impl ConcreteFS for LocalDir {
     }
 }
 
-impl From<io::Error> for Error {
+impl From<io::Error> for ConcreteFsError {
     fn from(value: io::Error) -> Self {
-        Self::ConcreteFsError(Box::new(value))
+        Self(Box::new(value))
     }
 }
 

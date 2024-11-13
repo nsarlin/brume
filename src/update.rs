@@ -1,22 +1,72 @@
-//! An update represents a difference between two file system nodes, and can be applied to make them
-//! equivalent.
+//! An update represents a difference between two file system nodes.
+//!
+//! For 2 filesystems A and B that are kept in sync, the lifecycle of an update comes in 3 steps:
+//! 1. **VFS diff**: The [`VFS`] of each filesystem is loaded from the [`ConcreteFS`] and compared
+//!    with its previous version. This will create two separated [`VfsUpdateList`], one for A and
+//!    one for B. The comparison does not access the concrete filesystems, only the metadata of the
+//!    files are used.
+//! 2. **Reconciliation**: The two [`VfsUpdateList`] are compared and merged, using the
+//!    [`ConcreteFS`] of A and B when needed. This step will classify the updates in 3 categories:
+//!      - Updates that should be applied (on A if they come from B and vice-versa):
+//!        [`ApplicableUpdate`]
+//!      - Updates that should be ignored, when the exact same modification has been performed on
+//!        both filesystems outside of the synchronization process
+//!      - Conflicts, when different modifications have been detected on the same node. Conflicts
+//!        arise if the node or one of its descendant has been modified on both filesystem, but the
+//!        associated updates do not match. The simplest conflict example is when files are modified
+//!        differently on both sides. Another example is a directory that is removed on A, whereas a
+//!        file inside this directory has been modified on B.
+//! 3. **Application**: Updates are applied to both the [`ConcreteFS`] and the [`VFS`]. Applying the
+//!    update to the `ConcreteFS` creates an [`AppliedUpdate`] that can be propagated to the `VFS`.
+//!
+//! [`VFS`]: crate::vfs::Vfs
 
 use std::cmp::Ordering;
 
 use crate::{
-    concrete::{concrete_eq_file, ConcreteFS},
+    concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError},
     filesystem::FileSystem,
-    sorted_list::{Sortable, SortedList},
-    Error,
+    sorted_vec::{Sortable, SortedVec},
+    vfs::{DeleteNodeError, DirTree, InvalidPathError, VirtualPath, VirtualPathBuf},
+    Error, NameMismatchError,
 };
-
-use super::{VirtualPath, VirtualPathBuf};
 
 /// Error encountered during a diff operation
 #[derive(Error, Debug)]
 pub enum DiffError {
     #[error("the sync info for the path {0:?} are not valid")]
     InvalidSyncInfo(VirtualPathBuf),
+    #[error("the nodes in 'self' and 'other' do not point to the same node and can't be diff")]
+    NodeMismatch(#[from] NameMismatchError),
+}
+
+/// Error encountered while applying an update to a VFS
+#[derive(Error, Debug)]
+pub enum VfsUpdateApplicationError {
+    #[error("the path provided in the update is invalid")]
+    InvalidPath(#[from] InvalidPathError),
+    #[error("the name of the created dir does not match the path of the update")]
+    NameMismatch(#[from] NameMismatchError),
+    #[error("the file at {0:?} already exists")]
+    FileExists(VirtualPathBuf),
+    #[error("the dir at {0:?} alread exists")]
+    DirExists(VirtualPathBuf),
+    #[error("cannot apply an update to the root dir itself")]
+    PathIsRoot,
+    #[error("failed to delete a node")]
+    DeleteError(#[from] DeleteNodeError),
+}
+
+#[derive(Error, Debug)]
+pub enum ReconciliationError {
+    #[error("error from the concrete fs during reconciliation")]
+    ConcreteFsError(#[from] ConcreteFsError),
+    #[error(
+        "the nodes in 'self' and 'other' do not point to the same node and can't be reconciled"
+    )]
+    NodeMismatch(#[from] NameMismatchError),
+    #[error("invalid path provided for reconciliation")]
+    InvalidPath(#[from] InvalidPathError),
 }
 
 /// Result of a VFS node comparison.
@@ -47,6 +97,16 @@ pub trait IsModified<Ref> {
             ModificationState::ShallowUnmodified => false,
             ModificationState::RecursiveUnmodified => false,
             ModificationState::Modified => true,
+        }
+    }
+}
+
+impl<SyncInfo: IsModified<SyncInfo>> IsModified<Self> for Option<SyncInfo> {
+    fn modification_state(&self, reference: &Self) -> ModificationState {
+        match (self, reference) {
+            (Some(valid_self), Some(valid_other)) => valid_self.modification_state(valid_other),
+            // If at least one of the node lacks SyncInfo, we need to re-check with the concrete FS.
+            (Some(_), None) | (None, None) | (None, Some(_)) => ModificationState::Modified,
         }
     }
 }
@@ -84,16 +144,16 @@ impl VfsNodeUpdate {
         other: &VfsNodeUpdate,
         fs_self: &FileSystem<Concrete>,
         fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedList<ReconciledUpdate>, Error>
-    where
-        Error: From<Concrete::Error>,
-        Error: From<OtherConcrete::Error>,
-    {
+    ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
         if self.path() != other.path() {
-            return Err(Error::InvalidPath(self.path().to_owned()));
+            return Err(NameMismatchError {
+                found: self.path().name().to_string(),
+                expected: other.path().name().to_string(),
+            }
+            .into());
         }
 
-        let mut reconciled = SortedList::new();
+        let mut reconciled = SortedVec::new();
 
         let concrete_self = fs_self.concrete();
         let concrete_other = fs_other.concrete();
@@ -116,11 +176,12 @@ impl VfsNodeUpdate {
                     .map(ReconciledUpdate::new_creation_only)
                     .collect();
                 // Since we iterate on sorted updates, the result will be sorted too
-                Ok(SortedList::unchecked_from_vec(reconciled))
+                Ok(SortedVec::unchecked_from_vec(reconciled))
             }
             (VfsNodeUpdate::DirRemoved(_), VfsNodeUpdate::DirRemoved(_)) => Ok(reconciled),
             (VfsNodeUpdate::FileModified(_), VfsNodeUpdate::FileModified(_))
             | (VfsNodeUpdate::FileCreated(_), VfsNodeUpdate::FileCreated(_)) => {
+                // TODO: check size first before hash, to avoid computing a hash if size differ
                 if concrete_eq_file(concrete_self, concrete_other, self.path()).await? {
                     Ok(reconciled)
                 } else {
@@ -145,21 +206,18 @@ impl Sortable for VfsNodeUpdate {
     }
 }
 
-pub type SortedUpdateList = SortedList<VfsNodeUpdate>;
+/// Sorted list of [`VfsNodeUpdate`]
+pub type VfsUpdateList = SortedVec<VfsNodeUpdate>;
 
-impl SortedUpdateList {
-    /// Merge two update lists by calling [`SortedUpdateList::reconcile`] on their elmements one by
+impl VfsUpdateList {
+    /// Merge two update lists by calling [`VfsNodeUpdate::reconcile`] on their elements one by
     /// one
     async fn merge<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
         &self,
-        other: SortedUpdateList,
+        other: VfsUpdateList,
         fs_self: &FileSystem<Concrete>,
         fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedList<ReconciledUpdate>, Error>
-    where
-        Error: From<Concrete::Error>,
-        Error: From<OtherConcrete::Error>,
-    {
+    ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
         // Here we cannot use `iter_zip_map` or an async variant of it because it does not seem
         // possible to express the lifetimes required by the async closures
 
@@ -174,7 +232,7 @@ impl SortedUpdateList {
             match self_item.key().cmp(other_item.key()) {
                 Ordering::Less => {
                     // Propagate the update from self to other
-                    ret.push(ReconciledUpdate::synchronize_other(self_item));
+                    ret.push(ReconciledUpdate::applicable_other(self_item));
                     self_item_opt = self_iter.next()
                 }
 
@@ -185,7 +243,7 @@ impl SortedUpdateList {
                 }
                 Ordering::Greater => {
                     // Propagate the update from other to self
-                    ret.push(ReconciledUpdate::synchronize_self(other_item));
+                    ret.push(ReconciledUpdate::applicable_self(other_item));
                     other_item_opt = other_iter.next();
                 }
             }
@@ -194,35 +252,30 @@ impl SortedUpdateList {
         // Handle the remaining items that are present in an iterator and not the
         // other one
         while let Some(self_item) = self_item_opt {
-            ret.push(ReconciledUpdate::synchronize_other(self_item));
+            ret.push(ReconciledUpdate::applicable_other(self_item));
             self_item_opt = self_iter.next();
         }
 
         while let Some(other_item) = other_item_opt {
-            ret.push(ReconciledUpdate::synchronize_self(other_item));
+            ret.push(ReconciledUpdate::applicable_self(other_item));
             other_item_opt = other_iter.next();
         }
 
         // Ok to use unchecked since we iterate on ordered updates
-        Ok(SortedList::unchecked_from_vec(ret))
+        Ok(SortedVec::unchecked_from_vec(ret))
     }
 
     /// Reconcile two updates lists.
     ///
     /// This is done in two steps:
-    /// - First reconcile individual elements by calling [`Self::merge`]
-    /// - Then find conflicts with a directory and one of its elements with
-    ///   [`SortedList<ReconciledUpdate>::resolve_ancestor_conflicts`]
+    /// - First reconcile individual elements by comparing them between one list and the other
+    /// - Then find conflicts with a directory and one of its elements
     pub async fn reconcile<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
         &self,
-        other: SortedUpdateList,
+        other: VfsUpdateList,
         fs_self: &FileSystem<Concrete>,
         fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedList<ReconciledUpdate>, Error>
-    where
-        Error: From<Concrete::Error>,
-        Error: From<OtherConcrete::Error>,
-    {
+    ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
         let merged = self.merge(other, fs_self, fs_other).await?;
 
         Ok(merged.resolve_ancestor_conflicts())
@@ -237,33 +290,43 @@ pub enum UpdateTarget {
     OtherFs,
 }
 
-/// An update that is ready to be synchronized
+/// An update that is ready to be applied
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SynchronizableUpdate {
+pub struct ApplicableUpdate {
     target: UpdateTarget,
     update: VfsNodeUpdate,
 }
 
-impl SynchronizableUpdate {
+impl ApplicableUpdate {
     pub fn new(target: UpdateTarget, update: &VfsNodeUpdate) -> Self {
         Self {
             target,
             update: update.clone(),
         }
     }
+
+    pub fn target(&self) -> UpdateTarget {
+        self.target
+    }
 }
 
-/// Output of the update reconciliation process. See [`VfsNodeUpdate::reconcile`]
+impl From<ApplicableUpdate> for VfsNodeUpdate {
+    fn from(value: ApplicableUpdate) -> Self {
+        value.update
+    }
+}
+
+/// Output of the update reconciliation process. See [`VfsUpdateList::reconcile`]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconciledUpdate {
-    Syncronize(SynchronizableUpdate),
+    Applicable(ApplicableUpdate),
     Conflict(VirtualPathBuf),
 }
 
 impl ReconciledUpdate {
     pub fn path(&self) -> &VirtualPath {
         match self {
-            ReconciledUpdate::Syncronize(update) => update.update.path(),
+            ReconciledUpdate::Applicable(update) => update.update.path(),
             ReconciledUpdate::Conflict(path) => path.as_ref(),
         }
     }
@@ -277,13 +340,13 @@ impl ReconciledUpdate {
     pub fn new_creation_only(update: &VfsNodeUpdate) -> Self {
         match update {
             VfsNodeUpdate::DirCreated(_) | VfsNodeUpdate::FileCreated(_) => {
-                Self::Syncronize(SynchronizableUpdate::new(UpdateTarget::SelfFs, update))
+                Self::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
             }
-            VfsNodeUpdate::DirRemoved(path) => Self::Syncronize(SynchronizableUpdate::new(
+            VfsNodeUpdate::DirRemoved(path) => Self::Applicable(ApplicableUpdate::new(
                 UpdateTarget::OtherFs,
                 &VfsNodeUpdate::DirCreated(path.clone()),
             )),
-            VfsNodeUpdate::FileRemoved(path) => Self::Syncronize(SynchronizableUpdate::new(
+            VfsNodeUpdate::FileRemoved(path) => Self::Applicable(ApplicableUpdate::new(
                 UpdateTarget::OtherFs,
                 &VfsNodeUpdate::FileCreated(path.clone()),
             )),
@@ -291,14 +354,14 @@ impl ReconciledUpdate {
         }
     }
 
-    /// Create a new `Synchronize` update with [`UpdateTarget::SelfFs`]
-    pub fn synchronize_self(update: &VfsNodeUpdate) -> Self {
-        ReconciledUpdate::Syncronize(SynchronizableUpdate::new(UpdateTarget::SelfFs, update))
+    /// Create a new `Applicable` update with [`UpdateTarget::SelfFs`]
+    pub fn applicable_self(update: &VfsNodeUpdate) -> Self {
+        ReconciledUpdate::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
     }
 
-    /// Create a new `Synchronize` update with [`UpdateTarget::OtherFs`]
-    pub fn synchronize_other(update: &VfsNodeUpdate) -> Self {
-        ReconciledUpdate::Syncronize(SynchronizableUpdate::new(UpdateTarget::OtherFs, update))
+    /// Create a new `Applicable` update with [`UpdateTarget::OtherFs`]
+    pub fn applicable_other(update: &VfsNodeUpdate) -> Self {
+        ReconciledUpdate::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
     }
 }
 
@@ -310,12 +373,12 @@ impl Sortable for ReconciledUpdate {
     }
 }
 
-impl SortedList<ReconciledUpdate> {
+impl SortedVec<ReconciledUpdate> {
     /// Find conflicts between updates on an element and a directory on its path.
     ///
     /// For example, `DirRemoved("/a/b")` and `FileModified("/a/b/c/d")` will generate conflicts on
     /// both `/a/b` and `/a/b/c/d`.
-    pub fn resolve_ancestor_conflicts(self) -> Self {
+    fn resolve_ancestor_conflicts(self) -> Self {
         let mut resolved = Vec::new();
         let mut iter = self.into_iter().peekable();
 
@@ -338,14 +401,106 @@ impl SortedList<ReconciledUpdate> {
             resolved.extend(updates);
         }
 
-        SortedList::unchecked_from_vec(resolved)
+        SortedVec::unchecked_from_vec(resolved)
+    }
+}
+
+/// Represent a DirCreation update that has been successfully applied on the [`ConcreteFS`].
+#[derive(Clone, Debug)]
+pub struct AppliedDirCreation<SyncInfo> {
+    path: VirtualPathBuf,
+    dir: DirTree<SyncInfo>,
+}
+
+impl<SyncInfo> AppliedDirCreation<SyncInfo> {
+    /// Create a new `AppliedDirCreation`.
+    ///
+    /// Return an error if the name of the dir does not match the last element of the path
+    pub fn new(path: &VirtualPath, dir: DirTree<SyncInfo>) -> Result<Self, NameMismatchError> {
+        if path.name() != dir.name() {
+            return Err(NameMismatchError {
+                found: path.name().to_string(),
+                expected: dir.name().to_string(),
+            });
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            dir,
+        })
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+}
+
+impl<SyncInfo> From<AppliedDirCreation<SyncInfo>> for DirTree<SyncInfo> {
+    fn from(value: AppliedDirCreation<SyncInfo>) -> Self {
+        value.dir
+    }
+}
+
+/// Represent a File creation or modification update that has been successfully applied on the
+/// [`ConcreteFS`].
+#[derive(Clone, Debug)]
+pub struct AppliedFileUpdate<SyncInfo> {
+    path: VirtualPathBuf,
+    file_info: SyncInfo,
+}
+
+impl<SyncInfo> AppliedFileUpdate<SyncInfo> {
+    pub fn new(path: &VirtualPath, file_info: SyncInfo) -> Self {
+        Self {
+            path: path.to_owned(),
+            file_info,
+        }
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+
+    pub fn into_sync_info(self) -> SyncInfo {
+        self.file_info
+    }
+}
+
+/// An update that has been applied on a [`ConcreteFS`], and will be propagated to the [`Vfs`].
+///
+/// For node creation or modification, this types holds the SyncInfo needed to apply the update on
+/// the `Vfs`. These SyncInfo must be fetched from the `ConcreteFS` immediatly after the update
+/// application for correctness.
+///
+/// [`Vfs`]: crate::vfs::Vfs
+#[derive(Clone, Debug)]
+pub enum AppliedUpdate<SyncInfo> {
+    DirCreated(AppliedDirCreation<SyncInfo>),
+    DirRemoved(VirtualPathBuf),
+    FileCreated(AppliedFileUpdate<SyncInfo>),
+    FileModified(AppliedFileUpdate<SyncInfo>),
+    FileRemoved(VirtualPathBuf),
+    //TODO: detect moves
+}
+
+impl<SyncInfo> AppliedUpdate<SyncInfo> {
+    pub fn path(&self) -> &VirtualPath {
+        match self {
+            AppliedUpdate::DirCreated(update) => update.path(),
+            AppliedUpdate::FileCreated(update) | AppliedUpdate::FileModified(update) => {
+                update.path()
+            }
+            AppliedUpdate::DirRemoved(path) | AppliedUpdate::FileRemoved(path) => path,
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_utils::TestNode::{D, FF};
+    use crate::test_utils::{
+        TestFileSystem,
+        TestNode::{D, FF},
+    };
 
     /// Check that duplicate diffs are correctly removed
     #[tokio::test]
@@ -358,7 +513,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut local_fs = FileSystem::new(local_base);
+        let mut local_fs = TestFileSystem::new(local_base.into());
         local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
@@ -370,10 +525,10 @@ mod test {
             ],
         );
 
-        let mut remote_fs = FileSystem::new(remote_base);
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
         remote_fs.update_vfs().await.unwrap();
 
-        let local_diff = SortedList::from([
+        let local_diff = SortedVec::from([
             VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
             VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
             VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/e").unwrap()),
@@ -400,7 +555,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut local_fs = FileSystem::new(local_base);
+        let mut local_fs = TestFileSystem::new(local_base.into());
         local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
@@ -411,15 +566,15 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut remote_fs = FileSystem::new(remote_base);
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
         remote_fs.update_vfs().await.unwrap();
 
-        let local_diff = SortedList::from([
+        let local_diff = SortedVec::from([
             VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
             VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/e").unwrap()),
         ]);
 
-        let remote_diff = SortedList::from([VfsNodeUpdate::DirRemoved(
+        let remote_diff = SortedVec::from([VfsNodeUpdate::DirRemoved(
             VirtualPathBuf::new("/a/b").unwrap(),
         )]);
 
@@ -428,14 +583,14 @@ mod test {
             .await
             .unwrap();
 
-        let reconciled_ref = SortedList::from([
-            ReconciledUpdate::synchronize_other(&VfsNodeUpdate::FileModified(
+        let reconciled_ref = SortedVec::from([
+            ReconciledUpdate::applicable_other(&VfsNodeUpdate::FileModified(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             )),
-            ReconciledUpdate::synchronize_self(&VfsNodeUpdate::DirRemoved(
+            ReconciledUpdate::applicable_self(&VfsNodeUpdate::DirRemoved(
                 VirtualPathBuf::new("/a/b").unwrap(),
             )),
-            ReconciledUpdate::synchronize_other(&VfsNodeUpdate::DirCreated(
+            ReconciledUpdate::applicable_other(&VfsNodeUpdate::DirCreated(
                 VirtualPathBuf::new("/e").unwrap(),
             )),
         ]);
@@ -454,7 +609,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut local_fs = FileSystem::new(local_base);
+        let mut local_fs = TestFileSystem::new(local_base.into());
         local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
@@ -468,15 +623,15 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut remote_fs = FileSystem::new(remote_base);
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
         remote_fs.update_vfs().await.unwrap();
 
-        let local_diff = SortedList::from([
+        let local_diff = SortedVec::from([
             VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
             VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
         ]);
 
-        let remote_diff = SortedList::from([
+        let remote_diff = SortedVec::from([
             VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
             VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/a/b/test.log").unwrap()),
         ]);
@@ -486,7 +641,7 @@ mod test {
             .await
             .unwrap();
 
-        let reconciled_ref = SortedList::from([
+        let reconciled_ref = SortedVec::from([
             ReconciledUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
             ReconciledUpdate::Conflict(VirtualPathBuf::new("/a/b").unwrap()),
             ReconciledUpdate::Conflict(VirtualPathBuf::new("/a/b/test.log").unwrap()),
@@ -505,7 +660,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut local_fs = FileSystem::new(local_base);
+        let mut local_fs = TestFileSystem::new(local_base.into());
         local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
@@ -519,11 +674,11 @@ mod test {
                 D("e", vec![]),
             ],
         );
-        let mut remote_fs = FileSystem::new(remote_base);
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
         remote_fs.update_vfs().await.unwrap();
 
         let local_diff =
-            SortedList::from([VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/").unwrap())]);
+            SortedVec::from([VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/").unwrap())]);
 
         let remote_diff = local_diff.clone();
 
@@ -532,12 +687,12 @@ mod test {
             .await
             .unwrap();
 
-        let reconciled_ref = SortedList::from([
+        let reconciled_ref = SortedVec::from([
             ReconciledUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            ReconciledUpdate::synchronize_self(&VfsNodeUpdate::FileCreated(
+            ReconciledUpdate::applicable_self(&VfsNodeUpdate::FileCreated(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),
-            ReconciledUpdate::synchronize_other(&VfsNodeUpdate::DirCreated(
+            ReconciledUpdate::applicable_other(&VfsNodeUpdate::DirCreated(
                 VirtualPathBuf::new("/e/g").unwrap(),
             )),
         ]);

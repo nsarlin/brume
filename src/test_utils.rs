@@ -1,45 +1,48 @@
-use std::{ffi::OsStr, time::SystemTime};
+use std::{cell::RefCell, ffi::OsStr, io::ErrorKind, ops::Deref, time::SystemTime};
 
 use bytes::Bytes;
-use futures::{stream, Stream, TryStream};
-use tokio::io::{self};
+use futures::{stream, Stream, TryStream, TryStreamExt};
+use tokio::io::{self, AsyncReadExt};
+use tokio_util::io::StreamReader;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    concrete::{local::path::LocalPath, ConcreteFS},
-    vfs::{DirTree, FileInfo, IsModified, ModificationState, TreeNode, Vfs, VirtualPath},
-    Error,
+    concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError},
+    filesystem::FileSystem,
+    update::{IsModified, ModificationState},
+    vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
 };
 
+/// Can be used to easily create Vfs for tests
 #[derive(Clone, Debug)]
-pub(crate) enum TestNode {
-    F(&'static str),
-    D(&'static str, Vec<TestNode>),
-    FH(&'static str, u64),
-    DH(&'static str, u64, Vec<TestNode>),
-    FF(&'static str, &'static [u8]),
+pub(crate) enum TestNode<'a> {
+    F(&'a str),
+    D(&'a str, Vec<TestNode<'a>>),
+    FH(&'a str, u64),
+    DH(&'a str, u64, Vec<TestNode<'a>>),
+    FF(&'a str, &'a [u8]),
 }
 
-impl TestNode {
+impl<'a> TestNode<'a> {
     pub(crate) fn name(&self) -> &str {
         match self {
-            TestNode::F(name)
-            | TestNode::D(name, _)
-            | TestNode::FH(name, _)
-            | TestNode::DH(name, _, _)
-            | TestNode::FF(name, _) => name,
+            Self::F(name)
+            | Self::D(name, _)
+            | Self::FH(name, _)
+            | Self::DH(name, _, _)
+            | Self::FF(name, _) => name,
         }
     }
 
-    pub(crate) fn into_node_recursive_diff(self) -> TreeNode<RecursiveTestSyncInfo> {
+    pub(crate) fn into_node_recursive_diff(self) -> VfsNode<RecursiveTestSyncInfo> {
         match self {
-            TestNode::F(name) | TestNode::FF(name, _) => {
+            Self::F(name) | Self::FF(name, _) => {
                 let sync = RecursiveTestSyncInfo::new(0);
-                TreeNode::File(FileInfo::new(name, sync))
+                VfsNode::File(FileMeta::new(name, sync))
             }
-            TestNode::D(name, children) => {
+            Self::D(name, children) => {
                 let sync = RecursiveTestSyncInfo::new(0);
-                TreeNode::Dir(DirTree::new_with_children(
+                VfsNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
                     children
@@ -48,13 +51,13 @@ impl TestNode {
                         .collect(),
                 ))
             }
-            TestNode::FH(name, hash) => {
+            Self::FH(name, hash) => {
                 let sync = RecursiveTestSyncInfo::new(hash);
-                TreeNode::File(FileInfo::new(name, sync))
+                VfsNode::File(FileMeta::new(name, sync))
             }
-            TestNode::DH(name, hash, children) => {
+            Self::DH(name, hash, children) => {
                 let sync = RecursiveTestSyncInfo::new(hash);
-                TreeNode::Dir(DirTree::new_with_children(
+                VfsNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
                     children
@@ -66,19 +69,19 @@ impl TestNode {
         }
     }
 
-    pub(crate) fn into_node(self) -> TreeNode<ShallowTestSyncInfo> {
+    pub(crate) fn into_node(self) -> VfsNode<ShallowTestSyncInfo> {
         self.into_node_shallow_diff()
     }
 
-    pub(crate) fn into_node_shallow_diff(self) -> TreeNode<ShallowTestSyncInfo> {
+    pub(crate) fn into_node_shallow_diff(self) -> VfsNode<ShallowTestSyncInfo> {
         match self {
-            TestNode::F(name) | TestNode::FF(name, _) => {
+            Self::F(name) | Self::FF(name, _) => {
                 let sync = ShallowTestSyncInfo::new(0);
-                TreeNode::File(FileInfo::new(name, sync))
+                VfsNode::File(FileMeta::new(name, sync))
             }
-            TestNode::D(name, children) => {
+            Self::D(name, children) => {
                 let sync = ShallowTestSyncInfo::new(0);
-                TreeNode::Dir(DirTree::new_with_children(
+                VfsNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
                     children
@@ -87,13 +90,13 @@ impl TestNode {
                         .collect(),
                 ))
             }
-            TestNode::FH(name, hash) => {
+            Self::FH(name, hash) => {
                 let sync = ShallowTestSyncInfo::new(hash);
-                TreeNode::File(FileInfo::new(name, sync))
+                VfsNode::File(FileMeta::new(name, sync))
             }
-            TestNode::DH(name, hash, children) => {
+            Self::DH(name, hash, children) => {
                 let sync = ShallowTestSyncInfo::new(hash);
-                TreeNode::Dir(DirTree::new_with_children(
+                VfsNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
                     children
@@ -111,10 +114,10 @@ impl TestNode {
 
     pub(crate) fn into_dir_shallow_diff(self) -> DirTree<ShallowTestSyncInfo> {
         match self {
-            TestNode::F(_) => {
+            Self::F(_) => {
                 panic!()
             }
-            TestNode::D(name, children) => {
+            Self::D(name, children) => {
                 let sync = ShallowTestSyncInfo::new(0);
                 DirTree::new_with_children(
                     name,
@@ -125,10 +128,10 @@ impl TestNode {
                         .collect(),
                 )
             }
-            TestNode::FH(_, _) => {
+            Self::FH(_, _) => {
                 panic!()
             }
-            TestNode::DH(name, hash, children) => {
+            Self::DH(name, hash, children) => {
                 let sync = ShallowTestSyncInfo::new(hash);
                 DirTree::new_with_children(
                     name,
@@ -139,7 +142,7 @@ impl TestNode {
                         .collect(),
                 )
             }
-            TestNode::FF(_, _) => panic!(),
+            Self::FF(_, _) => panic!(),
         }
     }
 
@@ -150,8 +153,8 @@ impl TestNode {
             let (top_level, remainder) = path.top_level_split().unwrap();
 
             match self {
-                TestNode::F(_) | TestNode::FF(_, _) | TestNode::FH(_, _) => panic!(),
-                TestNode::D(_, children) | TestNode::DH(_, _, children) => {
+                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) => panic!(),
+                Self::D(_, children) | Self::DH(_, _, children) => {
                     for child in children {
                         if child.name() == top_level {
                             if remainder.is_root() {
@@ -166,9 +169,33 @@ impl TestNode {
             }
         }
     }
+
+    fn _get_node_mut(&mut self, path: &VirtualPath) -> &mut Self {
+        if path.is_root() {
+            self
+        } else {
+            let (top_level, remainder) = path.top_level_split().unwrap();
+
+            match self {
+                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) => panic!(),
+                Self::D(_, children) | Self::DH(_, _, children) => {
+                    for child in children {
+                        if child.name() == top_level {
+                            if remainder.is_root() {
+                                return child;
+                            } else {
+                                return child._get_node_mut(remainder);
+                            }
+                        }
+                    }
+                    panic!("{path:?}")
+                }
+            }
+        }
+    }
 }
 
-impl LocalPath for TestNode {
+impl<'a> LocalPath for TestNode<'a> {
     type DirEntry = Self;
     fn is_file(&self) -> bool {
         match self {
@@ -205,57 +232,285 @@ impl LocalPath for TestNode {
     }
 }
 
-impl ConcreteFS for TestNode {
+/// Like a TestNode, but own its content, wich allows modifications.
+///
+/// Can be used to define a test concrete fs
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum InnerConcreteTestNode {
+    D(String, Vec<InnerConcreteTestNode>),
+    DH(String, u64, Vec<InnerConcreteTestNode>),
+    FF(String, Vec<u8>),
+}
+
+impl<'a> From<TestNode<'a>> for InnerConcreteTestNode {
+    fn from(value: TestNode<'a>) -> Self {
+        match value {
+            TestNode::F(_) | TestNode::FH(_, _) => panic!(),
+            TestNode::D(name, children) => Self::D(
+                name.to_string(),
+                children.into_iter().map(|child| child.into()).collect(),
+            ),
+            TestNode::DH(name, hash, children) => Self::DH(
+                name.to_string(),
+                hash,
+                children.into_iter().map(|child| child.into()).collect(),
+            ),
+            TestNode::FF(name, content) => Self::FF(name.to_string(), content.to_vec()),
+        }
+    }
+}
+
+impl<'a> From<&'a InnerConcreteTestNode> for TestNode<'a> {
+    fn from(value: &'a InnerConcreteTestNode) -> Self {
+        match value {
+            InnerConcreteTestNode::D(name, children) => {
+                Self::D(name, children.iter().map(|child| child.into()).collect())
+            }
+            InnerConcreteTestNode::DH(name, hash, children) => Self::DH(
+                name,
+                *hash,
+                children.iter().map(|child| child.into()).collect(),
+            ),
+            InnerConcreteTestNode::FF(name, content) => Self::FF(name, content),
+        }
+    }
+}
+
+impl InnerConcreteTestNode {
+    fn name(&self) -> &str {
+        match self {
+            InnerConcreteTestNode::D(name, _)
+            | InnerConcreteTestNode::DH(name, _, _)
+            | InnerConcreteTestNode::FF(name, _) => name,
+        }
+    }
+
+    fn is_file(&self) -> bool {
+        match self {
+            InnerConcreteTestNode::D(_, _) | InnerConcreteTestNode::DH(_, _, _) => false,
+            InnerConcreteTestNode::FF(_, _) => true,
+        }
+    }
+
+    fn is_dir(&self) -> bool {
+        match self {
+            InnerConcreteTestNode::D(_, _) | InnerConcreteTestNode::DH(_, _, _) => true,
+            InnerConcreteTestNode::FF(_, _) => false,
+        }
+    }
+
+    fn get_node(&self, path: &VirtualPath) -> &Self {
+        if path.is_root() {
+            self
+        } else {
+            let (top_level, remainder) = path.top_level_split().unwrap();
+
+            match self {
+                Self::FF(_, _) => panic!(),
+                Self::D(_, children) | Self::DH(_, _, children) => {
+                    for child in children {
+                        if child.name() == top_level {
+                            if remainder.is_root() {
+                                return child;
+                            } else {
+                                return child.get_node(remainder);
+                            }
+                        }
+                    }
+                    panic!("{path:?}")
+                }
+            }
+        }
+    }
+
+    fn get_node_mut(&mut self, path: &VirtualPath) -> &mut Self {
+        if path.is_root() {
+            self
+        } else {
+            let (top_level, remainder) = path.top_level_split().unwrap();
+
+            match self {
+                Self::FF(_, _) => panic!(),
+                Self::D(_, children) | Self::DH(_, _, children) => {
+                    for child in children {
+                        if child.name() == top_level {
+                            if remainder.is_root() {
+                                return child;
+                            } else {
+                                return child.get_node_mut(remainder);
+                            }
+                        }
+                    }
+                    panic!("{path:?}")
+                }
+            }
+        }
+    }
+}
+
+/// Mock FS that can be used to test concrete operations.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ConcreteTestNode {
+    inner: RefCell<InnerConcreteTestNode>,
+}
+
+pub(crate) type TestFileSystem = FileSystem<ConcreteTestNode>;
+
+impl<'a> From<TestNode<'a>> for ConcreteTestNode {
+    fn from(value: TestNode) -> Self {
+        Self {
+            inner: RefCell::new(value.into()),
+        }
+    }
+}
+
+impl ConcreteFS for ConcreteTestNode {
     type SyncInfo = ShallowTestSyncInfo;
 
-    type Error = Error;
+    type Error = TestError;
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
-        let root = self.clone().into_node();
+        let inner = self.inner.borrow();
+        let root = TestNode::from(inner.deref()).into_node();
+
         Ok(Vfs::new(root))
     }
 
     async fn open(
         &self,
         path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>>, Self::Error> {
-        match self.get_node(path) {
-            TestNode::F(_) => panic!(),
-            TestNode::D(_, _) => panic!(),
-            TestNode::FH(_, _) => panic!(),
-            TestNode::DH(_, _, _) => panic!(),
-            TestNode::FF(_, content) => Ok(stream::iter(
-                content.iter().map(|b| Ok(Bytes::from(vec![*b]))),
-            )),
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
+        let inner = self.inner.borrow();
+        let root = TestNode::from(inner.deref());
+        let node = root.get_node(path);
+
+        match node {
+            TestNode::F(_) => panic!("{path:?}"),
+            TestNode::D(_, _) => panic!("{path:?}"),
+            TestNode::FH(_, _) => panic!("{path:?}"),
+            TestNode::DH(_, _, _) => panic!("{path:?}"),
+            TestNode::FF(_, content) => {
+                let owned = content.to_vec();
+                let stream = stream::iter(owned.into_iter().map(|b| Ok(Bytes::from(vec![b]))));
+                Ok(stream)
+            }
         }
     }
 
-    async fn write<Data: TryStream + Send + 'static + Unpin>(
+    async fn write<Data: TryStream + Send + Unpin>(
         &self,
-        _path: &VirtualPath,
-        _data: Data,
-    ) -> Result<(), Self::Error>
+        path: &VirtualPath,
+        data: Data,
+    ) -> Result<Self::SyncInfo, Self::Error>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
     {
-        todo!()
+        // Read data
+        let mut reader = StreamReader::new(
+            data.map_ok(Bytes::from)
+                .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+        );
+
+        let mut content = Vec::new();
+        reader.read_to_end(&mut content).await?;
+
+        // Write into the node
+        let mut inner = self.inner.borrow_mut();
+        let parent = inner.get_node_mut(path.parent().unwrap());
+
+        match parent {
+            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
+                // Overwrite file
+                for child in children.iter_mut() {
+                    if child.name() == path.name() {
+                        *child = InnerConcreteTestNode::FF(path.name().to_owned(), content);
+                        return Ok(ShallowTestSyncInfo::new(0));
+                    }
+                }
+
+                // Create file
+                children.push(InnerConcreteTestNode::FF(path.name().to_owned(), content));
+                Ok(ShallowTestSyncInfo::new(0))
+            }
+            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+        }
     }
 
-    async fn mkdir(&self, _path: &VirtualPath) -> Result<(), Self::Error> {
-        todo!()
+    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        let mut inner = self.inner.borrow_mut();
+        let parent = inner.get_node_mut(path.parent().unwrap());
+
+        match parent {
+            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
+                let init_len = children.len();
+                *children = children
+                    .iter()
+                    .filter(|child| child.name() != path.name() || child.is_dir())
+                    .cloned()
+                    .collect();
+
+                if children.len() != init_len - 1 {
+                    panic!("{path:?}")
+                }
+                Ok(())
+            }
+            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+        }
+    }
+
+    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::Error> {
+        let mut inner = self.inner.borrow_mut();
+        let parent = inner.get_node_mut(path.parent().unwrap());
+
+        match parent {
+            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
+                children.push(InnerConcreteTestNode::D(
+                    path.name().to_string(),
+                    Vec::new(),
+                ));
+
+                Ok(ShallowTestSyncInfo::new(0))
+            }
+            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+        }
+    }
+
+    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        let mut inner = self.inner.borrow_mut();
+        let parent = inner.get_node_mut(path.parent().unwrap());
+
+        match parent {
+            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
+                let init_len = children.len();
+                *children = children
+                    .iter()
+                    .filter(|child| child.name() != path.name() || child.is_file())
+                    .cloned()
+                    .collect();
+
+                if children.len() != init_len - 1 {
+                    dbg!(&children);
+                    panic!("{path:?} ({} - {})", children.len(), init_len)
+                }
+                Ok(())
+            }
+            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+        }
     }
 
     async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
-        match self.get_node(path) {
-            TestNode::F(_) => panic!("{path:?}"),
-            TestNode::D(_, _) => panic!("{path:?}"),
-            TestNode::FH(_, hash) => Ok(*hash),
-            TestNode::DH(_, hash, _) => Ok(*hash),
-            TestNode::FF(_, content) => Ok(xxh3_64(content)),
+        let inner = self.inner.borrow_mut();
+
+        match inner.get_node(path) {
+            InnerConcreteTestNode::D(_, _) => panic!("{path:?}"),
+            InnerConcreteTestNode::DH(_, hash, _) => Ok(*hash),
+            InnerConcreteTestNode::FF(_, content) => Ok(xxh3_64(content)),
         }
     }
 }
+
+pub type TestError = ConcreteFsError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecursiveTestSyncInfo {

@@ -14,13 +14,14 @@ use xxhash_rust::xxh3::xxh3_64;
 mod dav;
 
 use crate::{
-    vfs::{IsModified, ModificationState, Vfs, VirtualPath, VirtualPathError},
+    update::{IsModified, ModificationState},
+    vfs::{Vfs, VirtualPath, VirtualPathError},
     NC_DAV_PATH_STR,
 };
 
-use dav::{dav_parse_vfs, TagError};
+use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
 
-use super::ConcreteFS;
+use super::{ConcreteFS, ConcreteFsError};
 
 /// An error during synchronisation with the nextcloud file system
 #[derive(Error, Debug)]
@@ -43,9 +44,9 @@ impl From<reqwest::Error> for NextcloudFsError {
     }
 }
 
-impl From<NextcloudFsError> for crate::Error {
+impl From<NextcloudFsError> for ConcreteFsError {
     fn from(value: NextcloudFsError) -> Self {
-        Self::ConcreteFsError(Box::new(value))
+        Self(Box::new(value))
     }
 }
 
@@ -87,7 +88,7 @@ impl ConcreteFS for NextcloudFs {
     async fn open(
         &self,
         path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>>, Self::Error> {
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
         Ok(self
             .client
             .get(path.into())
@@ -100,21 +101,40 @@ impl ConcreteFS for NextcloudFs {
         &self,
         path: &VirtualPath,
         data: Data,
-    ) -> Result<(), Self::Error>
+    ) -> Result<Self::SyncInfo, Self::Error>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
     {
         let body = Body::wrap_stream(data);
 
-        self.client
-            .put(path.into(), body)
-            .await
-            .map_err(|e| e.into())
+        self.client.put(path.into(), body).await?;
+
+        // Extract the tag of the created file
+        let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
+        entities
+            .pop()
+            .ok_or(NextcloudFsError::BadStructure)
+            .and_then(dav_parse_entity_tag)
     }
 
-    async fn mkdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
-        self.client.mkcol(path.into()).await.map_err(|e| e.into())
+    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        self.client.delete(path.into()).await.map_err(|e| e.into())
+    }
+
+    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::Error> {
+        self.client.mkcol(path.into()).await?;
+
+        // Extract the tag of the created dir
+        let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
+        entities
+            .pop()
+            .ok_or(NextcloudFsError::BadStructure)
+            .and_then(dav_parse_entity_tag)
+    }
+
+    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+        self.client.delete(path.into()).await.map_err(|e| e.into())
     }
 
     async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
