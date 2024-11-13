@@ -1,46 +1,22 @@
-use crate::vfs::{IsModified, ModificationState};
-
-/// State of the `SyncInfo`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyncInfoState<SyncInfo> {
-    /// The info can be used normally
-    Valid(SyncInfo),
-    /// The info cannot be used and will always return "modified" when polled
-    Invalid,
-}
-
-impl<SyncInfo: IsModified<SyncInfo>> IsModified<Self> for SyncInfoState<SyncInfo> {
-    fn modification_state(&self, reference: &Self) -> ModificationState {
-        match (self, reference) {
-            (SyncInfoState::Valid(valid_self), SyncInfoState::Valid(valid_other)) => {
-                valid_self.modification_state(valid_other)
-            }
-            (SyncInfoState::Valid(_), SyncInfoState::Invalid)
-            | (SyncInfoState::Invalid, SyncInfoState::Valid(_))
-            | (SyncInfoState::Invalid, SyncInfoState::Invalid) => ModificationState::Modified,
-        }
-    }
-}
-
 /// Metadata of a Directory node
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirInfo<SyncInfo> {
+pub struct DirMeta<SyncInfo> {
     name: String,
-    sync: SyncInfoState<SyncInfo>,
+    sync: Option<SyncInfo>,
 }
 
-impl<SyncInfo> DirInfo<SyncInfo> {
+impl<SyncInfo> DirMeta<SyncInfo> {
     pub fn new(name: &str, sync: SyncInfo) -> Self {
         Self {
             name: name.to_string(),
-            sync: SyncInfoState::Valid(sync),
+            sync: Some(sync),
         }
     }
 
-    pub fn new_invalid(name: &str) -> Self {
+    pub fn new_without_syncinfo(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            sync: SyncInfoState::Invalid,
+            sync: None,
         }
     }
 
@@ -48,7 +24,16 @@ impl<SyncInfo> DirInfo<SyncInfo> {
         &self.name
     }
 
-    pub fn sync_info(&self) -> &SyncInfoState<SyncInfo> {
+    pub fn sync_info(&self) -> &Option<SyncInfo> {
         &self.sync
+    }
+
+    pub fn sync_info_mut(&mut self) -> &mut Option<SyncInfo> {
+        &mut self.sync
+    }
+
+    /// Invalidate the sync info to make them trigger a ConcreteFS sync on next run
+    pub fn invalidate_sync_info(&mut self) {
+        self.sync = None;
     }
 }

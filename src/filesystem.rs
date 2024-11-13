@@ -3,16 +3,21 @@
 use std::cmp::Ordering;
 
 use crate::{
-    concrete::{concrete_eq_file, ConcreteFS},
-    sorted_list::{Sortable, SortedList},
-    vfs::{DirTree, SortedUpdateList, TreeNode, Vfs, VfsNodeUpdate, VirtualPath},
-    Error,
+    concrete::{concrete_eq_file, ConcreteFS, ConcreteUpdateApplicationError},
+    sorted_vec::{Sortable, SortedVec},
+    update::{
+        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, ReconciliationError, VfsNodeUpdate,
+        VfsUpdateList,
+    },
+    vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
+    Error, NameMismatchError,
 };
 
 /// Main representation of any kind of filesystem, remote or local.
 ///
 /// It is composed of a generic Concrete FS backend that used for file operations, and a Virtual FS
-/// that is its in-memory representation, using a tree-structure.
+/// that is its in-memory representation, using a tree-structure.#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FileSystem<Concrete: ConcreteFS> {
     concrete: Concrete,
     vfs: Vfs<Concrete::SyncInfo>,
@@ -34,11 +39,8 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     }
 
     /// Query the concrete FS to update the in memory virtual representation
-    pub async fn update_vfs(&mut self) -> Result<SortedUpdateList, Error>
-    where
-        Error: From<Concrete::Error>,
-    {
-        let new_vfs = self.concrete.load_virtual().await?;
+    pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, Error> {
+        let new_vfs = self.concrete.load_virtual().await.map_err(|e| e.into())?;
 
         let updates = self.vfs.diff(&new_vfs)?;
 
@@ -51,11 +53,17 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         &self.vfs
     }
 
+    /// Return a mutable ref to the virtual representation of this FileSystem
+    pub fn vfs_mut(&mut self) -> &mut Vfs<Concrete::SyncInfo> {
+        &mut self.vfs
+    }
+
     /// Return the concrete filesystem
     pub fn concrete(&self) -> &Concrete {
         &self.concrete
     }
 
+    /// Return the node at the given path, if any
     pub fn find_node(&self, path: &VirtualPath) -> Option<FileSystemNode<'_, Concrete>> {
         Some(FileSystemNode {
             concrete: &self.concrete,
@@ -63,11 +71,106 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         })
     }
 
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<FileSystemDir<'_, Concrete>, Error> {
+    /// Return the dir at the given path, or an Error if the path is not found or not a directory
+    pub fn find_dir(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<FileSystemDir<'_, Concrete>, InvalidPathError> {
         Ok(FileSystemDir {
             concrete: &self.concrete,
             dir: self.vfs.root().find_dir(path)?,
         })
+    }
+
+    /// Apply an update on the concrete fs.
+    ///
+    /// The file contents will be taken from `ref_fs`
+    // TODO: handle if ref_fs is not sync ?
+    pub async fn apply_update_concrete<OtherConcrete: ConcreteFS>(
+        &mut self,
+        ref_fs: &FileSystem<OtherConcrete>,
+        update: VfsNodeUpdate,
+    ) -> Result<AppliedUpdate<Concrete::SyncInfo>, ConcreteUpdateApplicationError> {
+        match update {
+            VfsNodeUpdate::DirCreated(path) => {
+                let dir = ref_fs.find_dir(&path)?;
+
+                self.clone_dir_concrete(dir, &path)
+                    .await
+                    .and_then(|created_dir| {
+                        AppliedDirCreation::new(&path, created_dir)
+                            .map(AppliedUpdate::DirCreated)
+                            .map_err(|e| e.into())
+                    })
+            }
+            VfsNodeUpdate::DirRemoved(path) => {
+                self.concrete.rmdir(&path).await.map_err(|e| e.into())?;
+                Ok(AppliedUpdate::DirRemoved(path.to_owned()))
+            }
+            VfsNodeUpdate::FileCreated(path) => self
+                .clone_file_concrete(&ref_fs.concrete, &path)
+                .await
+                .map(|sync_info| {
+                    AppliedUpdate::FileCreated(AppliedFileUpdate::new(&path, sync_info))
+                }),
+            VfsNodeUpdate::FileModified(path) => self
+                .clone_file_concrete(&ref_fs.concrete, &path)
+                .await
+                .map(|sync_info| {
+                    AppliedUpdate::FileModified(AppliedFileUpdate::new(&path, sync_info))
+                }),
+            VfsNodeUpdate::FileRemoved(path) => {
+                self.concrete.rm(&path).await.map_err(|e| e.into())?;
+                Ok(AppliedUpdate::FileRemoved(path.to_owned()))
+            }
+        }
+    }
+
+    /// Clone a file from `ref_concrete` into the concrete fs of self.
+    pub async fn clone_file_concrete<OtherConcrete: ConcreteFS>(
+        &self,
+        ref_concrete: &OtherConcrete,
+        path: &VirtualPath,
+    ) -> Result<Concrete::SyncInfo, ConcreteUpdateApplicationError> {
+        let stream = ref_concrete.open(path).await.map_err(|e| e.into())?;
+        self.concrete
+            .write(path, stream)
+            .await
+            .map_err(|e| e.into())
+            .map_err(|e| e.into())
+    }
+
+    /// Clone a directory from `ref_concrete` into the concrete fs of self.
+    pub async fn clone_dir_concrete<'otherfs, OtherConcrete: ConcreteFS>(
+        &self,
+        ref_fs: FileSystemDir<'otherfs, OtherConcrete>,
+        path: &VirtualPath,
+    ) -> Result<DirTree<Concrete::SyncInfo>, ConcreteUpdateApplicationError> {
+        let sync_info = self.concrete.mkdir(path).await.map_err(|e| e.into())?;
+        let mut dir = DirTree::new(path.name(), sync_info);
+
+        for ref_child in ref_fs.dir.children().iter() {
+            let mut child_path = path.to_owned();
+            child_path.push(ref_child.name());
+            let child =
+                match ref_child {
+                    VfsNode::Dir(ref_dir) => Box::pin(self.clone_dir_concrete(
+                        FileSystemDir::new(ref_fs.concrete, ref_dir),
+                        &child_path,
+                    ))
+                    .await
+                    .map(VfsNode::Dir)?,
+                    VfsNode::File(_) => self
+                        .clone_file_concrete(ref_fs.concrete, &child_path)
+                        .await
+                        .map(|sync_info| FileMeta::new(child_path.name(), sync_info))
+                        .map(VfsNode::File)?,
+                };
+
+            dir.insert_child(child);
+        }
+
+        Ok(dir)
     }
 }
 
@@ -82,22 +185,25 @@ impl<'fs, Concrete: ConcreteFS> FileSystemDir<'fs, Concrete> {
         Self { concrete, dir }
     }
 
+    /// Diff two directories, using both the [`Vfs`] to check their structures and the
+    /// [`ConcreteFS`] for the content of the files.
+    ///
+    /// Since this diff use the `ConcreteFS` instead of the SyncInfo, it can be used to compare two
+    /// different filesystems, for example during the [`reconciliation`] process.
+    ///
+    /// [`reconciliation`]: VfsUpdateList::reconcile
     pub async fn diff<'otherfs, OtherConcrete: ConcreteFS>(
         &self,
         other: &FileSystemDir<'otherfs, OtherConcrete>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedUpdateList, Error>
-    where
-        Error: From<Concrete::Error>,
-        Error: From<OtherConcrete::Error>,
-    {
+    ) -> Result<VfsUpdateList, ReconciliationError> {
         // Here we cannot use `iter_zip_map` or an async variant of it because it does not seem
         // possible to express the lifetimes required by the async closures
 
         let mut dir_path = parent_path.to_owned();
         dir_path.push(self.dir.name());
 
-        let mut ret = SortedList::new();
+        let mut ret = SortedVec::new();
         let mut self_iter = self.dir.children().iter();
         let mut other_iter = other.dir.children().iter();
 
@@ -146,53 +252,51 @@ impl<'fs, Concrete: ConcreteFS> FileSystemDir<'fs, Concrete> {
 /// A node in a [`FileSystem`], can represent a file or a directory.
 pub struct FileSystemNode<'fs, Concrete: ConcreteFS> {
     concrete: &'fs Concrete,
-    node: &'fs TreeNode<Concrete::SyncInfo>,
+    node: &'fs VfsNode<Concrete::SyncInfo>,
 }
 
 impl<'fs, Concrete: ConcreteFS> FileSystemNode<'fs, Concrete> {
-    pub fn new(concrete: &'fs Concrete, node: &'fs TreeNode<Concrete::SyncInfo>) -> Self {
+    pub fn new(concrete: &'fs Concrete, node: &'fs VfsNode<Concrete::SyncInfo>) -> Self {
         Self { concrete, node }
     }
 
     /// Get the differences between [`FileSystem`] trees, by checking file contents with their
     /// concrete backends.
     ///
-    /// Compared to [``TreeNode::diff``], this will diff the files based on their content and not
+    /// Compared to [``VfsNode::diff``], this will diff the files based on their content and not
     /// only on their SyncInfo.
     pub async fn diff<'otherfs, OtherConcrete: ConcreteFS>(
         &self,
         other: &FileSystemNode<'otherfs, OtherConcrete>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedUpdateList, Error>
-    where
-        Error: From<Concrete::Error>,
-        Error: From<OtherConcrete::Error>,
-    {
+    ) -> Result<VfsUpdateList, ReconciliationError> {
         if self.node.name() != other.node.name() {
-            let mut path = parent_path.to_owned();
-            path.push(self.node.name());
-            return Err(Error::InvalidPath(path));
+            return Err(NameMismatchError {
+                found: self.node.name().to_string(),
+                expected: other.node.name().to_string(),
+            }
+            .into());
         }
 
         match (self.node, other.node) {
-            (TreeNode::Dir(dself), TreeNode::Dir(dother)) => {
+            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => {
                 let self_dir = FileSystemDir::new(self.concrete, dself);
                 let other_dir = FileSystemDir::new(other.concrete, dother);
                 self_dir.diff(&other_dir, parent_path).await
             }
-            (TreeNode::File(fself), TreeNode::File(_fother)) => {
+            (VfsNode::File(fself), VfsNode::File(_fother)) => {
                 // Diff the file based on their hash
                 let mut file_path = parent_path.to_owned();
                 file_path.push(fself.name());
 
                 if !concrete_eq_file(self.concrete, other.concrete, &file_path).await? {
                     let diff = VfsNodeUpdate::FileModified(file_path);
-                    Ok(SortedUpdateList::from([diff]))
+                    Ok(VfsUpdateList::from([diff]))
                 } else {
-                    Ok(SortedUpdateList::new())
+                    Ok(VfsUpdateList::new())
                 }
             }
-            (nself, nother) => Ok(SortedUpdateList::from_vec(vec![
+            (nself, nother) => Ok(VfsUpdateList::from_vec(vec![
                 nself.to_removed_diff(parent_path),
                 nother.to_created_diff(parent_path),
             ])),
@@ -204,7 +308,10 @@ impl<'fs, Concrete: ConcreteFS> FileSystemNode<'fs, Concrete> {
 mod test {
     use super::*;
     use crate::{
-        test_utils::TestNode::{D, FF},
+        test_utils::{
+            TestFileSystem,
+            TestNode::{D, FF},
+        },
         vfs::VirtualPathBuf,
     };
 
@@ -218,7 +325,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut local_fs = FileSystem::new(local_base);
+        let mut local_fs = TestFileSystem::new(local_base.into());
         local_fs.update_vfs().await.unwrap();
 
         let remote_base = D(
@@ -232,7 +339,7 @@ mod test {
                 D("e", vec![]),
             ],
         );
-        let mut remote_fs = FileSystem::new(remote_base);
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
         remote_fs.update_vfs().await.unwrap();
 
         let diff = local_fs
@@ -249,5 +356,152 @@ mod test {
         .into();
 
         assert_eq!(diff, reference_diff);
+    }
+
+    #[tokio::test]
+    async fn test_concrete_apply() {
+        let local_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                D("a", vec![D("b", vec![D("c", vec![])])]),
+                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
+            ],
+        );
+        let mut local_fs = TestFileSystem::new(local_base.clone().into());
+        local_fs.update_vfs().await.unwrap();
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                D("a", vec![D("b", vec![D("c", vec![])])]),
+                D(
+                    "e",
+                    vec![D(
+                        "g",
+                        vec![
+                            FF("tmp.txt", b"content"),
+                            D("h", vec![FF("file.bin", b"bin"), D("i", vec![])]),
+                        ],
+                    )],
+                ),
+            ],
+        );
+
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
+        remote_fs.update_vfs().await.unwrap();
+
+        let dir_path = VirtualPathBuf::new("/e/g/h").unwrap();
+        let applied = local_fs
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::DirCreated(dir_path.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.path(), dir_path);
+        assert_eq!(local_fs.concrete, remote_fs.concrete);
+
+        let mut local_fs = TestFileSystem::new(local_base.clone().into());
+        local_fs.update_vfs().await.unwrap();
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                D("a", vec![]),
+                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
+            ],
+        );
+
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
+        remote_fs.update_vfs().await.unwrap();
+
+        let dir_path = VirtualPathBuf::new("/a/b").unwrap();
+        let applied = local_fs
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::DirRemoved(dir_path.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.path(), dir_path);
+        assert_eq!(local_fs.concrete, remote_fs.concrete);
+
+        let mut local_fs = TestFileSystem::new(local_base.clone().into());
+        local_fs.update_vfs().await.unwrap();
+
+        let remote_base = D(
+            "",
+            vec![
+                D(
+                    "Doc",
+                    vec![
+                        FF("f1.md", b"hello"),
+                        FF("f2.pdf", b"world"),
+                        FF("f3.rs", b"pub fn code(){}"),
+                    ],
+                ),
+                D("a", vec![D("b", vec![D("c", vec![])])]),
+                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
+            ],
+        );
+
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
+        remote_fs.update_vfs().await.unwrap();
+
+        let dir_path = VirtualPathBuf::new("/Doc/f3.rs").unwrap();
+        let applied = local_fs
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::FileCreated(dir_path.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.path(), dir_path);
+        assert_eq!(local_fs.concrete, remote_fs.concrete);
+
+        let mut local_fs = TestFileSystem::new(local_base.clone().into());
+        local_fs.update_vfs().await.unwrap();
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"bye"), FF("f2.pdf", b"world")]),
+                D("a", vec![D("b", vec![D("c", vec![])])]),
+                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
+            ],
+        );
+
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
+        remote_fs.update_vfs().await.unwrap();
+
+        let dir_path = VirtualPathBuf::new("/Doc/f1.md").unwrap();
+        let applied = local_fs
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::FileModified(dir_path.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.path(), dir_path);
+        assert_eq!(local_fs.concrete, remote_fs.concrete);
+
+        let mut local_fs = TestFileSystem::new(local_base.clone().into());
+        local_fs.update_vfs().await.unwrap();
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello")]),
+                D("a", vec![D("b", vec![D("c", vec![])])]),
+                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
+            ],
+        );
+
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
+        remote_fs.update_vfs().await.unwrap();
+
+        let dir_path = VirtualPathBuf::new("/Doc/f2.pdf").unwrap();
+        let applied = local_fs
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::FileRemoved(dir_path.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.path(), dir_path);
+        assert_eq!(local_fs.concrete, remote_fs.concrete);
     }
 }

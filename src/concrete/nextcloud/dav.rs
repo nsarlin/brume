@@ -4,8 +4,8 @@ use reqwest_dav::list_cmd::ListEntity;
 use thiserror::Error;
 
 use crate::{
-    sorted_list::{Sortable, SortedList},
-    vfs::{DirTree, FileInfo, TreeNode, VirtualPath, VirtualPathBuf, VirtualPathError},
+    sorted_vec::{Sortable, SortedVec},
+    vfs::{DirTree, FileMeta, VfsNode, VirtualPath, VirtualPathBuf, VirtualPathError},
     NC_DAV_PATH_STR,
 };
 
@@ -35,8 +35,8 @@ impl Sortable for ListEntity {
 pub(crate) fn dav_parse_vfs(
     entities: Vec<ListEntity>,
     folder_name: &str,
-) -> Result<TreeNode<NextcloudSyncInfo>, NextcloudFsError> {
-    let entities = SortedList::from_vec(entities);
+) -> Result<VfsNode<NextcloudSyncInfo>, NextcloudFsError> {
+    let entities = SortedVec::from_vec(entities);
 
     let mut entities_iter = entities.into_iter().map(|entity| DavEntity {
         entity,
@@ -51,11 +51,25 @@ pub(crate) fn dav_parse_vfs(
     let empty_root_node = root_entity.try_into()?;
 
     let root = match empty_root_node {
-        TreeNode::File(file) => TreeNode::File(file),
-        TreeNode::Dir(root) => TreeNode::Dir(dav_build_tree(root, &mut entities_iter)?),
+        VfsNode::File(file) => VfsNode::File(file),
+        VfsNode::Dir(root) => VfsNode::Dir(dav_build_tree(root, &mut entities_iter)?),
     };
 
     Ok(root)
+}
+
+pub(crate) fn dav_parse_entity_tag(
+    entity: ListEntity,
+) -> Result<NextcloudSyncInfo, NextcloudFsError> {
+    let entity = DavEntity {
+        entity,
+        folder_name: String::new(),
+    };
+
+    entity
+        .tag()
+        .map_err(|e| e.into())
+        .map(NextcloudSyncInfo::new)
 }
 
 /// Build the tree-like structure of a VFS from a flat list of paths. This function assumes that
@@ -75,7 +89,7 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
         while entity.parent()? != Some(current_dir.name()) {
             let parent_opt = dirs.pop();
             if let Some(mut parent) = parent_opt {
-                if parent.insert_child(TreeNode::Dir(current_dir)) {
+                if parent.insert_child(VfsNode::Dir(current_dir)) {
                     current_dir = parent;
                 } else {
                     return Err(NextcloudFsError::BadStructure);
@@ -87,7 +101,7 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
 
         let node = entity.try_into()?;
 
-        if let TreeNode::Dir(folder) = node {
+        if let VfsNode::Dir(folder) = node {
             dirs.push(current_dir);
             current_dir = folder;
         } else {
@@ -98,7 +112,7 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
     // If there are still directories in the stack, we need to recursively add them as children of
     // their parent.
     while let Some(mut parent) = dirs.pop() {
-        if parent.insert_child(TreeNode::Dir(current_dir)) {
+        if parent.insert_child(VfsNode::Dir(current_dir)) {
             current_dir = parent;
         } else {
             return Err(NextcloudFsError::BadStructure);
@@ -154,7 +168,7 @@ impl DavEntity {
     }
 }
 
-impl TryFrom<DavEntity> for TreeNode<NextcloudSyncInfo> {
+impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
     type Error = NextcloudFsError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
@@ -164,8 +178,8 @@ impl TryFrom<DavEntity> for TreeNode<NextcloudSyncInfo> {
         let sync = NextcloudSyncInfo::new(tag);
 
         match value.entity {
-            ListEntity::File(_) => Ok(TreeNode::File(FileInfo::new(name, sync))),
-            ListEntity::Folder(_) => Ok(TreeNode::Dir(DirTree::new(name, sync))),
+            ListEntity::File(_) => Ok(VfsNode::File(FileMeta::new(name, sync))),
+            ListEntity::Folder(_) => Ok(VfsNode::Dir(DirTree::new(name, sync))),
         }
     }
 }

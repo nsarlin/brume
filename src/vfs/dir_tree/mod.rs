@@ -7,23 +7,33 @@ pub use dir::*;
 pub use file::*;
 
 use crate::{
-    sorted_list::{Sortable, SortedList},
-    Error,
+    sorted_vec::{Sortable, SortedVec},
+    update::ModificationState,
+    Error, NameMismatchError,
 };
 
 use super::{
-    DiffError, IsModified, ModificationState, SortedUpdateList, VfsNodeUpdate, VirtualPath,
+    DiffError, InvalidPathError, IsModified, VfsNodeUpdate, VfsUpdateList, VirtualPath,
     VirtualPathBuf,
 };
 
-type SortedNodeList<SyncInfo> = SortedList<TreeNode<SyncInfo>>;
+#[derive(Error, Debug)]
+pub enum DeleteNodeError {
+    #[error("the path to be deleted is invalid")]
+    InvalidPath(#[from] InvalidPathError),
+    #[error("cannot delete the root dir itself")]
+    PathIsRoot,
+}
+
+type SortedNodeList<SyncInfo> = SortedVec<VfsNode<SyncInfo>>;
 
 /// A directory, seen as a tree.
 ///
 /// It is composed of metadata for the directory itself and a list of children.
 #[derive(Debug, Clone)]
 pub struct DirTree<SyncInfo> {
-    info: DirInfo<SyncInfo>,
+    metadata: DirMeta<SyncInfo>,
+    // TODO: handle having a dir and file with the same name
     children: SortedNodeList<SyncInfo>,
 }
 
@@ -31,43 +41,47 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// Create a new directory with no child and the provided name
     pub fn new(name: &str, sync: SyncInfo) -> Self {
         Self {
-            info: DirInfo::new(name, sync),
+            metadata: DirMeta::new(name, sync),
             children: SortedNodeList::new(),
         }
     }
 
-    /// Create a new directory with syncinfo in the [`SyncInfoState::Invalid`] state
-    pub fn new_invalid(name: &str) -> Self {
+    /// Create a new directory without syncinfo.
+    ///
+    /// This mean that the synchronization process will need to access the concrete fs at least
+    /// once.
+    pub fn new_without_syncinfo(name: &str) -> Self {
         Self {
-            info: DirInfo::new_invalid(name),
+            metadata: DirMeta::new_without_syncinfo(name),
             children: SortedNodeList::new(),
         }
     }
 
     /// Create a new directory with the provided name and child nodes
-    pub fn new_with_children(
-        name: &str,
-        sync: SyncInfo,
-        children: Vec<TreeNode<SyncInfo>>,
-    ) -> Self {
+    pub fn new_with_children(name: &str, sync: SyncInfo, children: Vec<VfsNode<SyncInfo>>) -> Self {
         Self {
-            info: DirInfo::new(name, sync),
+            metadata: DirMeta::new(name, sync),
             children: SortedNodeList::from_vec(children),
         }
     }
 
     /// Insert a new child for this directory. If there is already a child with the same name,
     /// returns false.
-    pub fn insert_child(&mut self, child: TreeNode<SyncInfo>) -> bool {
+    pub fn insert_child(&mut self, child: VfsNode<SyncInfo>) -> bool {
         self.children.insert(child)
     }
 
     pub fn name(&self) -> &str {
-        self.info.name()
+        self.metadata.name()
     }
 
-    pub fn sync_info(&self) -> &SyncInfoState<SyncInfo> {
-        self.info.sync_info()
+    pub fn sync_info(&self) -> &Option<SyncInfo> {
+        self.metadata.sync_info()
+    }
+
+    /// Invalidate the sync info to make them trigger a ConcreteFS sync on next run
+    pub fn invalidate_sync_info(&mut self) {
+        self.metadata.invalidate_sync_info()
     }
 
     pub fn children(&self) -> &SortedNodeList<SyncInfo> {
@@ -76,29 +90,27 @@ impl<SyncInfo> DirTree<SyncInfo> {
 
     /// Return a reference to the dir at the given path. Return an error if the path does
     /// not point to a valid directory node.
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, Error> {
-        self.find_node(path)
-            .ok_or(Error::InvalidPath(path.to_owned()))
-            .and_then(|node| match node {
-                TreeNode::Dir(dir) => Ok(dir),
-                TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
-            })
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
+        if path.is_root() {
+            Ok(self)
+        } else {
+            self.find_node(path)
+                .ok_or(InvalidPathError::NotFound(path.to_owned()))
+                .and_then(|node| node.as_dir())
+        }
     }
 
     /// Return a reference to the file at the given path. Return an error if the path does
     /// not point to a valid file.
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<SyncInfo>, Error> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
         self.find_node(path)
-            .ok_or(Error::InvalidPath(path.to_owned()))
-            .and_then(|node| match node {
-                TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
-                TreeNode::File(file) => Ok(file),
-            })
+            .ok_or(InvalidPathError::NotFound(path.to_owned()))
+            .and_then(|node| node.as_file())
     }
 
     /// Return a reference to the node at the given path. Return an error if the path does
     /// not point to a valid node.
-    pub fn find_node(&self, path: &VirtualPath) -> Option<&TreeNode<SyncInfo>> {
+    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<SyncInfo>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
                 self.children.find(top_level)
@@ -106,8 +118,8 @@ impl<SyncInfo> DirTree<SyncInfo> {
                 let child = self.children.find(top_level)?;
 
                 match child {
-                    TreeNode::Dir(dir) => dir.find_node(remainder),
-                    TreeNode::File(_) => None,
+                    VfsNode::Dir(dir) => dir.find_node(remainder),
+                    VfsNode::File(_) => None,
                 }
             }
         } else {
@@ -117,29 +129,33 @@ impl<SyncInfo> DirTree<SyncInfo> {
 
     /// Return a mutable reference to the dir at the given path. Return an error if the path does
     /// not point to a valid directory node.
-    pub fn find_dir_mut(&mut self, path: &VirtualPath) -> Result<&mut DirTree<SyncInfo>, Error> {
-        self.find_node_mut(path)
-            .ok_or(Error::InvalidPath(path.to_owned()))
-            .and_then(|node| match node {
-                TreeNode::Dir(dir) => Ok(dir),
-                TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
-            })
+    pub fn find_dir_mut(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+        if path.is_root() {
+            Ok(self)
+        } else {
+            self.find_node_mut(path)
+                .ok_or(InvalidPathError::NotFound(path.to_owned()))
+                .and_then(|node| node.as_dir_mut())
+        }
     }
 
     /// Return a mutable reference to the file at the given path. Return an error if the path does
     /// not point to a valid file.
-    pub fn find_file_mut(&mut self, path: &VirtualPath) -> Result<&mut FileInfo<SyncInfo>, Error> {
+    pub fn find_file_mut(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
         self.find_node_mut(path)
-            .ok_or(Error::InvalidPath(path.to_owned()))
-            .and_then(|node| match node {
-                TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
-                TreeNode::File(file) => Ok(file),
-            })
+            .ok_or(InvalidPathError::NotFound(path.to_owned()))
+            .and_then(|node| node.as_file_mut())
     }
 
-    /// Return a mutable reference to the node at the given path. Return an error if the path does
+    /// Return a mutable reference to the node at the given path. Return None if the path does
     /// not point to a valid node.
-    fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut TreeNode<SyncInfo>> {
+    fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<SyncInfo>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
                 self.children.find_mut(top_level)
@@ -147,8 +163,8 @@ impl<SyncInfo> DirTree<SyncInfo> {
                 let child = self.children.find_mut(top_level)?;
 
                 match child {
-                    TreeNode::Dir(dir) => dir.find_node_mut(remainder),
-                    TreeNode::File(_) => None,
+                    VfsNode::Dir(dir) => dir.find_node_mut(remainder),
+                    VfsNode::File(_) => None,
                 }
             }
         } else {
@@ -161,40 +177,46 @@ impl<SyncInfo> DirTree<SyncInfo> {
         self.children.remove(child_name)
     }
 
-    /// Remove a child with the given kind from this directory. If there were no child with this
-    /// name and kind, return false.
-    fn remove_child_kind(&mut self, child_name: &str, node_kind: NodeKind) -> bool {
+    /// Remove a child with the given kind from this directory.
+    ///
+    /// If there were no child with this name return None. If a child exists but is of the wrong
+    /// kind, return Some(false).
+    fn remove_child_kind(&mut self, child_name: &str, node_kind: NodeKind) -> Option<bool> {
         self.children
             .remove_if(child_name, |child| child.kind() == node_kind)
     }
 
-    /// Remove a child dir from this directory. If there were no child directory with this name,
-    /// return false.
-    pub fn remove_child_dir(&mut self, child_name: &str) -> bool {
+    /// Remove a child dir from this directory.
+    ///
+    /// If there were no child node with this name, return None. If the node was not a directory,
+    /// return Some(false).
+    pub fn remove_child_dir(&mut self, child_name: &str) -> Option<bool> {
         self.remove_child_kind(child_name, NodeKind::Dir)
     }
 
-    /// Remove a child file from this directory. If there were no child file with this name,
-    /// return false.
-    pub fn remove_child_file(&mut self, child_name: &str) -> bool {
+    /// Remove a child file from this directory.
+    ///
+    /// If there were no child node with this name, return None. If the node was not a file,
+    /// return Some(false).
+    pub fn remove_child_file(&mut self, child_name: &str) -> Option<bool> {
         self.remove_child_kind(child_name, NodeKind::File)
     }
 
     /// Delete the node with the current path in the tree. Return an error if the path is not a
     /// valid node.
-    pub fn delete_node(&mut self, path: &VirtualPath) -> Result<(), Error> {
+    pub fn delete_node(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
         self.delete_node_kind(path, None)
     }
 
     /// Delete the dir with the current path in the tree. Return an error if the path is not a
     /// valid directory.
-    pub fn delete_dir(&mut self, path: &VirtualPath) -> Result<(), Error> {
+    pub fn delete_dir(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
         self.delete_node_kind(path, Some(NodeKind::Dir))
     }
 
     /// Delete the file with the current path in the tree. Return an error if the path is not a
     /// valid file.
-    pub fn delete_file(&mut self, path: &VirtualPath) -> Result<(), Error> {
+    pub fn delete_file(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
         self.delete_node_kind(path, Some(NodeKind::File))
     }
 
@@ -202,23 +224,26 @@ impl<SyncInfo> DirTree<SyncInfo> {
         &mut self,
         path: &VirtualPath,
         kind: Option<NodeKind>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), DeleteNodeError> {
         if let Some(parent) = path.parent() {
-            self.find_dir_mut(parent).and_then(|dir| {
-                let removed = if let Some(kind) = kind {
-                    dir.remove_child_kind(path.name(), kind)
-                } else {
-                    dir.remove_child(path.name())
-                };
-                if removed {
-                    Ok(())
-                } else {
-                    Err(Error::InvalidPath(path.to_owned()))
-                }
-            })
+            self.find_dir_mut(parent)
+                .map_err(|e| e.into())
+                .and_then(|dir| {
+                    let removed = if let Some(kind) = kind {
+                        dir.remove_child_kind(path.name(), kind)
+                            .ok_or_else(|| InvalidPathError::for_kind(kind, path))?
+                    } else {
+                        dir.remove_child(path.name())
+                    };
+                    if removed {
+                        Ok(())
+                    } else {
+                        Err(InvalidPathError::NotFound(path.to_owned()).into())
+                    }
+                })
         } else if let Some(NodeKind::File) = kind {
             // If the path is the root but we requested a file removal, it is an error
-            Err(Error::InvalidPath(path.to_owned()))
+            Err(DeleteNodeError::PathIsRoot)
         } else {
             // Else remove all the content of the current dir
             self.children = SortedNodeList::new();
@@ -243,7 +268,7 @@ impl<SyncInfo: Clone> DirTree<SyncInfo> {
     /// Replace an existing existing child based on its name, or insert a new one.
     ///
     /// Return the replaced child if any, or None if there was no child with this name.
-    pub fn replace_child(&mut self, child: TreeNode<SyncInfo>) -> Option<TreeNode<SyncInfo>> {
+    pub fn replace_child(&mut self, child: VfsNode<SyncInfo>) -> Option<VfsNode<SyncInfo>> {
         self.children.replace(child)
     }
 }
@@ -254,7 +279,7 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
         &self,
         other: &DirTree<SyncInfo>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedUpdateList, DiffError> {
+    ) -> Result<VfsUpdateList, DiffError> {
         let mut dir_path = parent_path.to_owned();
         dir_path.push(self.name());
 
@@ -276,24 +301,24 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
 
                 // Since the children list is sorted, we know that the resulting updates will be
                 // also sorted, so we can call `unchecked_flatten`
-                Ok(SortedList::unchecked_flatten(diffs))
+                Ok(SortedVec::unchecked_flatten(diffs))
             }
             // The SyncInfo tells us that nothing has been modified recursively, so we can
             // stop there
-            ModificationState::RecursiveUnmodified => Ok(SortedUpdateList::new()),
+            ModificationState::RecursiveUnmodified => Ok(VfsUpdateList::new()),
             // The directory has been modified, so we have to walk it recursively to find
             // the modified nodes
             ModificationState::Modified => {
                 let diff_list = self.children.iter_zip_map(
                     &other.children,
                     |self_child| -> Result<_, DiffError> {
-                        let mut res = SortedList::new();
+                        let mut res = SortedVec::new();
                         res.insert(self_child.to_removed_diff(&dir_path));
                         Ok(res)
                     },
                     |self_child, other_child| self_child.diff(other_child, &dir_path),
                     |other_child| {
-                        let mut res = SortedList::new();
+                        let mut res = SortedVec::new();
                         res.insert(other_child.to_created_diff(&dir_path));
                         Ok(res)
                     },
@@ -301,7 +326,7 @@ impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
 
                 // Since the children lists are sorted, we know that the produced updates will be
                 // too, so we can directly create the sorted list from the result
-                let diffs = SortedList::unchecked_flatten(diff_list);
+                let diffs = SortedVec::unchecked_flatten(diff_list);
 
                 Ok(diffs)
             }
@@ -318,12 +343,12 @@ pub enum NodeKind {
 
 /// A node in a File System tree. Can represent a directory or a file.
 #[derive(Debug, Clone)]
-pub enum TreeNode<SyncInfo> {
+pub enum VfsNode<SyncInfo> {
     Dir(DirTree<SyncInfo>),
-    File(FileInfo<SyncInfo>),
+    File(FileMeta<SyncInfo>),
 }
 
-impl<SyncInfo> Sortable for TreeNode<SyncInfo> {
+impl<SyncInfo> Sortable for VfsNode<SyncInfo> {
     type Key = str;
 
     fn key(&self) -> &Self::Key {
@@ -331,51 +356,67 @@ impl<SyncInfo> Sortable for TreeNode<SyncInfo> {
     }
 }
 
-impl<SyncInfo> TreeNode<SyncInfo> {
+impl<SyncInfo> VfsNode<SyncInfo> {
     /// Return the name of the file or directory represented by this node
     pub fn name(&self) -> &str {
         match self {
-            TreeNode::File(file) => file.name(),
-            TreeNode::Dir(dir) => dir.name(),
+            VfsNode::File(file) => file.name(),
+            VfsNode::Dir(dir) => dir.name(),
         }
     }
 
     pub fn is_dir(&self) -> bool {
         match self {
-            TreeNode::Dir(_) => true,
-            TreeNode::File(_) => false,
+            VfsNode::Dir(_) => true,
+            VfsNode::File(_) => false,
         }
     }
 
     pub fn is_file(&self) -> bool {
         match self {
-            TreeNode::Dir(_) => false,
-            TreeNode::File(_) => true,
+            VfsNode::Dir(_) => false,
+            VfsNode::File(_) => true,
         }
     }
 
     pub fn kind(&self) -> NodeKind {
         match self {
-            TreeNode::Dir(_) => NodeKind::Dir,
-            TreeNode::File(_) => NodeKind::File,
+            VfsNode::Dir(_) => NodeKind::Dir,
+            VfsNode::File(_) => NodeKind::File,
         }
     }
 
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, Error> {
+    pub fn as_dir(&self) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
+        self.find_dir(VirtualPath::root())
+    }
+
+    pub fn as_dir_mut(&mut self) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+        self.find_dir_mut(VirtualPath::root())
+    }
+
+    pub fn as_file(&self) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
+        self.find_file(VirtualPath::root())
+    }
+
+    pub fn as_file_mut(&mut self) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
+        self.find_file_mut(VirtualPath::root())
+    }
+
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
         self.find_node(path)
-            .ok_or(Error::InvalidPath(path.to_owned()))
+            .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
-                TreeNode::Dir(dir) => Ok(dir),
-                TreeNode::File(_) => Err(Error::InvalidPath(path.to_owned())),
+                VfsNode::Dir(dir) => Ok(dir),
+                VfsNode::File(_) => Err(InvalidPathError::NotADir(path.to_owned())),
             })
     }
 
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<SyncInfo>, Error> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
         self.find_node(path)
-            .ok_or(Error::InvalidPath(path.to_owned()))
+            .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
-                TreeNode::Dir(_) => Err(Error::InvalidPath(path.to_owned())),
-                TreeNode::File(file) => Ok(file),
+                VfsNode::Dir(_) => Err(InvalidPathError::NotAFile(path.to_owned())),
+                VfsNode::File(file) => Ok(file),
             })
     }
 
@@ -384,8 +425,49 @@ impl<SyncInfo> TreeNode<SyncInfo> {
             Some(self)
         } else {
             match self {
-                TreeNode::Dir(dir) => dir.find_node(path),
-                TreeNode::File(file) => {
+                VfsNode::Dir(dir) => dir.find_node(path),
+                VfsNode::File(file) => {
+                    if path.len() == 1 && file.name() == path.name() {
+                        Some(self)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn find_dir_mut(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+        self.find_node_mut(path)
+            .ok_or(InvalidPathError::NotFound(path.to_owned()))
+            .and_then(|node| match node {
+                VfsNode::Dir(dir) => Ok(dir),
+                VfsNode::File(_) => Err(InvalidPathError::NotADir(path.to_owned())),
+            })
+    }
+
+    pub fn find_file_mut(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
+        self.find_node_mut(path)
+            .ok_or(InvalidPathError::NotFound(path.to_owned()))
+            .and_then(|node| match node {
+                VfsNode::Dir(_) => Err(InvalidPathError::NotAFile(path.to_owned())),
+                VfsNode::File(file) => Ok(file),
+            })
+    }
+
+    pub fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut Self> {
+        if path.is_root() {
+            Some(self)
+        } else {
+            match self {
+                VfsNode::Dir(dir) => dir.find_node_mut(path),
+                VfsNode::File(file) => {
                     if path.len() == 1 && file.name() == path.name() {
                         Some(self)
                     } else {
@@ -398,11 +480,11 @@ impl<SyncInfo> TreeNode<SyncInfo> {
 
     /// Compare the structure of trees. Two trees are structurally equals if they have the same
     /// shape and are composed of nodes with the same names.
-    pub fn structural_eq<OtherSyncInfo>(&self, other: &TreeNode<OtherSyncInfo>) -> bool {
+    pub fn structural_eq<OtherSyncInfo>(&self, other: &VfsNode<OtherSyncInfo>) -> bool {
         match (self, other) {
-            (TreeNode::Dir(dself), TreeNode::Dir(dother)) => dself.structural_eq(dother),
-            (TreeNode::Dir(_), TreeNode::File(_)) | (TreeNode::File(_), TreeNode::Dir(_)) => false,
-            (TreeNode::File(fself), TreeNode::File(fother)) => fself.name() == fother.name(),
+            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.structural_eq(dother),
+            (VfsNode::Dir(_), VfsNode::File(_)) | (VfsNode::File(_), VfsNode::Dir(_)) => false,
+            (VfsNode::File(fself), VfsNode::File(fother)) => fself.name() == fother.name(),
         }
     }
 
@@ -415,23 +497,21 @@ impl<SyncInfo> TreeNode<SyncInfo> {
     /// Create a diff where this node has been removed from the VFS
     pub fn to_removed_diff(&self, parent_path: &VirtualPath) -> VfsNodeUpdate {
         match self {
-            TreeNode::Dir(_) => VfsNodeUpdate::DirRemoved(self.path(parent_path)),
-            TreeNode::File(_) => VfsNodeUpdate::FileRemoved(self.path(parent_path)),
+            VfsNode::Dir(_) => VfsNodeUpdate::DirRemoved(self.path(parent_path)),
+            VfsNode::File(_) => VfsNodeUpdate::FileRemoved(self.path(parent_path)),
         }
     }
-}
 
-impl<SyncInfo> TreeNode<SyncInfo> {
     /// Create a diff where this node has been inserted into the VFS
     pub fn to_created_diff(&self, parent_path: &VirtualPath) -> VfsNodeUpdate {
         match self {
-            TreeNode::Dir(_) => VfsNodeUpdate::DirCreated(self.path(parent_path)),
-            TreeNode::File(_) => VfsNodeUpdate::FileCreated(self.path(parent_path)),
+            VfsNode::Dir(_) => VfsNodeUpdate::DirCreated(self.path(parent_path)),
+            VfsNode::File(_) => VfsNodeUpdate::FileCreated(self.path(parent_path)),
         }
     }
 }
 
-impl<SyncInfo: IsModified<SyncInfo>> TreeNode<SyncInfo> {
+impl<SyncInfo: IsModified<SyncInfo>> VfsNode<SyncInfo> {
     /// Diff two nodes based on their content.
     ///
     /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem. To
@@ -440,28 +520,32 @@ impl<SyncInfo: IsModified<SyncInfo>> TreeNode<SyncInfo> {
     /// [`FileSystemNode::diff`]: crate::filesystem::FileSystemNode
     pub fn diff(
         &self,
-        other: &TreeNode<SyncInfo>,
+        other: &VfsNode<SyncInfo>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedUpdateList, DiffError> {
+    ) -> Result<VfsUpdateList, DiffError> {
         if self.name() != other.name() {
-            return Err(DiffError::InvalidSyncInfo(parent_path.to_owned()));
+            return Err(NameMismatchError {
+                found: self.name().to_string(),
+                expected: other.name().to_string(),
+            }
+            .into());
         }
 
         match (self, other) {
-            (TreeNode::Dir(dself), TreeNode::Dir(dother)) => dself.diff(dother, parent_path),
-            (TreeNode::File(fself), TreeNode::File(fother)) => {
+            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.diff(dother, parent_path),
+            (VfsNode::File(fself), VfsNode::File(fother)) => {
                 // Diff the file based on their sync info
                 if fself.sync_info().is_modified(fother.sync_info()) {
                     let mut file_path = parent_path.to_owned();
                     file_path.push(fself.name());
 
                     let diff = VfsNodeUpdate::FileModified(file_path);
-                    Ok(SortedUpdateList::from_vec(vec![diff]))
+                    Ok(VfsUpdateList::from_vec(vec![diff]))
                 } else {
-                    Ok(SortedUpdateList::new())
+                    Ok(VfsUpdateList::new())
                 }
             }
-            (nself, nother) => Ok(SortedUpdateList::from_vec(vec![
+            (nself, nother) => Ok(VfsUpdateList::from_vec(vec![
                 nself.to_removed_diff(parent_path),
                 nother.to_created_diff(parent_path),
             ])),

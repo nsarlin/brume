@@ -4,6 +4,27 @@ use std::{borrow::Borrow, ops::Deref, path::Path};
 
 use thiserror::Error;
 
+use super::NodeKind;
+
+#[derive(Error, Debug)]
+pub enum InvalidPathError {
+    #[error("path {0:?} does not found in the VFS")]
+    NotFound(VirtualPathBuf),
+    #[error("expected a directory at {0:?}")]
+    NotADir(VirtualPathBuf),
+    #[error("expected a file at {0:?}")]
+    NotAFile(VirtualPathBuf),
+}
+
+impl InvalidPathError {
+    pub fn for_kind(kind: NodeKind, path: &VirtualPath) -> Self {
+        match kind {
+            NodeKind::Dir => Self::NotADir(path.to_owned()),
+            NodeKind::File => Self::NotAFile(path.to_owned()),
+        }
+    }
+}
+
 /// A wrapper type that allows doing path operations on strings, without considerations for any
 /// concrete file system. These paths are supposed to be absolute and should start with a '/'.
 #[derive(Debug, Eq, PartialEq)]
@@ -15,7 +36,7 @@ pub struct VirtualPath {
 #[derive(Error, Debug)]
 pub enum VirtualPathError {
     #[error("this string cannot be converted into a path: {0}")]
-    InvalidPath(String),
+    InvalidString(String),
     #[error("the path {subpath} is not a valid subpath for {base}")]
     NotASubpath { base: String, subpath: String },
 }
@@ -165,11 +186,11 @@ impl<'a> TryFrom<&'a str> for &'a VirtualPath {
 
     fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         if !value.starts_with('/') {
-            return Err(VirtualPathError::InvalidPath(value.to_string()));
+            return Err(VirtualPathError::InvalidString(value.to_string()));
         }
 
         if value.contains("//") {
-            return Err(VirtualPathError::InvalidPath(value.to_string()));
+            return Err(VirtualPathError::InvalidString(value.to_string()));
         }
 
         Ok(VirtualPath::new(value))
