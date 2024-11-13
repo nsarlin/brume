@@ -88,7 +88,11 @@ impl<SyncInfo> Vfs<SyncInfo> {
                 .delete_dir(&path)
                 .map_err(|e| e.into()),
             AppliedUpdate::FileCreated(update) => {
-                let child = VfsNode::File(FileMeta::new(path.name(), update.into_sync_info()));
+                let child = VfsNode::File(FileMeta::new(
+                    path.name(),
+                    update.file_size(),
+                    update.into_sync_info(),
+                ));
                 if parent.insert_child(child) {
                     Ok(())
                 } else {
@@ -97,6 +101,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
             }
             AppliedUpdate::FileModified(update) => {
                 let file = self.root_mut().find_file_mut(update.path())?;
+                file.set_size(update.file_size());
                 let info = file.sync_info_mut();
                 *info = Some(update.into_sync_info());
                 Ok(())
@@ -224,6 +229,7 @@ mod test {
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = AppliedUpdate::FileCreated(AppliedFileUpdate::new(
             &VirtualPathBuf::new("/e/g/file.bin").unwrap(),
+            0,
             new_file_info,
         ));
 
@@ -249,6 +255,7 @@ mod test {
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = AppliedUpdate::FileModified(AppliedFileUpdate::new(
             &VirtualPathBuf::new("/Doc/f1.md").unwrap(),
+            0,
             new_file_info,
         ));
 
@@ -356,6 +363,7 @@ mod test {
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = AppliedUpdate::FileCreated(AppliedFileUpdate::new(
             &VirtualPathBuf::new("/file.bin").unwrap(),
+            0,
             new_file_info,
         ));
 
@@ -371,6 +379,7 @@ mod test {
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = AppliedUpdate::FileModified(AppliedFileUpdate::new(
             &VirtualPathBuf::new("/file.bin").unwrap(),
+            0,
             new_file_info,
         ));
 
@@ -427,6 +436,7 @@ mod test {
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = AppliedUpdate::FileCreated(AppliedFileUpdate::new(
             &VirtualPathBuf::new("/e/g/tmp.txt").unwrap(),
+            0,
             new_file_info,
         ));
 

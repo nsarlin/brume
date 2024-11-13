@@ -19,6 +19,7 @@ pub(crate) trait LocalPath: Debug {
     fn file_name(&self) -> Option<&OsStr>;
     fn read_dir(&self) -> io::Result<impl Iterator<Item = io::Result<Self::DirEntry>>>;
     fn modification_time(&self) -> io::Result<SystemTime>;
+    fn file_size(&self) -> io::Result<u64>;
 
     fn invalid_path_error(&self) -> io::Error {
         io::Error::new(ErrorKind::InvalidData, format!("Invalid path: {self:?}"))
@@ -50,6 +51,10 @@ impl LocalPath for Path {
     fn modification_time(&self) -> io::Result<SystemTime> {
         self.metadata()?.modified()
     }
+
+    fn file_size(&self) -> io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
 }
 
 impl LocalPath for PathBuf {
@@ -73,6 +78,10 @@ impl LocalPath for PathBuf {
     fn modification_time(&self) -> io::Result<SystemTime> {
         LocalPath::modification_time(self.as_path())
     }
+
+    fn file_size(&self) -> io::Result<u64> {
+        LocalPath::file_size(self.as_path())
+    }
 }
 
 /// Creates a VFS node by recursively scanning a list of path
@@ -87,6 +96,7 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
                 path.file_name()
                     .and_then(|s| s.to_str())
                     .ok_or(path.invalid_path_error())?,
+                path.file_size()?,
                 sync,
             ));
             parent.insert_child(node);
