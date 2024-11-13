@@ -36,9 +36,13 @@ impl<'a> TestNode<'a> {
 
     pub(crate) fn into_node_recursive_diff(self) -> VfsNode<RecursiveTestSyncInfo> {
         match self {
-            Self::F(name) | Self::FF(name, _) => {
+            Self::F(name) => {
                 let sync = RecursiveTestSyncInfo::new(0);
-                VfsNode::File(FileMeta::new(name, sync))
+                VfsNode::File(FileMeta::new(name, 0, sync))
+            }
+            Self::FF(name, content) => {
+                let sync = RecursiveTestSyncInfo::new(0);
+                VfsNode::File(FileMeta::new(name, content.len() as u64, sync))
             }
             Self::D(name, children) => {
                 let sync = RecursiveTestSyncInfo::new(0);
@@ -53,7 +57,7 @@ impl<'a> TestNode<'a> {
             }
             Self::FH(name, hash) => {
                 let sync = RecursiveTestSyncInfo::new(hash);
-                VfsNode::File(FileMeta::new(name, sync))
+                VfsNode::File(FileMeta::new(name, 0, sync))
             }
             Self::DH(name, hash, children) => {
                 let sync = RecursiveTestSyncInfo::new(hash);
@@ -75,9 +79,13 @@ impl<'a> TestNode<'a> {
 
     pub(crate) fn into_node_shallow_diff(self) -> VfsNode<ShallowTestSyncInfo> {
         match self {
-            Self::F(name) | Self::FF(name, _) => {
+            Self::F(name) => {
                 let sync = ShallowTestSyncInfo::new(0);
-                VfsNode::File(FileMeta::new(name, sync))
+                VfsNode::File(FileMeta::new(name, 0, sync))
+            }
+            Self::FF(name, content) => {
+                let sync = ShallowTestSyncInfo::new(0);
+                VfsNode::File(FileMeta::new(name, content.len() as u64, sync))
             }
             Self::D(name, children) => {
                 let sync = ShallowTestSyncInfo::new(0);
@@ -92,7 +100,7 @@ impl<'a> TestNode<'a> {
             }
             Self::FH(name, hash) => {
                 let sync = ShallowTestSyncInfo::new(hash);
-                VfsNode::File(FileMeta::new(name, sync))
+                VfsNode::File(FileMeta::new(name, 0, sync))
             }
             Self::DH(name, hash, children) => {
                 let sync = ShallowTestSyncInfo::new(hash);
@@ -229,6 +237,17 @@ impl<'a> LocalPath for TestNode<'a> {
 
     fn modification_time(&self) -> io::Result<SystemTime> {
         Ok(SystemTime::now())
+    }
+
+    fn file_size(&self) -> std::io::Result<u64> {
+        match self {
+            TestNode::F(_) | TestNode::FH(_, _) => Ok(0),
+            TestNode::D(_, _) | TestNode::DH(_, _, _) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a file",
+            )),
+            TestNode::FF(_, content) => Ok(content.len() as u64),
+        }
     }
 }
 

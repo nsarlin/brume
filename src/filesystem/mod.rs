@@ -1,6 +1,13 @@
 //! File system manipulation
 
-use std::cmp::Ordering;
+mod byte_counter;
+
+use byte_counter::ByteCounterExt;
+
+use std::{
+    cmp::Ordering,
+    sync::{atomic::AtomicU64, Arc},
+};
 
 use futures::future::try_join_all;
 use tokio::try_join;
@@ -164,14 +171,14 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
             VfsNodeUpdate::FileCreated(path) => self
                 .clone_file_concrete(&ref_fs.concrete, &path)
                 .await
-                .map(|sync_info| {
-                    AppliedUpdate::FileCreated(AppliedFileUpdate::new(&path, sync_info))
+                .map(|(sync_info, size)| {
+                    AppliedUpdate::FileCreated(AppliedFileUpdate::new(&path, size, sync_info))
                 }),
             VfsNodeUpdate::FileModified(path) => self
                 .clone_file_concrete(&ref_fs.concrete, &path)
                 .await
-                .map(|sync_info| {
-                    AppliedUpdate::FileModified(AppliedFileUpdate::new(&path, sync_info))
+                .map(|(sync_info, size)| {
+                    AppliedUpdate::FileModified(AppliedFileUpdate::new(&path, size, sync_info))
                 }),
             VfsNodeUpdate::FileRemoved(path) => {
                 self.concrete.rm(&path).await.map_err(|e| e.into())?;
@@ -181,17 +188,25 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     }
 
     /// Clone a file from `ref_concrete` into the concrete fs of self.
+    ///
+    /// Return the syncinfo associated with the created file and the number of bytes written.
     pub async fn clone_file_concrete<OtherConcrete: ConcreteFS>(
         &self,
         ref_concrete: &OtherConcrete,
         path: &VirtualPath,
-    ) -> Result<Concrete::SyncInfo, ConcreteUpdateApplicationError> {
-        let stream = ref_concrete.open(path).await.map_err(|e| e.into())?;
+    ) -> Result<(Concrete::SyncInfo, u64), ConcreteUpdateApplicationError> {
+        let counter = Arc::new(AtomicU64::new(0));
+        let stream = ref_concrete
+            .open(path)
+            .await
+            .map_err(|e| e.into())?
+            .count_bytes(counter.clone());
         self.concrete
             .write(path, stream)
             .await
             .map_err(|e| e.into())
             .map_err(|e| e.into())
+            .map(|info| (info, counter.load(std::sync::atomic::Ordering::SeqCst)))
     }
 
     /// Clone a directory from `ref_concrete` into the concrete fs of self.
@@ -217,7 +232,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
                     VfsNode::File(_) => self
                         .clone_file_concrete(ref_fs.concrete, &child_path)
                         .await
-                        .map(|sync_info| FileMeta::new(child_path.name(), sync_info))
+                        .map(|(sync_info, size)| FileMeta::new(child_path.name(), size, sync_info))
                         .map(VfsNode::File)?,
                 };
 
@@ -338,12 +353,14 @@ impl<'fs, Concrete: ConcreteFS> FileSystemNode<'fs, Concrete> {
                 let other_dir = FileSystemDir::new(other.concrete, dother);
                 self_dir.diff(&other_dir, parent_path).await
             }
-            (VfsNode::File(fself), VfsNode::File(_fother)) => {
-                // Diff the file based on their hash
+            (VfsNode::File(fself), VfsNode::File(fother)) => {
+                // Diff the file based on their size or hash
                 let mut file_path = parent_path.to_owned();
                 file_path.push(fself.name());
 
-                if !concrete_eq_file(self.concrete, other.concrete, &file_path).await? {
+                if fself.size() != fother.size()
+                    || !concrete_eq_file(self.concrete, other.concrete, &file_path).await?
+                {
                     let diff = VfsNodeUpdate::FileModified(file_path);
                     Ok(VfsUpdateList::from([diff]))
                 } else {

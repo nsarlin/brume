@@ -179,10 +179,14 @@ impl VfsNodeUpdate {
                 Ok(SortedVec::unchecked_from_vec(reconciled))
             }
             (VfsNodeUpdate::DirRemoved(_), VfsNodeUpdate::DirRemoved(_)) => Ok(reconciled),
-            (VfsNodeUpdate::FileModified(_), VfsNodeUpdate::FileModified(_))
-            | (VfsNodeUpdate::FileCreated(_), VfsNodeUpdate::FileCreated(_)) => {
-                // TODO: check size first before hash, to avoid computing a hash if size differ
-                if concrete_eq_file(concrete_self, concrete_other, self.path()).await? {
+            (VfsNodeUpdate::FileModified(pself), VfsNodeUpdate::FileModified(pother))
+            | (VfsNodeUpdate::FileCreated(pself), VfsNodeUpdate::FileCreated(pother)) => {
+                let file_self = fs_self.vfs().root().find_file(pself)?;
+                let file_other = fs_other.vfs().root().find_file(pother)?;
+
+                if file_self.size() == file_other.size()
+                    && concrete_eq_file(concrete_self, concrete_other, self.path()).await?
+                {
                     Ok(reconciled)
                 } else {
                     reconciled.insert(ReconciledUpdate::Conflict(self.path().to_owned()));
@@ -446,18 +450,24 @@ impl<SyncInfo> From<AppliedDirCreation<SyncInfo>> for DirTree<SyncInfo> {
 pub struct AppliedFileUpdate<SyncInfo> {
     path: VirtualPathBuf,
     file_info: SyncInfo,
+    file_size: u64,
 }
 
 impl<SyncInfo> AppliedFileUpdate<SyncInfo> {
-    pub fn new(path: &VirtualPath, file_info: SyncInfo) -> Self {
+    pub fn new(path: &VirtualPath, file_size: u64, file_info: SyncInfo) -> Self {
         Self {
             path: path.to_owned(),
+            file_size,
             file_info,
         }
     }
 
     pub fn path(&self) -> &VirtualPath {
         &self.path
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
     }
 
     pub fn into_sync_info(self) -> SyncInfo {

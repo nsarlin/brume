@@ -77,6 +77,7 @@ pub async fn concrete_eq_file<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
     concrete_other: &OtherConcrete,
     path: &VirtualPath,
 ) -> Result<bool, ReconciliationError> {
+    // TODO: cache files when possible
     let (self_hash, other_hash) = tokio::join!(concrete_self.hash(path), concrete_other.hash(path));
 
     Ok(self_hash.map_err(|e| e.into())? == other_hash.map_err(|e| e.into())?)

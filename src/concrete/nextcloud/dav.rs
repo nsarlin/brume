@@ -177,8 +177,12 @@ impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
 
         let sync = NextcloudSyncInfo::new(tag);
 
-        match value.entity {
-            ListEntity::File(_) => Ok(VfsNode::File(FileMeta::new(name, sync))),
+        match &value.entity {
+            ListEntity::File(file) => Ok(VfsNode::File(FileMeta::new(
+                name,
+                file.content_length as u64,
+                sync,
+            ))),
             ListEntity::Folder(_) => Ok(VfsNode::Dir(DirTree::new(name, sync))),
         }
     }

@@ -62,6 +62,7 @@ impl ConcreteFS for LocalDir {
                     .file_name()
                     .and_then(|s| s.to_str())
                     .ok_or(self.path.invalid_path_error())?,
+                self.path.file_size()?,
                 sync,
             ))
         } else if self.path.is_dir() {
