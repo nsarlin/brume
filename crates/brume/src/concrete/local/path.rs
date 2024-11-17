@@ -86,11 +86,15 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
     children: &[P],
 ) -> Result<(), LocalDirError> {
     for path in children {
-        let sync = LocalSyncInfo::new(
-            path.modification_time()
-                .map_err(|e| LocalDirError::io(path, e))?
-                .into(),
-        );
+        let sync = match path.modification_time() {
+            Ok(time) => LocalSyncInfo::new(time.into()),
+            Err(err) => {
+                // File might be an invalid symlink, so we just log and skip it
+                println!("skipping file {path:?}: {err}");
+                continue;
+            }
+        };
+
         if path.is_file() {
             let node = VfsNode::File(FileMeta::new(
                 path.file_name()
