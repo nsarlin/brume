@@ -1,22 +1,25 @@
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFsError},
     filesystem::FileSystem,
-    Error,
 };
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<()> {
     let remote = Arc::new(Mutex::new(FileSystem::new(
         NextcloudFs::new("http://localhost:8080", "admin", "admin")
-            .map_err(ConcreteFsError::from)?,
+            .map_err(ConcreteFsError::from)
+            .context("Failed to connect to remote fs")?,
     )));
-    let local = Arc::new(Mutex::new(FileSystem::new(LocalDir::new("/tmp/test")?)));
+    let local = Arc::new(Mutex::new(FileSystem::new(
+        LocalDir::new("/tmp/test").context("Failed load local directory")?,
+    )));
 
     loop {
-        let (remote_diff, local_diff) = {
+        let (local_diff, remote_diff) = {
             let local = Arc::clone(&local);
             let remote = Arc::clone(&remote);
 
@@ -33,7 +36,10 @@ async fn main() -> Result<(), Error> {
             )
             .unwrap();
 
-            (remote_diff?, local_diff?)
+            (
+                local_diff.context("Failed to reload local vfs")?,
+                remote_diff.context("Failed to reload remote vfs")?,
+            )
         };
 
         println!("{local_diff:?}");
@@ -41,9 +47,13 @@ async fn main() -> Result<(), Error> {
         println!("{remote_diff:?}");
 
         let reconciled = {
-            let remote = remote.lock().await;
             let local = local.lock().await;
-            local_diff.reconcile(remote_diff, &local, &remote).await?
+            let remote = remote.lock().await;
+
+            local_diff
+                .reconcile(remote_diff, &local, &remote)
+                .await
+                .context("Failed to reconcile updates between VFS")?
         };
 
         println!("====");
@@ -54,17 +64,24 @@ async fn main() -> Result<(), Error> {
             let remote = remote.lock().await;
             local
                 .apply_updates_list_concrete(&remote, reconciled)
-                .await?
+                .await
+                .context("Failed to apply updates to concrete dir")?
         };
 
         for applied in local_applied.into_iter() {
             let mut local = local.lock().await;
-            local.vfs_mut().apply_update(applied)?;
+            local
+                .vfs_mut()
+                .apply_update(applied)
+                .context("Failed to apply update to local vfs")?;
         }
 
         for applied in remote_applied.into_iter() {
             let mut remote = remote.lock().await;
-            remote.vfs_mut().apply_update(applied)?;
+            remote
+                .vfs_mut()
+                .apply_update(applied)
+                .context("Failed to apply update to remote vfs")?;
         }
 
         println!("sync done");
