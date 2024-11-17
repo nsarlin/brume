@@ -1,0 +1,20 @@
+[package]
+name = "brume"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+reqwest_dav = "0.1"
+reqwest = { version = "0.12", features = ["stream"] }
+futures = "0.3"
+chrono = "0.4"
+bytes = { version = "1.6", features = ["std"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+urlencoding = "2.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+ron = "0.8"
