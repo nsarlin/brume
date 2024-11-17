@@ -7,10 +7,9 @@ use urlencoding::decode;
 use crate::{
     sorted_vec::{Sortable, SortedVec},
     vfs::{DirTree, FileMeta, VfsNode, VirtualPath, VirtualPathBuf, VirtualPathError},
-    NC_DAV_PATH_STR,
 };
 
-use super::{NextcloudFsError, NextcloudSyncInfo};
+use super::{NextcloudFsError, NextcloudSyncInfo, NC_DAV_PATH_STR};
 
 /// Error encountered when parsing a tag in the WebDAV response
 #[derive(Error, Debug)]

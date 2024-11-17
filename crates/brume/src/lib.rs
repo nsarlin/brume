@@ -13,8 +13,6 @@ mod test_utils;
 pub mod update;
 pub mod vfs;
 
-const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
-
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("error from the concrete fs")]

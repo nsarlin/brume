@@ -19,12 +19,13 @@ mod dav;
 use crate::{
     update::{IsModified, ModificationState},
     vfs::{Vfs, VirtualPath, VirtualPathError},
-    NC_DAV_PATH_STR,
 };
 
 use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
 
 use super::{ConcreteFS, ConcreteFsError};
+
+const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
 /// An error during synchronisation with the nextcloud file system
 #[derive(Error, Debug)]
