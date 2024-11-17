@@ -2,6 +2,7 @@
 
 use reqwest_dav::list_cmd::ListEntity;
 use thiserror::Error;
+use urlencoding::decode;
 
 use crate::{
     sorted_vec::{Sortable, SortedVec},
@@ -172,18 +173,18 @@ impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
     type Error = NextcloudFsError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
-        let name = value.name()?;
+        let name = decode(value.name()?).unwrap();
         let tag = value.tag()?;
 
         let sync = NextcloudSyncInfo::new(tag);
 
         match &value.entity {
             ListEntity::File(file) => Ok(VfsNode::File(FileMeta::new(
-                name,
+                &name,
                 file.content_length as u64,
                 sync,
             ))),
-            ListEntity::Folder(_) => Ok(VfsNode::Dir(DirTree::new(name, sync))),
+            ListEntity::Folder(_) => Ok(VfsNode::Dir(DirTree::new(&name, sync))),
         }
     }
 }
@@ -213,7 +214,7 @@ mod test {
         let reference = D(
             "",
             vec![
-                D("Doc", vec![F("f1.md"), F("f2.pdf")]),
+                D("Doc", vec![F("f1.md"), F("a spaced file.pdf")]),
                 D("a", vec![D("b", vec![D("c", vec![])])]),
             ],
         )
@@ -249,7 +250,7 @@ mod test {
     ),
     File(
         ListFile (
-            href: \"/remote.php/dav/files/admin/Doc/f2.pdf\",
+            href: \"/remote.php/dav/files/admin/Doc/a%20spaced%20file.pdf\",
             last_modified: \"2024-09-24T23:06:37Z\",
             content_length: 1083339,
             content_type: \"application/pdf\",
