@@ -2,14 +2,14 @@ use std::{
     ffi::OsStr,
     fmt::Debug,
     fs,
-    io::{self, ErrorKind},
+    io::{self},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 use crate::vfs::{DirTree, FileMeta, VfsNode};
 
-use super::LocalSyncInfo;
+use super::{LocalDirError, LocalSyncInfo};
 
 /// A path mapped to a local file-system that can be queried.
 pub(crate) trait LocalPath: Debug {
@@ -20,10 +20,6 @@ pub(crate) trait LocalPath: Debug {
     fn read_dir(&self) -> io::Result<impl Iterator<Item = io::Result<Self::DirEntry>>>;
     fn modification_time(&self) -> io::Result<SystemTime>;
     fn file_size(&self) -> io::Result<u64>;
-
-    fn invalid_path_error(&self) -> io::Error {
-        io::Error::new(ErrorKind::InvalidData, format!("Invalid path: {self:?}"))
-    }
 }
 
 impl LocalPath for Path {
@@ -88,15 +84,19 @@ impl LocalPath for PathBuf {
 pub(crate) fn node_from_path_rec<P: LocalPath>(
     parent: &mut DirTree<LocalSyncInfo>,
     children: &[P],
-) -> Result<(), io::Error> {
+) -> Result<(), LocalDirError> {
     for path in children {
-        let sync = LocalSyncInfo::new(path.modification_time()?.into());
+        let sync = LocalSyncInfo::new(
+            path.modification_time()
+                .map_err(|e| LocalDirError::io(path, e))?
+                .into(),
+        );
         if path.is_file() {
             let node = VfsNode::File(FileMeta::new(
                 path.file_name()
                     .and_then(|s| s.to_str())
-                    .ok_or(path.invalid_path_error())?,
-                path.file_size()?,
+                    .ok_or(LocalDirError::invalid_path(path))?,
+                path.file_size().map_err(|e| LocalDirError::io(path, e))?,
                 sync,
             ));
             parent.insert_child(node);
@@ -104,15 +104,22 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
             let mut node = DirTree::new(
                 path.file_name()
                     .and_then(|s| s.to_str())
-                    .ok_or(path.invalid_path_error())?,
+                    .ok_or(LocalDirError::invalid_path(path))?,
                 sync,
             );
 
-            node_from_path_rec(&mut node, &path.read_dir()?.collect::<Result<Vec<_>, _>>()?)?;
+            node_from_path_rec(
+                &mut node,
+                &path
+                    .read_dir()
+                    .map_err(|e| LocalDirError::io(path, e))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| LocalDirError::io(path, e))?,
+            )?;
 
             parent.insert_child(VfsNode::Dir(node));
         } else {
-            return Err(path.invalid_path_error());
+            return Err(LocalDirError::invalid_path(path));
         }
     }
 
