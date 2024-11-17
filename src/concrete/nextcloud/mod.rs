@@ -1,6 +1,9 @@
 //! Manipulation of a Nextcloud filesystem with WebDAV
 
-use std::io::{self, ErrorKind};
+use std::{
+    io::{self, ErrorKind},
+    string::FromUtf8Error,
+};
 
 use bytes::Bytes;
 use futures::{Stream, TryStream, TryStreamExt};
@@ -32,6 +35,8 @@ pub enum NextcloudFsError {
     InvalidTag(#[from] TagError),
     #[error("the structure of the nextcloud FS is not valid")]
     BadStructure,
+    #[error("failed to decode server provided url")]
+    UrlDecode(#[from] FromUtf8Error),
     #[error("a dav protocol error occured during communication with the nextcloud server")]
     ProtocolError(#[from] reqwest_dav::Error),
     #[error("io error while sending or receiving a file")]

@@ -173,7 +173,7 @@ impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
     type Error = NextcloudFsError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
-        let name = decode(value.name()?).unwrap();
+        let name = decode(value.name()?)?;
         let tag = value.tag()?;
 
         let sync = NextcloudSyncInfo::new(tag);
