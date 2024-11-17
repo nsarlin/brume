@@ -3,8 +3,11 @@
 pub mod path;
 
 use std::{
+    fmt::Debug,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use bytes::Bytes;
@@ -13,7 +16,7 @@ use futures::{Stream, TryStream, TryStreamExt};
 use path::{node_from_path_rec, LocalPath};
 use tokio::{
     fs::{self, File},
-    io::AsyncReadExt,
+    io::{AsyncRead, AsyncReadExt},
 };
 use tokio_util::io::{ReaderStream, StreamReader};
 use xxhash_rust::xxh3::xxh3_64;
@@ -25,6 +28,69 @@ use crate::{
 };
 
 use super::{ConcreteFS, ConcreteFsError};
+
+#[derive(Error, Debug)]
+pub enum LocalDirError {
+    #[error("io error with local fs, on path {path}")]
+    IoError {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not parse path {0}")]
+    InvalidPath(String),
+}
+
+impl LocalDirError {
+    fn io<P: Debug>(path: &P, source: io::Error) -> Self {
+        Self::IoError {
+            path: format!("{:?}", path),
+            source,
+        }
+    }
+
+    fn invalid_path<P: Debug>(path: &P) -> Self {
+        Self::InvalidPath(format!("{:?}", path))
+    }
+}
+
+impl From<LocalDirError> for ConcreteFsError {
+    fn from(value: LocalDirError) -> Self {
+        Self(Box::new(value))
+    }
+}
+
+/// [`ReaderStream`] adapter that report errors as [`LocalDirError`]
+pub struct LocalFileStream<R: AsyncRead> {
+    path: PathBuf,
+    stream: ReaderStream<R>,
+}
+
+impl<R: AsyncRead> LocalFileStream<R> {
+    fn stream_mut(self: Pin<&mut Self>) -> Pin<&mut ReaderStream<R>> {
+        // SAFETY: This is okay because `stream` is pinned when `self` is.
+        unsafe { self.map_unchecked_mut(|s| &mut s.stream) }
+    }
+
+    fn new(reader: R, path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            stream: ReaderStream::new(reader),
+        }
+    }
+}
+
+impl<R: AsyncRead> Stream for LocalFileStream<R> {
+    type Item = Result<Bytes, LocalDirError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // TODO: avoid this clone ?
+        let path = self.path.to_owned();
+        self.stream_mut()
+            .poll_next(cx)
+            .map_err(|e| LocalDirError::io(&path, e))
+    }
+}
 
 /// Represent a local directory and its content
 #[derive(Debug)]
@@ -52,30 +118,38 @@ impl LocalDir {
 impl ConcreteFS for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
-    type Error = io::Error;
+    type Error = LocalDirError;
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
-        let sync = LocalSyncInfo::new(self.path.modification_time()?.into());
+        let sync = LocalSyncInfo::new(
+            self.path
+                .modification_time()
+                .map_err(|e| LocalDirError::io(&self.path, e))?
+                .into(),
+        );
         let root = if self.path.is_file() {
             VfsNode::File(FileMeta::new(
                 self.path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .ok_or(self.path.invalid_path_error())?,
-                self.path.file_size()?,
+                    .ok_or(LocalDirError::invalid_path(&self.path))?,
+                self.path
+                    .file_size()
+                    .map_err(|e| LocalDirError::io(&self.path, e))?,
                 sync,
             ))
         } else if self.path.is_dir() {
             let mut root = DirTree::new("", sync);
             let children = self
                 .path
-                .read_dir()?
+                .read_dir()
+                .map_err(|e| LocalDirError::io(&self.path, e))?
                 .map(|entry| entry.unwrap())
                 .collect::<Vec<_>>();
             node_from_path_rec(&mut root, &children)?;
             VfsNode::Dir(root)
         } else {
-            return Err(self.path.invalid_path_error());
+            return Err(LocalDirError::invalid_path(&self.path));
         };
 
         Ok(Vfs::new(root))
@@ -86,7 +160,10 @@ impl ConcreteFS for LocalDir {
         path: &VirtualPath,
     ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
         let full_path = self.full_path(path);
-        File::open(&full_path).await.map(ReaderStream::new)
+        File::open(&full_path)
+            .await
+            .map(|reader| LocalFileStream::new(reader, &full_path))
+            .map_err(|e| LocalDirError::io(&full_path, e))
     }
 
     async fn write<Data: TryStream + Send + 'static + Unpin>(
@@ -99,36 +176,48 @@ impl ConcreteFS for LocalDir {
         Bytes: From<Data::Ok>,
     {
         let full_path = self.full_path(path);
-        let mut f = File::create(&full_path).await?;
+        let mut f = File::create(&full_path)
+            .await
+            .map_err(|e| LocalDirError::io(&self.path, e))?;
         let mut reader = StreamReader::new(
             data.map_ok(Bytes::from)
                 .map_err(|e| io::Error::new(ErrorKind::Other, e)),
         );
 
-        tokio::io::copy(&mut reader, &mut f).await?;
+        tokio::io::copy(&mut reader, &mut f)
+            .await
+            .map_err(|e| LocalDirError::io(&self.path, e))?;
 
         full_path
             .modification_time()
             .map(|time| LocalSyncInfo::new(time.into()))
+            .map_err(|e| LocalDirError::io(&self.path, e))
     }
 
     async fn rm(&self, path: &VirtualPath) -> Result<(), Self::Error> {
         let full_path = self.full_path(path);
-        fs::remove_file(&full_path).await
+        fs::remove_file(&full_path)
+            .await
+            .map_err(|e| LocalDirError::io(&self.path, e))
     }
 
     async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::Error> {
         let full_path = self.full_path(path);
-        fs::create_dir(&full_path).await?;
+        fs::create_dir(&full_path)
+            .await
+            .map_err(|e| LocalDirError::io(&self.path, e))?;
 
         full_path
             .modification_time()
             .map(|time| LocalSyncInfo::new(time.into()))
+            .map_err(|e| LocalDirError::io(&self.path, e))
     }
 
     async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
         let full_path = self.full_path(path);
-        fs::remove_dir_all(&full_path).await
+        fs::remove_dir_all(&full_path)
+            .await
+            .map_err(|e| LocalDirError::io(&self.path, e))
     }
 
     async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
@@ -136,7 +225,10 @@ impl ConcreteFS for LocalDir {
         let mut reader = StreamReader::new(stream.map_err(|e| io::Error::new(ErrorKind::Other, e)));
 
         let mut data = Vec::new();
-        reader.read_to_end(&mut data).await?;
+        reader
+            .read_to_end(&mut data)
+            .await
+            .map_err(|e| LocalDirError::io(&self.path, e))?;
 
         Ok(xxh3_64(&data))
     }
