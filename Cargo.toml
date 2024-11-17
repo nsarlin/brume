@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/brume"]
+members = ["crates/brume", "crates/brume-daemon"]
 resolver = "2"

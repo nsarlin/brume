@@ -1,0 +1,15 @@
+[package]
+name = "brume-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+
+brume = { version = "0.1.0", path = "../brume" }
+
+
+[[bin]]
+name = "brumed"
+path = "src/main.rs"
