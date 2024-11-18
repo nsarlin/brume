@@ -21,6 +21,7 @@ pub(crate) enum TestNode<'a> {
     FH(&'a str, u64),
     DH(&'a str, u64, Vec<TestNode<'a>>),
     FF(&'a str, &'a [u8]),
+    L(&'a str, Option<&'a TestNode<'a>>),
 }
 
 impl<'a> TestNode<'a> {
@@ -30,7 +31,25 @@ impl<'a> TestNode<'a> {
             | Self::D(name, _)
             | Self::FH(name, _)
             | Self::DH(name, _, _)
-            | Self::FF(name, _) => name,
+            | Self::FF(name, _)
+            | Self::L(name, _) => name,
+        }
+    }
+
+    pub(crate) fn content(&self) -> Option<&[u8]> {
+        match self {
+            TestNode::F(_) => None,
+            TestNode::D(_, _) => None,
+            TestNode::FH(_, _) => None,
+            TestNode::DH(_, _, _) => None,
+            TestNode::FF(_, content) => Some(content),
+            TestNode::L(_, target) => {
+                if let Some(node) = target.as_ref() {
+                    node.content()
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -69,6 +88,13 @@ impl<'a> TestNode<'a> {
                         .map(|child| child.into_node_recursive_diff())
                         .collect(),
                 ))
+            }
+            Self::L(_, target) => {
+                if let Some(node) = target {
+                    node.clone().into_node_recursive_diff()
+                } else {
+                    panic!("Invalid symlink")
+                }
             }
         }
     }
@@ -113,6 +139,13 @@ impl<'a> TestNode<'a> {
                         .collect(),
                 ))
             }
+            Self::L(_, target) => {
+                if let Some(node) = target {
+                    node.clone().into_node_shallow_diff()
+                } else {
+                    panic!("Invalid symlink")
+                }
+            }
         }
     }
 
@@ -151,6 +184,13 @@ impl<'a> TestNode<'a> {
                 )
             }
             Self::FF(_, _) => panic!(),
+            Self::L(_, target) => {
+                if let Some(node) = target {
+                    node.clone().into_dir_shallow_diff()
+                } else {
+                    panic!("Invalid symlink")
+                }
+            }
         }
     }
 
@@ -173,6 +213,13 @@ impl<'a> TestNode<'a> {
                         }
                     }
                     panic!("{path:?}")
+                }
+                Self::L(_, target) => {
+                    if let Some(node) = target {
+                        node.get_node(remainder)
+                    } else {
+                        panic!("Invalid symlink")
+                    }
                 }
             }
         }
@@ -198,6 +245,7 @@ impl<'a> TestNode<'a> {
                     }
                     panic!("{path:?}")
                 }
+                Self::L(_, _) => todo!(),
             }
         }
     }
@@ -209,6 +257,13 @@ impl<'a> LocalPath for TestNode<'a> {
         match self {
             TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) => true,
             TestNode::D(_, _) | TestNode::DH(_, _, _) => false,
+            TestNode::L(_, target) => {
+                if let Some(node) = target {
+                    node.is_file()
+                } else {
+                    panic!("Invalid symlink")
+                }
+            }
         }
     }
 
@@ -216,6 +271,13 @@ impl<'a> LocalPath for TestNode<'a> {
         match self {
             TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) => false,
             TestNode::D(_, _) | TestNode::DH(_, _, _) => true,
+            TestNode::L(_, target) => {
+                if let Some(node) = target {
+                    node.is_dir()
+                } else {
+                    panic!("Invalid symlink")
+                }
+            }
         }
     }
 
@@ -232,11 +294,37 @@ impl<'a> LocalPath for TestNode<'a> {
             TestNode::D(_, children) | TestNode::DH(_, _, children) => {
                 Ok(children.iter().cloned().map(Ok))
             }
+            TestNode::L(_, target) => {
+                if let Some(node) = target {
+                    node.read_dir()
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid symlink target",
+                    ))
+                }
+            }
         }
     }
 
     fn modification_time(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::now())
+        match self {
+            TestNode::F(_)
+            | TestNode::D(_, _)
+            | TestNode::FH(_, _)
+            | TestNode::DH(_, _, _)
+            | TestNode::FF(_, _) => Ok(SystemTime::now()),
+            TestNode::L(_, target) => {
+                if let Some(node) = target {
+                    node.modification_time()
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid symlink target",
+                    ))
+                }
+            }
+        }
     }
 
     fn file_size(&self) -> std::io::Result<u64> {
@@ -247,6 +335,16 @@ impl<'a> LocalPath for TestNode<'a> {
                 "expected a file",
             )),
             TestNode::FF(_, content) => Ok(content.len() as u64),
+            TestNode::L(_, target) => {
+                if let Some(node) = target {
+                    node.file_size()
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid symlink target",
+                    ))
+                }
+            }
         }
     }
 }
@@ -275,6 +373,13 @@ impl<'a> From<TestNode<'a>> for InnerConcreteTestNode {
                 children.into_iter().map(|child| child.into()).collect(),
             ),
             TestNode::FF(name, content) => Self::FF(name.to_string(), content.to_vec()),
+            TestNode::L(_, target) => {
+                if let Some(node) = target {
+                    node.clone().into()
+                } else {
+                    panic!("Invalid symlink")
+                }
+            }
         }
     }
 }
@@ -403,16 +508,12 @@ impl ConcreteFS for ConcreteTestNode {
         let root = TestNode::from(inner.deref());
         let node = root.get_node(path);
 
-        match node {
-            TestNode::F(_) => panic!("{path:?}"),
-            TestNode::D(_, _) => panic!("{path:?}"),
-            TestNode::FH(_, _) => panic!("{path:?}"),
-            TestNode::DH(_, _, _) => panic!("{path:?}"),
-            TestNode::FF(_, content) => {
-                let owned = content.to_vec();
-                let stream = stream::iter(owned.into_iter().map(|b| Ok(Bytes::from(vec![b]))));
-                Ok(stream)
-            }
+        if let Some(content) = node.content() {
+            let owned = content.to_vec();
+            let stream = stream::iter(owned.into_iter().map(|b| Ok(Bytes::from(vec![b]))));
+            Ok(stream)
+        } else {
+            panic!("can't open node {path:?}")
         }
     }
 
