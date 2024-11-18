@@ -138,10 +138,10 @@ mod test {
 
     use crate::vfs::{DirTree, VfsNode};
 
+    use crate::test_utils::TestNode::{D, F, L};
+
     #[test]
     fn test_parse_path() {
-        use crate::test_utils::TestNode::{D, F};
-
         let base = vec![
             D("Doc", vec![F("f1.md"), F("f2.pdf")]),
             D("a", vec![D("b", vec![D("c", vec![])])]),
@@ -155,5 +155,46 @@ mod test {
         let reference = &D("", base).into_node();
 
         assert!(parsed.structural_eq(reference));
+    }
+
+    #[test]
+    fn test_parse_symlink() {
+        // Check a link that points to a dir
+        let target = D("Doc", vec![F("f1.md"), F("f2.pdf")]);
+        let base = vec![L("link", Some(&target))];
+
+        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
+        node_from_path_rec(&mut root, &base).unwrap();
+
+        let parsed = VfsNode::Dir(root);
+
+        let reference = D("", vec![D("link", vec![F("f1.md"), F("f2.pdf")])]).into_node();
+
+        assert!(parsed.structural_eq(&reference));
+
+        // Check a link that points to a file
+        let target = F("f1.md");
+        let base = vec![D("Doc", vec![L("link", Some(&target)), F("f2.pdf")])];
+
+        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
+        node_from_path_rec(&mut root, &base).unwrap();
+
+        let parsed = VfsNode::Dir(root);
+
+        let reference = D("", vec![D("Doc", vec![F("link"), F("f2.pdf")])]).into_node();
+
+        assert!(parsed.structural_eq(&reference));
+
+        // Check that invalid links are skipped
+        let base = vec![D("Doc", vec![L("link", None), F("f2.pdf")])];
+
+        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
+        node_from_path_rec(&mut root, &base).unwrap();
+
+        let parsed = VfsNode::Dir(root);
+
+        let reference = D("", vec![D("Doc", vec![F("f2.pdf")])]).into_node();
+
+        assert!(parsed.structural_eq(&reference));
     }
 }
