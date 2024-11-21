@@ -13,15 +13,23 @@ use futures::future::try_join_all;
 use tokio::try_join;
 
 use crate::{
-    concrete::{concrete_eq_file, ConcreteFS, ConcreteUpdateApplicationError},
+    concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, ConcreteUpdateApplicationError},
     sorted_vec::{Sortable, SortedVec},
     update::{
-        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, ReconciledUpdate,
+        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, ReconciledUpdate,
         ReconciliationError, UpdateTarget, VfsNodeUpdate, VfsUpdateList,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
     Error, NameMismatchError,
 };
+
+#[derive(Error, Debug)]
+pub enum VfsReloadError {
+    #[error("error from the concrete fs")]
+    ConcreteFsError(#[from] ConcreteFsError),
+    #[error("failed to diff newer and previous version of filesystem")]
+    DiffError(#[from] DiffError),
+}
 
 /// Main representation of any kind of filesystem, remote or local.
 ///
@@ -49,7 +57,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     }
 
     /// Query the concrete FS to update the in memory virtual representation
-    pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, Error> {
+    pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, VfsReloadError> {
         let new_vfs = self.concrete.load_virtual().await.map_err(|e| e.into())?;
 
         let updates = self.vfs.diff(&new_vfs)?;
@@ -241,6 +249,34 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         }
 
         Ok(dir)
+    }
+
+    /// Fully synchronize both filesystems.
+    ///
+    /// This is done in three steps:
+    /// - Vfs updates: both vfs are reloaded from their concrete FS. Updates on both filesystems are
+    ///   detected.
+    /// - Reconciliations: updates from both filesystems are merged and deduplicated. Conflicts are
+    ///   detected.
+    /// - Applications: Updates from one filesystem are applied to the other. Vfs are also updated
+    ///   accordingly.
+    ///
+    /// See [`crate::update`] for more information about the update process.
+    pub async fn full_sync<OtherConcrete: ConcreteFS>(
+        &mut self,
+        other: &mut FileSystem<OtherConcrete>,
+    ) -> Result<(), Error> {
+        let (remote_diff, local_diff) = try_join!(self.update_vfs(), other.update_vfs())?;
+
+        let reconciled = local_diff.reconcile(remote_diff, self, other).await?;
+
+        let (local_applied, remote_applied) =
+            self.apply_updates_list_concrete(other, reconciled).await?;
+
+        self.vfs_mut().apply_updates_list(local_applied)?;
+        other.vfs_mut().apply_updates_list(remote_applied)?;
+
+        Ok(())
     }
 }
 

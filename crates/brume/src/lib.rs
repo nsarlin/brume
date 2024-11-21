@@ -1,9 +1,9 @@
 use std::fmt::Display;
 
-use concrete::{ConcreteFsError, ConcreteUpdateApplicationError};
+use concrete::ConcreteUpdateApplicationError;
+use filesystem::VfsReloadError;
 use thiserror::Error;
-use update::{DiffError, ReconciliationError, VfsUpdateApplicationError};
-use vfs::InvalidPathError;
+use update::{ReconciliationError, VfsUpdateApplicationError};
 
 pub mod concrete;
 pub mod filesystem;
@@ -15,14 +15,10 @@ pub mod vfs;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("error from the concrete fs")]
-    ConcreteFsError(#[from] ConcreteFsError),
-    #[error("invalid path provided")]
-    InvalidPath(#[from] InvalidPathError),
-    #[error("failed to get VFS diff")]
-    VfsDiffFailed(#[from] DiffError),
+    #[error("failed to reload vfs from concrete fs")]
+    VfsReloadError(#[from] VfsReloadError),
     #[error("failed to apply update to VFS node")]
-    VfsUpdateFailed(#[from] VfsUpdateApplicationError),
+    VfsUpdateApplicationFailed(#[from] VfsUpdateApplicationError),
     #[error("failed to apply update to Concrete FS")]
     ConcreteUpdateFailed(#[from] ConcreteUpdateApplicationError),
     #[error("failed to reconcile updates from both filesystems")]
