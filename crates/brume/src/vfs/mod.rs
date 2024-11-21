@@ -46,16 +46,24 @@ impl<SyncInfo> Vfs<SyncInfo> {
         self.root.structural_eq(other.root())
     }
 
+    /// Apply a list of updates to the VFS, by calling [`Self::apply_update`] on each of them.
+    pub fn apply_updates_list(
+        &mut self,
+        updates: Vec<AppliedUpdate<SyncInfo>>,
+    ) -> Result<(), VfsUpdateApplicationError> {
+        for update in updates {
+            self.apply_update(update)?;
+        }
+        Ok(())
+    }
+
     /// Apply an update to the Vfs, by adding or removing nodes.
     ///
     /// The created or modified nodes use the SyncInfo from the [`AppliedUpdate`].
     pub fn apply_update(
         &mut self,
         update: AppliedUpdate<SyncInfo>,
-    ) -> Result<(), VfsUpdateApplicationError>
-    where
-        SyncInfo: Debug,
-    {
+    ) -> Result<(), VfsUpdateApplicationError> {
         let path = update.path().to_owned();
 
         let parent = self
