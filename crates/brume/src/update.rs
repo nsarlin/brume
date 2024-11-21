@@ -23,11 +23,13 @@
 
 use std::cmp::Ordering;
 
+use futures::future::try_join_all;
+
 use crate::{
     concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError},
     filesystem::FileSystem,
     sorted_vec::{Sortable, SortedVec},
-    vfs::{DeleteNodeError, DirTree, InvalidPathError, VirtualPath, VirtualPathBuf},
+    vfs::{DeleteNodeError, DirTree, InvalidPathError, Vfs, VirtualPath, VirtualPathBuf},
     Error, NameMismatchError,
 };
 
@@ -67,6 +69,8 @@ pub enum ReconciliationError {
     NodeMismatch(#[from] NameMismatchError),
     #[error("invalid path provided for reconciliation")]
     InvalidPath(#[from] InvalidPathError),
+    #[error("failed to diff vfs nodes")]
+    DiffError(#[from] DiffError),
 }
 
 /// Result of a VFS node comparison.
@@ -133,18 +137,17 @@ impl VfsNodeUpdate {
         }
     }
 
-    /// Updates from two synchronized VFS are "reconciled" before being applied.
+    /// Reconcile updates from two different VFS.
     ///
-    /// The goal of this process is to:
-    /// - remove duplicates (if the same modification has been done outside of the sync process on
-    ///   both vfs)
-    /// - detect conflicts (if different modifications have been done on the same node)
-    pub async fn reconcile<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
+    /// This step is performed without access to the concrete filesystems. This means that only
+    /// obvious conflicts are detected. Files that are modified on both fs will be flagged as
+    /// `NeedConcreteCheck` so they can be resolved later with concrete fs access.
+    fn reconcile<SyncInfo, OtherSyncInfo>(
         &self,
         other: &VfsNodeUpdate,
-        fs_self: &FileSystem<Concrete>,
-        fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
+        vfs_self: &Vfs<SyncInfo>,
+        vfs_other: &Vfs<OtherSyncInfo>,
+    ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
         if self.path() != other.path() {
             return Err(NameMismatchError {
                 found: self.path().name().to_string(),
@@ -155,47 +158,38 @@ impl VfsNodeUpdate {
 
         let mut reconciled = SortedVec::new();
 
-        let concrete_self = fs_self.concrete();
-        let concrete_other = fs_other.concrete();
-
         match (self, other) {
             (VfsNodeUpdate::DirCreated(pself), VfsNodeUpdate::DirCreated(pother)) => {
                 // If the same dir has been created on both sides, we need to check if they are
-                // equivalent. If they are not, we generate updates that are only allowed to created
+                // equivalent. If they are not, we generate updates that are only allowed to create
                 // nodes.
-                let dir_self = fs_self.find_dir(pself)?;
-                let dir_other = fs_other.find_dir(pother)?;
+                let dir_self = vfs_self.root().find_dir(pself)?;
+                let dir_other = vfs_other.root().find_dir(pother)?;
 
-                let reconciled = dir_self
-                    .diff(
-                        &dir_other,
-                        self.path().parent().unwrap_or(VirtualPath::root()),
-                    )
-                    .await?
-                    .iter()
-                    .map(ReconciledUpdate::new_creation_only)
-                    .collect();
+                let reconciled = dir_self.reconciliation_diff(
+                    dir_other,
+                    self.path().parent().unwrap_or(VirtualPath::root()),
+                )?;
                 // Since we iterate on sorted updates, the result will be sorted too
-                Ok(SortedVec::unchecked_from_vec(reconciled))
+                Ok(reconciled)
             }
             (VfsNodeUpdate::DirRemoved(_), VfsNodeUpdate::DirRemoved(_)) => Ok(reconciled),
             (VfsNodeUpdate::FileModified(pself), VfsNodeUpdate::FileModified(pother))
             | (VfsNodeUpdate::FileCreated(pself), VfsNodeUpdate::FileCreated(pother)) => {
-                let file_self = fs_self.vfs().root().find_file(pself)?;
-                let file_other = fs_other.vfs().root().find_file(pother)?;
+                let file_self = vfs_self.root().find_file(pself)?;
+                let file_other = vfs_other.root().find_file(pother)?;
 
-                if file_self.size() == file_other.size()
-                    && concrete_eq_file(concrete_self, concrete_other, self.path()).await?
-                {
-                    Ok(reconciled)
+                if file_self.size() == file_other.size() {
+                    reconciled.insert(VirtualReconciledUpdate::NeedConcreteCheck(pself.to_owned()));
                 } else {
-                    reconciled.insert(ReconciledUpdate::Conflict(self.path().to_owned()));
-                    Ok(reconciled)
+                    reconciled.insert(VirtualReconciledUpdate::Conflict(self.path().to_owned()));
                 }
+
+                Ok(reconciled)
             }
             (VfsNodeUpdate::FileRemoved(_), VfsNodeUpdate::FileRemoved(_)) => Ok(reconciled),
             _ => {
-                reconciled.insert(ReconciledUpdate::Conflict(self.path().to_owned()));
+                reconciled.insert(VirtualReconciledUpdate::Conflict(self.path().to_owned()));
                 Ok(reconciled)
             }
         }
@@ -216,12 +210,12 @@ pub type VfsUpdateList = SortedVec<VfsNodeUpdate>;
 impl VfsUpdateList {
     /// Merge two update lists by calling [`VfsNodeUpdate::reconcile`] on their elements one by
     /// one
-    async fn merge<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
+    fn merge<SyncInfo, OtherSyncInfo>(
         &self,
         other: VfsUpdateList,
-        fs_self: &FileSystem<Concrete>,
-        fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
+        vfs_self: &Vfs<SyncInfo>,
+        vfs_other: &Vfs<OtherSyncInfo>,
+    ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
         // Here we cannot use `iter_zip_map` or an async variant of it because it does not seem
         // possible to express the lifetimes required by the async closures
 
@@ -236,18 +230,18 @@ impl VfsUpdateList {
             match self_item.key().cmp(other_item.key()) {
                 Ordering::Less => {
                     // Propagate the update from self to other
-                    ret.push(ReconciledUpdate::applicable_other(self_item));
+                    ret.push(VirtualReconciledUpdate::applicable_other(self_item));
                     self_item_opt = self_iter.next()
                 }
 
                 Ordering::Equal => {
-                    ret.extend(Box::pin(self_item.reconcile(other_item, fs_self, fs_other)).await?);
+                    ret.extend(self_item.reconcile(other_item, vfs_self, vfs_other)?);
                     self_item_opt = self_iter.next();
                     other_item_opt = other_iter.next();
                 }
                 Ordering::Greater => {
                     // Propagate the update from other to self
-                    ret.push(ReconciledUpdate::applicable_self(other_item));
+                    ret.push(VirtualReconciledUpdate::applicable_self(other_item));
                     other_item_opt = other_iter.next();
                 }
             }
@@ -256,12 +250,12 @@ impl VfsUpdateList {
         // Handle the remaining items that are present in an iterator and not the
         // other one
         while let Some(self_item) = self_item_opt {
-            ret.push(ReconciledUpdate::applicable_other(self_item));
+            ret.push(VirtualReconciledUpdate::applicable_other(self_item));
             self_item_opt = self_iter.next();
         }
 
         while let Some(other_item) = other_item_opt {
-            ret.push(ReconciledUpdate::applicable_self(other_item));
+            ret.push(VirtualReconciledUpdate::applicable_self(other_item));
             other_item_opt = other_iter.next();
         }
 
@@ -280,9 +274,13 @@ impl VfsUpdateList {
         fs_self: &FileSystem<Concrete>,
         fs_other: &FileSystem<OtherConcrete>,
     ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
-        let merged = self.merge(other, fs_self, fs_other).await?;
+        let merged = self.merge(other, fs_self.vfs(), fs_other.vfs())?;
 
-        Ok(merged.resolve_ancestor_conflicts())
+        let concrete_merged = merged
+            .resolve_concrete(fs_self.concrete(), fs_other.concrete())
+            .await?;
+
+        Ok(concrete_merged.resolve_ancestor_conflicts())
     }
 }
 
@@ -320,10 +318,96 @@ impl From<ApplicableUpdate> for VfsNodeUpdate {
     }
 }
 
+/// An update that has been reconciled based on VFS diff but needs a check against the concrete FS
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VirtualReconciledUpdate {
+    Applicable(ApplicableUpdate),
+    /// Updates in this state cannot be directly applied and need to be checked with concrete file
+    /// access. The outcome of the check can be:
+    /// - Remove the update if both files are identical
+    /// - Mark the update as a conflict if they are different
+    NeedConcreteCheck(VirtualPathBuf),
+    Conflict(VirtualPathBuf),
+}
+
+impl VirtualReconciledUpdate {
+    fn path(&self) -> &VirtualPath {
+        match self {
+            Self::Applicable(update) => update.update.path(),
+            Self::NeedConcreteCheck(path) => path.as_ref(),
+            Self::Conflict(path) => path.as_ref(),
+        }
+    }
+
+    /// Create a new `Applicable` update with [`UpdateTarget::SelfFs`]
+    pub(crate) fn applicable_self(update: &VfsNodeUpdate) -> Self {
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    }
+
+    /// Create a new `Applicable` update with [`UpdateTarget::OtherFs`]
+    pub(crate) fn applicable_other(update: &VfsNodeUpdate) -> Self {
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    }
+
+    /// Resolve an update with `NeedConcreteCheck` by comparing hashes of the file on both concrete
+    /// FS
+    async fn resolve_concrete<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
+        self,
+        concrete_self: &Concrete,
+        concrete_other: &OtherConcrete,
+    ) -> Result<Option<ReconciledUpdate>, ReconciliationError> {
+        match self {
+            VirtualReconciledUpdate::Applicable(update) => {
+                Ok(Some(ReconciledUpdate::Applicable(update)))
+            }
+            VirtualReconciledUpdate::NeedConcreteCheck(path) => {
+                if concrete_eq_file(concrete_self, concrete_other, &path).await? {
+                    Ok(None)
+                } else {
+                    Ok(Some(ReconciledUpdate::Conflict(path)))
+                }
+            }
+            VirtualReconciledUpdate::Conflict(conflict) => {
+                Ok(Some(ReconciledUpdate::Conflict(conflict)))
+            }
+        }
+    }
+}
+
+impl Sortable for VirtualReconciledUpdate {
+    type Key = VirtualPath;
+
+    fn key(&self) -> &Self::Key {
+        self.path()
+    }
+}
+
+impl SortedVec<VirtualReconciledUpdate> {
+    /// Convert a list of [`VirtualReconciledUpdate`] into a list of [`ReconciledUpdate`] by using
+    /// the concrete FS to resolve all the `NeedConcreteCheck`
+    async fn resolve_concrete<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
+        self,
+        concrete_self: &Concrete,
+        concrete_other: &OtherConcrete,
+    ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
+        let updates = try_join_all(
+            self.into_iter()
+                .map(|update| update.resolve_concrete(concrete_self, concrete_other)),
+        )
+        .await?;
+
+        let updates = updates.into_iter().flatten().collect();
+
+        Ok(SortedVec::unchecked_from_vec(updates))
+    }
+}
+
 /// Output of the update reconciliation process. See [`VfsUpdateList::reconcile`]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconciledUpdate {
+    /// Updates in this state can be applied to the target concrete FS
     Applicable(ApplicableUpdate),
+    /// There is a conflict that needs user input for resolution
     Conflict(VirtualPathBuf),
 }
 
@@ -335,37 +419,14 @@ impl ReconciledUpdate {
         }
     }
 
-    /// Create a new Reconciled update that will only be able to "create" nodes.
-    ///
-    /// This means that:
-    /// - DirCreated/FileCreated will be applied on SelfFs
-    /// - DirRemoved/FileRemoved will be converted into a "created" update and applied to OtherFs
-    /// - FileModified will generate a conflict
-    pub fn new_creation_only(update: &VfsNodeUpdate) -> Self {
-        match update {
-            VfsNodeUpdate::DirCreated(_) | VfsNodeUpdate::FileCreated(_) => {
-                Self::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
-            }
-            VfsNodeUpdate::DirRemoved(path) => Self::Applicable(ApplicableUpdate::new(
-                UpdateTarget::OtherFs,
-                &VfsNodeUpdate::DirCreated(path.clone()),
-            )),
-            VfsNodeUpdate::FileRemoved(path) => Self::Applicable(ApplicableUpdate::new(
-                UpdateTarget::OtherFs,
-                &VfsNodeUpdate::FileCreated(path.clone()),
-            )),
-            VfsNodeUpdate::FileModified(path) => Self::Conflict(path.to_owned()),
-        }
-    }
-
     /// Create a new `Applicable` update with [`UpdateTarget::SelfFs`]
     pub fn applicable_self(update: &VfsNodeUpdate) -> Self {
-        ReconciledUpdate::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
     }
 
     /// Create a new `Applicable` update with [`UpdateTarget::OtherFs`]
     pub fn applicable_other(update: &VfsNodeUpdate) -> Self {
-        ReconciledUpdate::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
     }
 }
 
