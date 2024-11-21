@@ -218,6 +218,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         let sync_info = self.concrete.mkdir(path).await.map_err(|e| e.into())?;
         let mut dir = DirTree::new(path.name(), sync_info);
 
+        // TODO: parallelize file download
         for ref_child in ref_fs.dir.children().iter() {
             let mut child_path = path.to_owned();
             child_path.push(ref_child.name());

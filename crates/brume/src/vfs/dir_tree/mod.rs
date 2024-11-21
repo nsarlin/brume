@@ -8,7 +8,7 @@ pub use file::*;
 
 use crate::{
     sorted_vec::{Sortable, SortedVec},
-    update::ModificationState,
+    update::{ModificationState, VirtualReconciledUpdate},
     Error, NameMismatchError,
 };
 
@@ -262,6 +262,40 @@ impl<SyncInfo> DirTree<SyncInfo> {
                 .zip(other.children.iter())
                 .all(|(child_self, child_other)| child_self.structural_eq(child_other))
     }
+
+    pub(crate) fn reconciliation_diff<OtherSyncInfo>(
+        &self,
+        other: &DirTree<OtherSyncInfo>,
+        parent_path: &VirtualPath,
+    ) -> Result<SortedVec<VirtualReconciledUpdate>, DiffError> {
+        let mut dir_path = parent_path.to_owned();
+        dir_path.push(self.name());
+
+        let diff_list = self.children.iter_zip_map(
+            &other.children,
+            |self_child| -> Result<_, DiffError> {
+                let mut res = SortedVec::new();
+                res.insert(VirtualReconciledUpdate::applicable_other(
+                    &self_child.to_created_diff(&dir_path),
+                ));
+                Ok(res)
+            },
+            |self_child, other_child| self_child.reconciliation_diff(other_child, &dir_path),
+            |other_child| {
+                let mut res = SortedVec::new();
+                res.insert(VirtualReconciledUpdate::applicable_self(
+                    &other_child.to_created_diff(&dir_path),
+                ));
+                Ok(res)
+            },
+        )?;
+
+        // Since the children lists are sorted, we know that the produced updates will be
+        // too, so we can directly create the sorted list from the result
+        let diffs = SortedVec::unchecked_flatten(diff_list);
+
+        Ok(diffs)
+    }
 }
 
 impl<SyncInfo: Clone> DirTree<SyncInfo> {
@@ -485,6 +519,33 @@ impl<SyncInfo> VfsNode<SyncInfo> {
             (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.structural_eq(dother),
             (VfsNode::Dir(_), VfsNode::File(_)) | (VfsNode::File(_), VfsNode::Dir(_)) => false,
             (VfsNode::File(fself), VfsNode::File(fother)) => fself.name() == fother.name(),
+        }
+    }
+
+    fn reconciliation_diff<OtherSyncInfo>(
+        &self,
+        other: &VfsNode<OtherSyncInfo>,
+        parent_path: &VirtualPath,
+    ) -> Result<SortedVec<VirtualReconciledUpdate>, DiffError> {
+        match (self, other) {
+            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => {
+                dself.reconciliation_diff(dother, parent_path)
+            }
+            (VfsNode::File(fself), VfsNode::File(_)) => {
+                let mut file_path = parent_path.to_owned();
+                file_path.push(fself.name());
+
+                let diff = VirtualReconciledUpdate::NeedConcreteCheck(file_path);
+                Ok(SortedVec::from_vec(vec![diff]))
+            }
+            (nself, _) => {
+                let mut file_path = parent_path.to_owned();
+                file_path.push(nself.name());
+
+                Ok(SortedVec::from_vec(vec![
+                    VirtualReconciledUpdate::Conflict(file_path),
+                ]))
+            }
         }
     }
 

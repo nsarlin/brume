@@ -42,9 +42,9 @@ async fn main() -> Result<()> {
             )
         };
 
-        println!("{local_diff:?}");
+        println!("local:\n{local_diff:?}");
         println!("====");
-        println!("{remote_diff:?}");
+        println!("remote:\n{remote_diff:?}");
 
         let reconciled = {
             let local = local.lock().await;
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
         };
 
         println!("====");
-        println!("{reconciled:?}");
+        println!("reconciled:\n{reconciled:?}");
 
         let (local_applied, remote_applied) = {
             let local = local.lock().await;
@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("Failed to apply updates to concrete dir")?
         };
+        println!("updates applied on concrete");
 
         for applied in local_applied.into_iter() {
             let mut local = local.lock().await;
