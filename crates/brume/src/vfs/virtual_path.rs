@@ -8,7 +8,7 @@ use super::NodeKind;
 
 #[derive(Error, Debug)]
 pub enum InvalidPathError {
-    #[error("path {0:?} does not found in the VFS")]
+    #[error("path {0:?} not found in the VFS")]
     NotFound(VirtualPathBuf),
     #[error("expected a directory at {0:?}")]
     NotADir(VirtualPathBuf),

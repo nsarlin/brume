@@ -26,7 +26,7 @@ use std::cmp::Ordering;
 use futures::future::try_join_all;
 
 use crate::{
-    concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError},
+    concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, Named},
     filesystem::FileSystem,
     sorted_vec::{Sortable, SortedVec},
     vfs::{DeleteNodeError, DirTree, InvalidPathError, Vfs, VirtualPath, VirtualPathBuf},
@@ -61,16 +61,38 @@ pub enum VfsUpdateApplicationError {
 
 #[derive(Error, Debug)]
 pub enum ReconciliationError {
-    #[error("error from the concrete fs during reconciliation")]
-    ConcreteFsError(#[from] ConcreteFsError),
+    #[error("error from {fs_name} during reconciliation")]
+    ConcreteFsError {
+        fs_name: String,
+        source: ConcreteFsError,
+    },
     #[error(
         "the nodes in 'self' and 'other' do not point to the same node and can't be reconciled"
     )]
     NodeMismatch(#[from] NameMismatchError),
-    #[error("invalid path provided for reconciliation")]
-    InvalidPath(#[from] InvalidPathError),
+    #[error("invalid path on {fs_name} provided for reconciliation")]
+    InvalidPath {
+        fs_name: String,
+        source: InvalidPathError,
+    },
     #[error("failed to diff vfs nodes")]
     DiffError(#[from] DiffError),
+}
+
+impl ReconciliationError {
+    pub fn concrete<E: Into<ConcreteFsError>>(fs_name: &str, source: E) -> Self {
+        Self::ConcreteFsError {
+            fs_name: fs_name.to_string(),
+            source: source.into(),
+        }
+    }
+
+    pub fn invalid_path<E: Into<InvalidPathError>>(fs_name: &str, source: E) -> Self {
+        Self::InvalidPath {
+            fs_name: fs_name.to_string(),
+            source: source.into(),
+        }
+    }
 }
 
 /// Result of a VFS node comparison.
@@ -142,7 +164,7 @@ impl VfsNodeUpdate {
     /// This step is performed without access to the concrete filesystems. This means that only
     /// obvious conflicts are detected. Files that are modified on both fs will be flagged as
     /// `NeedConcreteCheck` so they can be resolved later with concrete fs access.
-    fn reconcile<SyncInfo, OtherSyncInfo>(
+    fn reconcile<SyncInfo: Named, OtherSyncInfo: Named>(
         &self,
         other: &VfsNodeUpdate,
         vfs_self: &Vfs<SyncInfo>,
@@ -163,8 +185,14 @@ impl VfsNodeUpdate {
                 // If the same dir has been created on both sides, we need to check if they are
                 // equivalent. If they are not, we generate updates that are only allowed to create
                 // nodes.
-                let dir_self = vfs_self.root().find_dir(pself)?;
-                let dir_other = vfs_other.root().find_dir(pother)?;
+                let dir_self = vfs_self
+                    .root()
+                    .find_dir(pself)
+                    .map_err(|e| ReconciliationError::invalid_path(SyncInfo::NAME, e))?;
+                let dir_other = vfs_other
+                    .root()
+                    .find_dir(pother)
+                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::NAME, e))?;
 
                 let reconciled = dir_self.reconciliation_diff(
                     dir_other,
@@ -176,8 +204,14 @@ impl VfsNodeUpdate {
             (VfsNodeUpdate::DirRemoved(_), VfsNodeUpdate::DirRemoved(_)) => Ok(reconciled),
             (VfsNodeUpdate::FileModified(pself), VfsNodeUpdate::FileModified(pother))
             | (VfsNodeUpdate::FileCreated(pself), VfsNodeUpdate::FileCreated(pother)) => {
-                let file_self = vfs_self.root().find_file(pself)?;
-                let file_other = vfs_other.root().find_file(pother)?;
+                let file_self = vfs_self
+                    .root()
+                    .find_file(pself)
+                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::NAME, e))?;
+                let file_other = vfs_other
+                    .root()
+                    .find_file(pother)
+                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::NAME, e))?;
 
                 if file_self.size() == file_other.size() {
                     reconciled.insert(VirtualReconciledUpdate::NeedConcreteCheck(pself.to_owned()));
@@ -210,7 +244,7 @@ pub type VfsUpdateList = SortedVec<VfsNodeUpdate>;
 impl VfsUpdateList {
     /// Merge two update lists by calling [`VfsNodeUpdate::reconcile`] on their elements one by
     /// one
-    fn merge<SyncInfo, OtherSyncInfo>(
+    fn merge<SyncInfo: Named, OtherSyncInfo: Named>(
         &self,
         other: VfsUpdateList,
         vfs_self: &Vfs<SyncInfo>,
@@ -361,7 +395,10 @@ impl VirtualReconciledUpdate {
                 Ok(Some(ReconciledUpdate::Applicable(update)))
             }
             VirtualReconciledUpdate::NeedConcreteCheck(path) => {
-                if concrete_eq_file(concrete_self, concrete_other, &path).await? {
+                if concrete_eq_file(concrete_self, concrete_other, &path)
+                    .await
+                    .map_err(|(e, name)| ReconciliationError::concrete(name, e))?
+                {
                     Ok(None)
                 } else {
                     Ok(Some(ReconciledUpdate::Conflict(path)))
@@ -480,18 +517,14 @@ pub struct AppliedDirCreation<SyncInfo> {
 impl<SyncInfo> AppliedDirCreation<SyncInfo> {
     /// Create a new `AppliedDirCreation`.
     ///
-    /// Return an error if the name of the dir does not match the last element of the path
-    pub fn new(path: &VirtualPath, dir: DirTree<SyncInfo>) -> Result<Self, NameMismatchError> {
-        if path.name() != dir.name() {
-            return Err(NameMismatchError {
-                found: path.name().to_string(),
-                expected: dir.name().to_string(),
-            });
-        }
-        Ok(Self {
-            path: path.to_owned(),
-            dir,
-        })
+    /// `parent_path` is the path to the parent of the created dir. Since an update cannot create a
+    /// root dir, it always exist.
+    pub fn new(parent_path: &VirtualPath, dir: DirTree<SyncInfo>) -> Self {
+        let name = dir.name();
+        let mut path = parent_path.to_owned();
+        path.push(name);
+
+        Self { path, dir }
     }
 
     pub fn path(&self) -> &VirtualPath {

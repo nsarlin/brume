@@ -27,7 +27,7 @@ use crate::{
     Error,
 };
 
-use super::{ConcreteFS, ConcreteFsError};
+use super::{ConcreteFS, ConcreteFsError, Named};
 
 #[derive(Error, Debug)]
 pub enum LocalDirError {
@@ -263,6 +263,10 @@ impl IsModified<Self> for LocalSyncInfo {
             ModificationState::ShallowUnmodified
         }
     }
+}
+
+impl Named for LocalSyncInfo {
+    const NAME: &'static str = "local FileSystem";
 }
 
 impl<'a> From<&'a LocalSyncInfo> for LocalSyncInfo {

@@ -9,7 +9,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
-use futures::future::try_join_all;
+use futures::{future::try_join_all, TryFutureExt};
 use tokio::try_join;
 
 use crate::{
@@ -105,6 +105,9 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     /// The target of the update will be chosen based on the value of the [`UpdateTarget`] of the
     /// [`ApplicableUpdate`]. Conflict files will always be created on the FileSystem in `self`.
     ///
+    /// In case of error, return the underlying error and the name of the filesystem where this
+    /// error occurred.
+    ///
     /// [`ApplicableUpdate`]: crate::update::ApplicableUpdate
     // TODO: handle conflicts
     pub async fn apply_updates_list_concrete<OtherConcrete: ConcreteFS>(
@@ -116,7 +119,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
             Vec<AppliedUpdate<Concrete::SyncInfo>>,
             Vec<AppliedUpdate<OtherConcrete::SyncInfo>>,
         ),
-        ConcreteUpdateApplicationError,
+        (ConcreteUpdateApplicationError, &'static str),
     > {
         let handle_conflicts: Vec<_> = updates
             .into_iter()
@@ -148,7 +151,10 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
                 .map(|update| other_fs.apply_update_concrete(self, update.into())),
         );
 
-        try_join!(self_futures, other_futures)
+        try_join!(
+            self_futures.map_err(|e| (e, Concrete::NAME)),
+            other_futures.map_err(|e| (e, OtherConcrete::NAME))
+        )
     }
 
     /// Apply an update on the concrete fs.
@@ -160,16 +166,22 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         ref_fs: &FileSystem<OtherConcrete>,
         update: VfsNodeUpdate,
     ) -> Result<AppliedUpdate<Concrete::SyncInfo>, ConcreteUpdateApplicationError> {
+        if update.path().is_root() {
+            return Err(ConcreteUpdateApplicationError::PathIsRoot);
+        }
+
         match update {
             VfsNodeUpdate::DirCreated(path) => {
                 let dir = ref_fs.find_dir(&path)?;
 
                 self.clone_dir_concrete(dir, &path)
                     .await
-                    .and_then(|created_dir| {
-                        AppliedDirCreation::new(&path, created_dir)
-                            .map(AppliedUpdate::DirCreated)
-                            .map_err(|e| e.into())
+                    .map(|created_dir| {
+                        AppliedUpdate::DirCreated(AppliedDirCreation::new(
+                            // The update path is not root so we can unwrap
+                            path.parent().unwrap(),
+                            created_dir,
+                        ))
                     })
             }
             VfsNodeUpdate::DirRemoved(path) => {
@@ -265,16 +277,32 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     pub async fn full_sync<OtherConcrete: ConcreteFS>(
         &mut self,
         other: &mut FileSystem<OtherConcrete>,
-    ) -> Result<(), Error> {
-        let (remote_diff, local_diff) = try_join!(self.update_vfs(), other.update_vfs())?;
-
+    ) -> Result<(), Error>
+    where
+        Concrete::SyncInfo: std::fmt::Debug,
+        OtherConcrete::SyncInfo: std::fmt::Debug,
+    {
+        let (local_diff, remote_diff) = try_join!(
+            self.update_vfs()
+                .map_err(|e| Error::vfs_reload(Concrete::NAME, e)),
+            other
+                .update_vfs()
+                .map_err(|e| Error::vfs_reload(OtherConcrete::NAME, e))
+        )?;
         let reconciled = local_diff.reconcile(remote_diff, self, other).await?;
 
-        let (local_applied, remote_applied) =
-            self.apply_updates_list_concrete(other, reconciled).await?;
+        let (local_applied, remote_applied) = self
+            .apply_updates_list_concrete(other, reconciled)
+            .await
+            .map_err(|(e, name)| Error::concrete_application(name, e))?;
 
-        self.vfs_mut().apply_updates_list(local_applied)?;
-        other.vfs_mut().apply_updates_list(remote_applied)?;
+        self.vfs_mut()
+            .apply_updates_list(local_applied)
+            .map_err(|e| Error::vfs_update_application(Concrete::NAME, e))?;
+        other
+            .vfs_mut()
+            .apply_updates_list(remote_applied)
+            .map_err(|e| Error::vfs_update_application(OtherConcrete::NAME, e))?;
 
         Ok(())
     }
@@ -396,7 +424,9 @@ impl<'fs, Concrete: ConcreteFS> FileSystemNode<'fs, Concrete> {
                 file_path.push(fself.name());
 
                 if fself.size() != fother.size()
-                    || !concrete_eq_file(self.concrete, other.concrete, &file_path).await?
+                    || !concrete_eq_file(self.concrete, other.concrete, &file_path)
+                        .await
+                        .map_err(|(e, name)| ReconciliationError::concrete(name, e))?
                 {
                     let diff = VfsNodeUpdate::FileModified(file_path);
                     Ok(VfsUpdateList::from([diff]))
@@ -611,5 +641,28 @@ mod test {
 
         assert_eq!(applied.path(), dir_path);
         assert_eq!(local_fs.concrete, remote_fs.concrete);
+    }
+
+    #[tokio::test]
+    async fn test_full_sync() {
+        let local_base = D("", vec![]);
+        let mut local_fs = TestFileSystem::new(local_base.clone().into());
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let mut remote_fs = TestFileSystem::new(remote_base.into());
+
+        local_fs.full_sync(&mut remote_fs).await.unwrap();
+
+        assert!(local_fs.vfs().structural_eq(remote_fs.vfs()));
+
+        // TODO: add tests with conflicts
+        // TODO: add tests where fs are modified
     }
 }
