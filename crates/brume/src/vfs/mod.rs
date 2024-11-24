@@ -50,10 +50,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
     pub fn apply_updates_list(
         &mut self,
         updates: Vec<AppliedUpdate<SyncInfo>>,
-    ) -> Result<(), VfsUpdateApplicationError>
-    where
-        SyncInfo: Debug,
-    {
+    ) -> Result<(), VfsUpdateApplicationError> {
         for update in updates {
             self.apply_update(update)?;
         }

@@ -4,23 +4,20 @@ mod byte_counter;
 
 use byte_counter::ByteCounterExt;
 
-use std::{
-    cmp::Ordering,
-    sync::{atomic::AtomicU64, Arc},
-};
+use std::sync::{atomic::AtomicU64, Arc};
 
 use futures::{future::try_join_all, TryFutureExt};
 use tokio::try_join;
 
 use crate::{
-    concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, ConcreteUpdateApplicationError},
-    sorted_vec::{Sortable, SortedVec},
+    concrete::{ConcreteFS, ConcreteFsError, ConcreteUpdateApplicationError},
+    sorted_vec::SortedVec,
     update::{
         AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, ReconciledUpdate,
-        ReconciliationError, UpdateTarget, VfsNodeUpdate, VfsUpdateList,
+        UpdateTarget, VfsNodeUpdate, VfsUpdateList,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
-    Error, NameMismatchError,
+    Error,
 };
 
 #[derive(Error, Debug)]
@@ -49,13 +46,6 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         }
     }
 
-    pub fn root(&self) -> FileSystemNode<'_, Concrete> {
-        FileSystemNode {
-            concrete: &self.concrete,
-            node: self.vfs.root(),
-        }
-    }
-
     /// Query the concrete FS to update the in memory virtual representation
     pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, VfsReloadError> {
         let new_vfs = self.concrete.load_virtual().await.map_err(|e| e.into())?;
@@ -79,14 +69,6 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     /// Return the concrete filesystem
     pub fn concrete(&self) -> &Concrete {
         &self.concrete
-    }
-
-    /// Return the node at the given path, if any
-    pub fn find_node(&self, path: &VirtualPath) -> Option<FileSystemNode<'_, Concrete>> {
-        Some(FileSystemNode {
-            concrete: &self.concrete,
-            node: self.vfs.root().find_node(path)?,
-        })
     }
 
     /// Return the dir at the given path, or an Error if the path is not found or not a directory
@@ -262,50 +244,6 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
 
         Ok(dir)
     }
-
-    /// Fully synchronize both filesystems.
-    ///
-    /// This is done in three steps:
-    /// - Vfs updates: both vfs are reloaded from their concrete FS. Updates on both filesystems are
-    ///   detected.
-    /// - Reconciliations: updates from both filesystems are merged and deduplicated. Conflicts are
-    ///   detected.
-    /// - Applications: Updates from one filesystem are applied to the other. Vfs are also updated
-    ///   accordingly.
-    ///
-    /// See [`crate::update`] for more information about the update process.
-    pub async fn full_sync<OtherConcrete: ConcreteFS>(
-        &mut self,
-        other: &mut FileSystem<OtherConcrete>,
-    ) -> Result<(), Error>
-    where
-        Concrete::SyncInfo: std::fmt::Debug,
-        OtherConcrete::SyncInfo: std::fmt::Debug,
-    {
-        let (local_diff, remote_diff) = try_join!(
-            self.update_vfs()
-                .map_err(|e| Error::vfs_reload(Concrete::NAME, e)),
-            other
-                .update_vfs()
-                .map_err(|e| Error::vfs_reload(OtherConcrete::NAME, e))
-        )?;
-        let reconciled = local_diff.reconcile(remote_diff, self, other).await?;
-
-        let (local_applied, remote_applied) = self
-            .apply_updates_list_concrete(other, reconciled)
-            .await
-            .map_err(|(e, name)| Error::concrete_application(name, e))?;
-
-        self.vfs_mut()
-            .apply_updates_list(local_applied)
-            .map_err(|e| Error::vfs_update_application(Concrete::NAME, e))?;
-        other
-            .vfs_mut()
-            .apply_updates_list(remote_applied)
-            .map_err(|e| Error::vfs_update_application(OtherConcrete::NAME, e))?;
-
-        Ok(())
-    }
 }
 
 /// A directory in the [`FileSystem`]
@@ -317,128 +255,6 @@ pub struct FileSystemDir<'fs, Concrete: ConcreteFS> {
 impl<'fs, Concrete: ConcreteFS> FileSystemDir<'fs, Concrete> {
     pub fn new(concrete: &'fs Concrete, dir: &'fs DirTree<Concrete::SyncInfo>) -> Self {
         Self { concrete, dir }
-    }
-
-    /// Diff two directories, using both the [`Vfs`] to check their structures and the
-    /// [`ConcreteFS`] for the content of the files.
-    ///
-    /// Since this diff use the `ConcreteFS` instead of the SyncInfo, it can be used to compare two
-    /// different filesystems, for example during the [`reconciliation`] process.
-    ///
-    /// [`reconciliation`]: VfsUpdateList::reconcile
-    pub async fn diff<'otherfs, OtherConcrete: ConcreteFS>(
-        &self,
-        other: &FileSystemDir<'otherfs, OtherConcrete>,
-        parent_path: &VirtualPath,
-    ) -> Result<VfsUpdateList, ReconciliationError> {
-        // Here we cannot use `iter_zip_map` or an async variant of it because it does not seem
-        // possible to express the lifetimes required by the async closures
-
-        let mut dir_path = parent_path.to_owned();
-        dir_path.push(self.dir.name());
-
-        let mut ret = SortedVec::new();
-        let mut self_iter = self.dir.children().iter();
-        let mut other_iter = other.dir.children().iter();
-
-        let mut self_item_opt = self_iter.next();
-        let mut other_item_opt = other_iter.next();
-
-        while let (Some(self_item), Some(other_item)) = (self_item_opt, other_item_opt) {
-            match self_item.key().cmp(other_item.key()) {
-                Ordering::Less => {
-                    ret.insert(self_item.to_removed_diff(&dir_path));
-                    self_item_opt = self_iter.next()
-                }
-                // We can use `unchecked_extend` because we know that the updates will be produced
-                // in order
-                Ordering::Equal => {
-                    let self_child = FileSystemNode::new(self.concrete, self_item);
-                    let other_child = FileSystemNode::new(other.concrete, other_item);
-
-                    ret.unchecked_extend(Box::pin(self_child.diff(&other_child, &dir_path)).await?);
-                    self_item_opt = self_iter.next();
-                    other_item_opt = other_iter.next();
-                }
-                Ordering::Greater => {
-                    ret.insert(other_item.to_created_diff(&dir_path));
-                    other_item_opt = other_iter.next();
-                }
-            }
-        }
-
-        // Handle the remaining nodes that are present in an iterator and not the
-        // other one
-        while let Some(self_item) = self_item_opt {
-            ret.insert(self_item.to_removed_diff(&dir_path));
-            self_item_opt = self_iter.next();
-        }
-
-        while let Some(other_item) = other_item_opt {
-            ret.insert(other_item.to_created_diff(&dir_path));
-            other_item_opt = other_iter.next();
-        }
-
-        Ok(ret)
-    }
-}
-
-/// A node in a [`FileSystem`], can represent a file or a directory.
-pub struct FileSystemNode<'fs, Concrete: ConcreteFS> {
-    concrete: &'fs Concrete,
-    node: &'fs VfsNode<Concrete::SyncInfo>,
-}
-
-impl<'fs, Concrete: ConcreteFS> FileSystemNode<'fs, Concrete> {
-    pub fn new(concrete: &'fs Concrete, node: &'fs VfsNode<Concrete::SyncInfo>) -> Self {
-        Self { concrete, node }
-    }
-
-    /// Get the differences between [`FileSystem`] trees, by checking file contents with their
-    /// concrete backends.
-    ///
-    /// Compared to [``VfsNode::diff``], this will diff the files based on their content and not
-    /// only on their SyncInfo.
-    pub async fn diff<'otherfs, OtherConcrete: ConcreteFS>(
-        &self,
-        other: &FileSystemNode<'otherfs, OtherConcrete>,
-        parent_path: &VirtualPath,
-    ) -> Result<VfsUpdateList, ReconciliationError> {
-        if self.node.name() != other.node.name() {
-            return Err(NameMismatchError {
-                found: self.node.name().to_string(),
-                expected: other.node.name().to_string(),
-            }
-            .into());
-        }
-
-        match (self.node, other.node) {
-            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => {
-                let self_dir = FileSystemDir::new(self.concrete, dself);
-                let other_dir = FileSystemDir::new(other.concrete, dother);
-                self_dir.diff(&other_dir, parent_path).await
-            }
-            (VfsNode::File(fself), VfsNode::File(fother)) => {
-                // Diff the file based on their size or hash
-                let mut file_path = parent_path.to_owned();
-                file_path.push(fself.name());
-
-                if fself.size() != fother.size()
-                    || !concrete_eq_file(self.concrete, other.concrete, &file_path)
-                        .await
-                        .map_err(|(e, name)| ReconciliationError::concrete(name, e))?
-                {
-                    let diff = VfsNodeUpdate::FileModified(file_path);
-                    Ok(VfsUpdateList::from([diff]))
-                } else {
-                    Ok(VfsUpdateList::new())
-                }
-            }
-            (nself, nother) => Ok(VfsUpdateList::from_vec(vec![
-                nself.to_removed_diff(parent_path),
-                nother.to_created_diff(parent_path),
-            ])),
-        }
     }
 }
 
@@ -452,49 +268,6 @@ mod test {
         },
         vfs::VirtualPathBuf,
     };
-
-    #[tokio::test]
-    async fn test_concrete_diff() {
-        let local_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let mut local_fs = TestFileSystem::new(local_base.into());
-        local_fs.update_vfs().await.unwrap();
-
-        let remote_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hell"), FF("f2.pdf", b"world")]),
-                D(
-                    "a",
-                    vec![D("b", vec![D("c", vec![]), FF("test.log", b"value")])],
-                ),
-                D("e", vec![]),
-            ],
-        );
-        let mut remote_fs = TestFileSystem::new(remote_base.into());
-        remote_fs.update_vfs().await.unwrap();
-
-        let diff = local_fs
-            .root()
-            .diff(&remote_fs.root(), VirtualPath::root())
-            .await
-            .unwrap();
-
-        let reference_diff = [
-            VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/a/b/test.log").unwrap()),
-            VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/e/g").unwrap()),
-        ]
-        .into();
-
-        assert_eq!(diff, reference_diff);
-    }
 
     #[tokio::test]
     async fn test_concrete_apply() {
@@ -641,28 +414,5 @@ mod test {
 
         assert_eq!(applied.path(), dir_path);
         assert_eq!(local_fs.concrete, remote_fs.concrete);
-    }
-
-    #[tokio::test]
-    async fn test_full_sync() {
-        let local_base = D("", vec![]);
-        let mut local_fs = TestFileSystem::new(local_base.clone().into());
-
-        let remote_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                FF("file.doc", b"content"),
-            ],
-        );
-
-        let mut remote_fs = TestFileSystem::new(remote_base.into());
-
-        local_fs.full_sync(&mut remote_fs).await.unwrap();
-
-        assert!(local_fs.vfs().structural_eq(remote_fs.vfs()));
-
-        // TODO: add tests with conflicts
-        // TODO: add tests where fs are modified
     }
 }
