@@ -23,7 +23,7 @@ use crate::{
 
 use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
 
-use super::{ConcreteFS, ConcreteFsError};
+use super::{ConcreteFS, ConcreteFsError, Named};
 
 const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
@@ -170,6 +170,10 @@ impl NextcloudSyncInfo {
     pub fn new(tag: u128) -> Self {
         Self { tag }
     }
+}
+
+impl Named for NextcloudSyncInfo {
+    const NAME: &'static str = "Nextcloud";
 }
 
 impl IsModified<Self> for NextcloudSyncInfo {

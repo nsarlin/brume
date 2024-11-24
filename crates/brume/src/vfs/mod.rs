@@ -50,7 +50,10 @@ impl<SyncInfo> Vfs<SyncInfo> {
     pub fn apply_updates_list(
         &mut self,
         updates: Vec<AppliedUpdate<SyncInfo>>,
-    ) -> Result<(), VfsUpdateApplicationError> {
+    ) -> Result<(), VfsUpdateApplicationError>
+    where
+        SyncInfo: Debug,
+    {
         for update in updates {
             self.apply_update(update)?;
         }
@@ -190,9 +193,10 @@ mod test {
         .into_node();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
-        let update = AppliedUpdate::DirCreated(
-            AppliedDirCreation::new(&VirtualPathBuf::new("/e/g/h").unwrap(), new_dir).unwrap(),
-        );
+        let update = AppliedUpdate::DirCreated(AppliedDirCreation::new(
+            &VirtualPathBuf::new("/e/g").unwrap(),
+            new_dir,
+        ));
 
         vfs.apply_update(update).unwrap();
 
@@ -324,9 +328,10 @@ mod test {
         .into_node();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
-        let update = AppliedUpdate::DirCreated(
-            AppliedDirCreation::new(&VirtualPathBuf::new("/h").unwrap(), new_dir).unwrap(),
-        );
+        let update = AppliedUpdate::DirCreated(AppliedDirCreation::new(
+            &VirtualPathBuf::new("/").unwrap(),
+            new_dir,
+        ));
 
         vfs.apply_update(update).unwrap();
 

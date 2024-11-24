@@ -10,9 +10,8 @@ use bytes::Bytes;
 use futures::{Stream, TryStream};
 use thiserror::Error;
 
-use crate::update::{IsModified, ReconciliationError};
+use crate::update::IsModified;
 use crate::vfs::{InvalidPathError, Vfs, VirtualPath};
-use crate::NameMismatchError;
 
 #[derive(Error, Debug)]
 #[error(transparent)]
@@ -31,17 +30,21 @@ pub enum ConcreteUpdateApplicationError {
     ConcreteFsError(#[from] ConcreteFsError),
     #[error("invalid path provided for update")]
     InvalidPath(#[from] InvalidPathError),
-    #[error(
-        "the nodes in 'self' and 'other' do not point to the same node and can't be reconciled"
-    )]
-    NodeMismatch(#[from] NameMismatchError),
+    #[error("cannot apply an update to the root dir itself")]
+    PathIsRoot,
+}
+
+pub trait Named {
+    /// Human readable name of the filesystem type, for user errors
+    const NAME: &'static str;
 }
 
 /// Definition of the operations needed for a concrete FS backend
-pub trait ConcreteFS: Sized {
-    type SyncInfo: IsModified<Self::SyncInfo> + Clone;
+pub trait ConcreteFS: Named + Sized {
+    type SyncInfo: IsModified<Self::SyncInfo> + Named + Clone;
     type Error: Error + Send + Sync + 'static + Into<ConcreteFsError>;
 
+    /// Load a virtual FS from the concrete one, by parsing its structure
     fn load_virtual(&self) -> impl Future<Output = Result<Vfs<Self::SyncInfo>, Self::Error>>;
     fn open(
         &self,
@@ -70,15 +73,23 @@ pub trait ConcreteFS: Sized {
     fn hash(&self, path: &VirtualPath) -> impl Future<Output = Result<u64, Self::Error>>;
 }
 
+impl<T: ConcreteFS> Named for T {
+    const NAME: &'static str = T::SyncInfo::NAME;
+}
+
 /// Check if two files on different filesystems are identical by reading them and computing a hash
 /// of their content
+///
+/// In case of error, return the underlying error and the name of the filesystem where this
+/// error occurred.
 pub async fn concrete_eq_file<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
     concrete_self: &Concrete,
     concrete_other: &OtherConcrete,
     path: &VirtualPath,
-) -> Result<bool, ReconciliationError> {
+) -> Result<bool, (ConcreteFsError, &'static str)> {
     // TODO: cache files when possible
     let (self_hash, other_hash) = tokio::join!(concrete_self.hash(path), concrete_other.hash(path));
 
-    Ok(self_hash.map_err(|e| e.into())? == other_hash.map_err(|e| e.into())?)
+    Ok(self_hash.map_err(|e| (e.into(), Concrete::NAME))?
+        == other_hash.map_err(|e| (e.into(), Concrete::NAME))?)
 }

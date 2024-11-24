@@ -7,7 +7,7 @@ use tokio_util::io::StreamReader;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError},
+    concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError, Named},
     filesystem::FileSystem,
     update::{IsModified, ModificationState},
     vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
@@ -610,7 +610,6 @@ impl ConcreteFS for ConcreteTestNode {
                     .collect();
 
                 if children.len() != init_len - 1 {
-                    dbg!(&children);
                     panic!("{path:?} ({} - {})", children.len(), init_len)
                 }
                 Ok(())
@@ -672,6 +671,10 @@ impl ShallowTestSyncInfo {
     pub(crate) fn new(hash: u64) -> Self {
         Self { hash }
     }
+}
+
+impl Named for ShallowTestSyncInfo {
+    const NAME: &'static str = "Test FileSystem";
 }
 
 impl IsModified<Self> for ShallowTestSyncInfo {
