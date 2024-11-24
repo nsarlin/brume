@@ -124,6 +124,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brume-cli"
+version = "0.1.0"
+
+[[package]]
 name = "brume-daemon"
 version = "0.1.0"
 dependencies = [
@@ -131,6 +135,10 @@ dependencies = [
  "brume",
  "tokio",
 ]
+
+[[package]]
+name = "brume-gui"
+version = "0.1.0"
 
 [[package]]
 name = "bumpalo"
