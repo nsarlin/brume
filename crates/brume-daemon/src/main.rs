@@ -2,22 +2,21 @@ use anyhow::{Context, Result};
 
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFsError},
-    filesystem::FileSystem,
+    synchro::Synchro,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut remote = FileSystem::new(
-        NextcloudFs::new("http://localhost:8080", "admin", "admin")
-            .map_err(ConcreteFsError::from)
-            .context("Failed to connect to remote fs")?,
-    );
-    let mut local =
-        FileSystem::new(LocalDir::new("/tmp/test").context("Failed load local directory")?);
+    let remote = NextcloudFs::new("http://localhost:8080", "admin", "admin")
+        .map_err(ConcreteFsError::from)
+        .context("Failed to connect to remote fs")?;
+    let local = LocalDir::new("/tmp/test").context("Failed load local directory")?;
+
+    let mut synchro = Synchro::new(local, remote);
 
     loop {
-        local
-            .full_sync(&mut remote)
+        synchro
+            .full_sync()
             .await
             .context("Failed to synchronize local and remote dir")?;
 

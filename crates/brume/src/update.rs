@@ -27,7 +27,6 @@ use futures::future::try_join_all;
 
 use crate::{
     concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, Named},
-    filesystem::FileSystem,
     sorted_vec::{Sortable, SortedVec},
     vfs::{DeleteNodeError, DirTree, InvalidPathError, Vfs, VirtualPath, VirtualPathBuf},
     Error, NameMismatchError,
@@ -244,7 +243,7 @@ pub type VfsUpdateList = SortedVec<VfsNodeUpdate>;
 impl VfsUpdateList {
     /// Merge two update lists by calling [`VfsNodeUpdate::reconcile`] on their elements one by
     /// one
-    fn merge<SyncInfo: Named, OtherSyncInfo: Named>(
+    pub(crate) fn merge<SyncInfo: Named, OtherSyncInfo: Named>(
         &self,
         other: VfsUpdateList,
         vfs_self: &Vfs<SyncInfo>,
@@ -295,26 +294,6 @@ impl VfsUpdateList {
 
         // Ok to use unchecked since we iterate on ordered updates
         Ok(SortedVec::unchecked_from_vec(ret))
-    }
-
-    /// Reconcile two updates lists.
-    ///
-    /// This is done in two steps:
-    /// - First reconcile individual elements by comparing them between one list and the other
-    /// - Then find conflicts with a directory and one of its elements
-    pub async fn reconcile<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
-        &self,
-        other: VfsUpdateList,
-        fs_self: &FileSystem<Concrete>,
-        fs_other: &FileSystem<OtherConcrete>,
-    ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
-        let merged = self.merge(other, fs_self.vfs(), fs_other.vfs())?;
-
-        let concrete_merged = merged
-            .resolve_concrete(fs_self.concrete(), fs_other.concrete())
-            .await?;
-
-        Ok(concrete_merged.resolve_ancestor_conflicts())
     }
 }
 
@@ -422,7 +401,7 @@ impl Sortable for VirtualReconciledUpdate {
 impl SortedVec<VirtualReconciledUpdate> {
     /// Convert a list of [`VirtualReconciledUpdate`] into a list of [`ReconciledUpdate`] by using
     /// the concrete FS to resolve all the `NeedConcreteCheck`
-    async fn resolve_concrete<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
+    pub(crate) async fn resolve_concrete<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
         self,
         concrete_self: &Concrete,
         concrete_other: &OtherConcrete,
@@ -439,7 +418,9 @@ impl SortedVec<VirtualReconciledUpdate> {
     }
 }
 
-/// Output of the update reconciliation process. See [`VfsUpdateList::reconcile`]
+/// Output of the update reconciliation process. See [`reconcile`]
+///
+/// [`reconcile`]: crate::synchro::Synchro::reconcile
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconciledUpdate {
     /// Updates in this state can be applied to the target concrete FS
@@ -480,7 +461,7 @@ impl SortedVec<ReconciledUpdate> {
     ///
     /// For example, `DirRemoved("/a/b")` and `FileModified("/a/b/c/d")` will generate conflicts on
     /// both `/a/b` and `/a/b/c/d`.
-    fn resolve_ancestor_conflicts(self) -> Self {
+    pub(crate) fn resolve_ancestor_conflicts(self) -> Self {
         let mut resolved = Vec::new();
         let mut iter = self.into_iter().peekable();
 
@@ -599,208 +580,4 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
-    use crate::test_utils::{
-        TestFileSystem,
-        TestNode::{D, FF},
-    };
-
-    /// Check that duplicate diffs are correctly removed
-    #[tokio::test]
-    async fn test_reconciliation_same_diffs() {
-        let local_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let mut local_fs = TestFileSystem::new(local_base.into());
-        local_fs.update_vfs().await.unwrap();
-
-        let remote_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-
-        let mut remote_fs = TestFileSystem::new(remote_base.into());
-        remote_fs.update_vfs().await.unwrap();
-
-        let local_diff = SortedVec::from([
-            VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
-            VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/e").unwrap()),
-        ]);
-
-        let remote_diff = local_diff.clone();
-
-        let reconciled = local_diff
-            .reconcile(remote_diff, &local_fs, &remote_fs)
-            .await
-            .unwrap();
-
-        assert!(reconciled.is_empty());
-    }
-
-    /// Check that diffs only present on one side are all kept
-    #[tokio::test]
-    async fn test_reconciliation_missing() {
-        let local_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let mut local_fs = TestFileSystem::new(local_base.into());
-        local_fs.update_vfs().await.unwrap();
-
-        let remote_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let mut remote_fs = TestFileSystem::new(remote_base.into());
-        remote_fs.update_vfs().await.unwrap();
-
-        let local_diff = SortedVec::from([
-            VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/e").unwrap()),
-        ]);
-
-        let remote_diff = SortedVec::from([VfsNodeUpdate::DirRemoved(
-            VirtualPathBuf::new("/a/b").unwrap(),
-        )]);
-
-        let reconciled = local_diff
-            .reconcile(remote_diff, &local_fs, &remote_fs)
-            .await
-            .unwrap();
-
-        let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::applicable_other(&VfsNodeUpdate::FileModified(
-                VirtualPathBuf::new("/Doc/f1.md").unwrap(),
-            )),
-            ReconciledUpdate::applicable_self(&VfsNodeUpdate::DirRemoved(
-                VirtualPathBuf::new("/a/b").unwrap(),
-            )),
-            ReconciledUpdate::applicable_other(&VfsNodeUpdate::DirCreated(
-                VirtualPathBuf::new("/e").unwrap(),
-            )),
-        ]);
-
-        assert_eq!(reconciled, reconciled_ref);
-    }
-
-    /// Test conflict detection
-    #[tokio::test]
-    async fn test_reconciliation_conflict() {
-        let local_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let mut local_fs = TestFileSystem::new(local_base.into());
-        local_fs.update_vfs().await.unwrap();
-
-        let remote_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hell"), FF("f2.pdf", b"world")]),
-                D(
-                    "a",
-                    vec![D("b", vec![D("c", vec![]), FF("test.log", b"value")])],
-                ),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let mut remote_fs = TestFileSystem::new(remote_base.into());
-        remote_fs.update_vfs().await.unwrap();
-
-        let local_diff = SortedVec::from([
-            VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
-        ]);
-
-        let remote_diff = SortedVec::from([
-            VfsNodeUpdate::FileModified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::FileCreated(VirtualPathBuf::new("/a/b/test.log").unwrap()),
-        ]);
-
-        let reconciled = local_diff
-            .reconcile(remote_diff, &local_fs, &remote_fs)
-            .await
-            .unwrap();
-
-        let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            ReconciledUpdate::Conflict(VirtualPathBuf::new("/a/b").unwrap()),
-            ReconciledUpdate::Conflict(VirtualPathBuf::new("/a/b/test.log").unwrap()),
-        ]);
-
-        assert_eq!(reconciled, reconciled_ref);
-    }
-
-    #[tokio::test]
-    async fn test_reconciliation_created_dir() {
-        let local_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
-                D("a", vec![D("b", vec![D("c", vec![])])]),
-                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
-            ],
-        );
-        let mut local_fs = TestFileSystem::new(local_base.into());
-        local_fs.update_vfs().await.unwrap();
-
-        let remote_base = D(
-            "",
-            vec![
-                D("Doc", vec![FF("f1.md", b"hell"), FF("f2.pdf", b"world")]),
-                D(
-                    "a",
-                    vec![D("b", vec![D("c", vec![]), FF("test.log", b"value")])],
-                ),
-                D("e", vec![]),
-            ],
-        );
-        let mut remote_fs = TestFileSystem::new(remote_base.into());
-        remote_fs.update_vfs().await.unwrap();
-
-        let local_diff =
-            SortedVec::from([VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/").unwrap())]);
-
-        let remote_diff = local_diff.clone();
-
-        let reconciled = local_diff
-            .reconcile(remote_diff, &local_fs, &remote_fs)
-            .await
-            .unwrap();
-
-        let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::Conflict(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            ReconciledUpdate::applicable_self(&VfsNodeUpdate::FileCreated(
-                VirtualPathBuf::new("/a/b/test.log").unwrap(),
-            )),
-            ReconciledUpdate::applicable_other(&VfsNodeUpdate::DirCreated(
-                VirtualPathBuf::new("/e/g").unwrap(),
-            )),
-        ]);
-
-        assert_eq!(reconciled, reconciled_ref);
-    }
-}
+mod test {}

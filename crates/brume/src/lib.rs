@@ -8,6 +8,7 @@ use update::{ReconciliationError, VfsUpdateApplicationError};
 pub mod concrete;
 pub mod filesystem;
 pub mod sorted_vec;
+pub mod synchro;
 #[cfg(test)]
 mod test_utils;
 pub mod update;

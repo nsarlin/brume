@@ -263,6 +263,11 @@ impl<SyncInfo> DirTree<SyncInfo> {
                 .all(|(child_self, child_other)| child_self.structural_eq(child_other))
     }
 
+    /// Get the differences between [`DirTree`], and eventually request file content checks with
+    /// their concrete backends.
+    ///
+    /// This will perform a structural diff between both trees, and return a
+    /// [`VirtualReconciledUpdate::NeedCocnreteCheck`] when two files with the same name are found.
     pub(crate) fn reconciliation_diff<OtherSyncInfo>(
         &self,
         other: &DirTree<OtherSyncInfo>,
@@ -522,6 +527,8 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
     }
 
+    /// Virtual diff performed during the reconciliation. Structurally compare both FS, and return a
+    /// `NeedConcreteCheck` when two files have the same name.
     fn reconciliation_diff<OtherSyncInfo>(
         &self,
         other: &VfsNode<OtherSyncInfo>,
@@ -575,10 +582,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
 impl<SyncInfo: IsModified<SyncInfo>> VfsNode<SyncInfo> {
     /// Diff two nodes based on their content.
     ///
-    /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem. To
-    /// diff using the true content of files, use [`FileSystemNode::diff`].
-    ///
-    /// [`FileSystemNode::diff`]: crate::filesystem::FileSystemNode
+    /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem.g
     pub fn diff(
         &self,
         other: &VfsNode<SyncInfo>,
