@@ -1,5 +1,7 @@
 //! Link two [`FileSystem`] for bidirectional synchronization
 
+use std::future::Future;
+
 use futures::TryFutureExt;
 use tokio::try_join;
 
@@ -21,13 +23,8 @@ pub struct Synchro<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> {
     remote: FileSystem<RemoteConcrete>,
 }
 
-impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcrete, RemoteConcrete> {
-    pub fn new(local: LocalConcrete, remote: RemoteConcrete) -> Self {
-        let local = FileSystem::new(local);
-        let remote = FileSystem::new(remote);
-        Self { local, remote }
-    }
-
+/// Trait for a pair of Filesystems that can be synchronized
+pub trait Synchronizable {
     /// Fully synchronize both filesystems.
     ///
     /// This is done in three steps:
@@ -39,22 +36,14 @@ impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcret
     ///   accordingly.
     ///
     /// See [`crate::update`] for more information about the update process.
-    pub async fn full_sync(&mut self) -> Result<(), Error> {
-        let (local_diff, remote_diff) = self.update_vfs().await?;
-        let reconciled = self.reconcile(local_diff, remote_diff).await?;
+    fn full_sync(&mut self) -> impl Future<Output = Result<(), Error>>;
+}
 
-        let (local_applied, remote_applied) = self.apply_updates_list_concrete(reconciled).await?;
-
-        self.local
-            .vfs_mut()
-            .apply_updates_list(local_applied)
-            .map_err(|e| Error::vfs_update_application(LocalConcrete::NAME, e))?;
-        self.remote
-            .vfs_mut()
-            .apply_updates_list(remote_applied)
-            .map_err(|e| Error::vfs_update_application(RemoteConcrete::NAME, e))?;
-
-        Ok(())
+impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcrete, RemoteConcrete> {
+    pub fn new(local: LocalConcrete, remote: RemoteConcrete) -> Self {
+        let local = FileSystem::new(local);
+        let remote = FileSystem::new(remote);
+        Self { local, remote }
     }
 
     /// Reconcile updates lists from both filesystems by removing duplicates and detecting
@@ -114,6 +103,28 @@ impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcret
                 .update_vfs()
                 .map_err(|e| Error::vfs_reload(RemoteConcrete::NAME, e))
         )
+    }
+}
+
+impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchronizable
+    for Synchro<LocalConcrete, RemoteConcrete>
+{
+    async fn full_sync(&mut self) -> Result<(), Error> {
+        let (local_diff, remote_diff) = self.update_vfs().await?;
+        let reconciled = self.reconcile(local_diff, remote_diff).await?;
+
+        let (local_applied, remote_applied) = self.apply_updates_list_concrete(reconciled).await?;
+
+        self.local
+            .vfs_mut()
+            .apply_updates_list(local_applied)
+            .map_err(|e| Error::vfs_update_application(LocalConcrete::NAME, e))?;
+        self.remote
+            .vfs_mut()
+            .apply_updates_list(remote_applied)
+            .map_err(|e| Error::vfs_update_application(RemoteConcrete::NAME, e))?;
+
+        Ok(())
     }
 }
 

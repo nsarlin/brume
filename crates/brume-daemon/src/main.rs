@@ -1,26 +1,40 @@
-use anyhow::{Context, Result};
+use std::sync::Arc;
 
-use brume::{
-    concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFsError},
-    synchro::Synchro,
-};
+use anyhow::Result;
+
+use brume_daemon::BRUME_SOCK_NAME;
+
+use brume::synchro::Synchronizable;
+
+use futures::future::try_join_all;
+use server::Server as BrumeServer;
+use tokio::time;
+
+mod daemon;
+mod server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let remote = NextcloudFs::new("http://localhost:8080", "admin", "admin")
-        .map_err(ConcreteFsError::from)
-        .context("Failed to connect to remote fs")?;
-    let local = LocalDir::new("/tmp/test").context("Failed load local directory")?;
+    let server = Arc::new(BrumeServer::new()?);
 
-    let mut synchro = Synchro::new(local, remote);
+    // Handle connections from client apps
+    {
+        let server = server.clone();
+        tokio::spawn(async move { server.serve().await });
+    }
 
+    // Synchronize all filesystems
+    let mut interval = time::interval(time::Duration::from_secs(10));
     loop {
-        synchro
-            .full_sync()
-            .await
-            .context("Failed to synchronize local and remote dir")?;
+        let daemon = server.daemon();
+        let synchro_list = daemon.synchro_list();
 
-        println!("sync done");
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        let synchro = synchro_list.read().await;
+        let synchro_fut = synchro
+            .values()
+            .map(|sync| async { sync.lock().await.full_sync().await });
+
+        try_join_all(synchro_fut).await?;
+        interval.tick().await;
     }
 }

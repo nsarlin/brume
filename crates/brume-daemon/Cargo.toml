@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+interprocess = { version = "2.2", features = ["tokio"] }
+tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
+futures = "0.3"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+serde = "1.0"
 
 brume = { version = "0.1.0", path = "../brume" }
 
