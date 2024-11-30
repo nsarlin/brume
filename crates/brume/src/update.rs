@@ -112,12 +112,12 @@ pub enum ModificationState {
 ///
 /// [`LocalSyncInfo`]: crate::concrete::local::LocalSyncInfo
 /// [`NextcloudSyncInfo`]: crate::concrete::nextcloud::NextcloudSyncInfo
-pub trait IsModified<Ref> {
+pub trait IsModified {
     /// Tell if a node have been modified, and if possible also recusively answers for its children
-    fn modification_state(&self, reference: &Ref) -> ModificationState;
+    fn modification_state(&self, reference: &Self) -> ModificationState;
 
     /// Return a boolean telling if the node itself have been modified
-    fn is_modified(&self, reference: &Ref) -> bool {
+    fn is_modified(&self, reference: &Self) -> bool {
         match self.modification_state(reference) {
             ModificationState::ShallowUnmodified => false,
             ModificationState::RecursiveUnmodified => false,
@@ -126,7 +126,7 @@ pub trait IsModified<Ref> {
     }
 }
 
-impl<SyncInfo: IsModified<SyncInfo>> IsModified<Self> for Option<SyncInfo> {
+impl<SyncInfo: IsModified> IsModified for Option<SyncInfo> {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         match (self, reference) {
             (Some(valid_self), Some(valid_other)) => valid_self.modification_state(valid_other),

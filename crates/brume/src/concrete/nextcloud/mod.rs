@@ -176,7 +176,7 @@ impl Named for NextcloudSyncInfo {
     const NAME: &'static str = "Nextcloud";
 }
 
-impl IsModified<Self> for NextcloudSyncInfo {
+impl IsModified for NextcloudSyncInfo {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         if self.tag != reference.tag {
             ModificationState::Modified

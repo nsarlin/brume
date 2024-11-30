@@ -123,7 +123,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified<SyncInfo> + Clone> Vfs<SyncInfo> {
+impl<SyncInfo: IsModified + Clone> Vfs<SyncInfo> {
     /// Diff two VFS by comparing their nodes.
     ///
     /// This function returns a sorted list of [`VfsNodeUpdate`].

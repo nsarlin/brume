@@ -312,7 +312,7 @@ impl<SyncInfo: Clone> DirTree<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified<SyncInfo>> DirTree<SyncInfo> {
+impl<SyncInfo: IsModified> DirTree<SyncInfo> {
     /// Diff two directories based on their content.
     pub fn diff(
         &self,
@@ -579,7 +579,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified<SyncInfo>> VfsNode<SyncInfo> {
+impl<SyncInfo: IsModified> VfsNode<SyncInfo> {
     /// Diff two nodes based on their content.
     ///
     /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem.g

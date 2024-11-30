@@ -239,7 +239,7 @@ impl<'a> PartialEq<&'a VirtualPath> for VirtualPathBuf {
     }
 }
 
-impl<'a> PartialEq<VirtualPathBuf> for &'a VirtualPath {
+impl PartialEq<VirtualPathBuf> for &VirtualPath {
     fn eq(&self, other: &VirtualPathBuf) -> bool {
         self.path == other.path
     }
