@@ -40,8 +40,8 @@ pub trait Named {
 }
 
 /// Definition of the operations needed for a concrete FS backend
-pub trait ConcreteFS: Named + Sized {
-    type SyncInfo: IsModified<Self::SyncInfo> + Named + Clone;
+pub trait ConcreteFS: Named {
+    type SyncInfo: IsModified + Named + Clone;
     type Error: Error + Send + Sync + 'static + Into<ConcreteFsError>;
 
     /// Load a virtual FS from the concrete one, by parsing its structure

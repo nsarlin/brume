@@ -255,7 +255,7 @@ impl LocalSyncInfo {
     }
 }
 
-impl IsModified<Self> for LocalSyncInfo {
+impl IsModified for LocalSyncInfo {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         if self.last_modified != reference.last_modified {
             ModificationState::Modified

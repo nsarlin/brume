@@ -24,7 +24,7 @@ pub(crate) enum TestNode<'a> {
     L(&'a str, Option<&'a TestNode<'a>>),
 }
 
-impl<'a> TestNode<'a> {
+impl TestNode<'_> {
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::F(name)
@@ -480,7 +480,7 @@ pub(crate) struct ConcreteTestNode {
 
 pub(crate) type TestFileSystem = FileSystem<ConcreteTestNode>;
 
-impl<'a> From<TestNode<'a>> for ConcreteTestNode {
+impl From<TestNode<'_>> for ConcreteTestNode {
     fn from(value: TestNode) -> Self {
         Self {
             inner: RefCell::new(value.into()),
@@ -642,7 +642,7 @@ impl RecursiveTestSyncInfo {
     }
 }
 
-impl IsModified<Self> for RecursiveTestSyncInfo {
+impl IsModified for RecursiveTestSyncInfo {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         if self.hash == reference.hash {
             ModificationState::RecursiveUnmodified
@@ -677,7 +677,7 @@ impl Named for ShallowTestSyncInfo {
     const NAME: &'static str = "Test FileSystem";
 }
 
-impl IsModified<Self> for ShallowTestSyncInfo {
+impl IsModified for ShallowTestSyncInfo {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         if self.hash == reference.hash {
             ModificationState::ShallowUnmodified
