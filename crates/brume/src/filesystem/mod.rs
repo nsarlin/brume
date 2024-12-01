@@ -3,6 +3,7 @@
 mod byte_counter;
 
 use byte_counter::ByteCounterExt;
+use log::{info, warn};
 
 use std::sync::{atomic::AtomicU64, Arc};
 
@@ -48,11 +49,13 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
 
     /// Query the concrete FS to update the in memory virtual representation
     pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, VfsReloadError> {
+        info!("Updating VFS from {}", Concrete::NAME);
         let new_vfs = self.concrete.load_virtual().await.map_err(|e| e.into())?;
 
         let updates = self.vfs.diff(&new_vfs)?;
 
         self.vfs = new_vfs;
+        info!("VFS from {} updated", Concrete::NAME);
         Ok(updates)
     }
 
@@ -108,7 +111,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
             .filter_map(|update| match update {
                 ReconciledUpdate::Applicable(update) => Some(update),
                 ReconciledUpdate::Conflict(path) => {
-                    println!("WARNING: conflict on {path:?}");
+                    warn!("WARNING: conflict on {path:?}");
                     None
                 }
             })
@@ -197,18 +200,28 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         ref_concrete: &OtherConcrete,
         path: &VirtualPath,
     ) -> Result<(Concrete::SyncInfo, u64), ConcreteUpdateApplicationError> {
+        info!(
+            "Cloning file {:?} from {} to {}",
+            path,
+            OtherConcrete::NAME,
+            Concrete::NAME
+        );
         let counter = Arc::new(AtomicU64::new(0));
         let stream = ref_concrete
             .open(path)
             .await
             .map_err(|e| e.into())?
             .count_bytes(counter.clone());
-        self.concrete
+        let res = self
+            .concrete
             .write(path, stream)
             .await
             .map_err(|e| e.into())
-            .map_err(|e| e.into())
-            .map(|info| (info, counter.load(std::sync::atomic::Ordering::SeqCst)))
+            .map(|info| (info, counter.load(std::sync::atomic::Ordering::SeqCst)))?;
+
+        info!("File {:?} successfully cloned", path);
+
+        Ok(res)
     }
 
     /// Clone a directory from `ref_concrete` into the concrete fs of self.

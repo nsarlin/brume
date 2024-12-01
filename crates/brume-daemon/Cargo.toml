@@ -11,6 +11,8 @@ tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
 futures = "0.3"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 serde = "1.0"
+log = "0.4"
+env_logger = "0.11"
 
 brume = { version = "0.1.0", path = "../brume" }
 

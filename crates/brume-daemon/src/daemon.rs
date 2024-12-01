@@ -8,6 +8,7 @@ use brume::{
     Error,
 };
 use brume_daemon::{BrumeService, FsDescription, SynchroId};
+use log::info;
 use tarpc::context::Context;
 use tokio::sync::{Mutex, RwLock};
 
@@ -57,6 +58,7 @@ impl BrumeService for BrumeDaemon {
         local: FsDescription,
         remote: FsDescription,
     ) -> Result<SynchroId, String> {
+        info!("Received synchro creation request: local {local}, remote {remote}");
         let sync = match (local, remote) {
             (FsDescription::LocalDir(local_path), FsDescription::LocalDir(remote_path)) => {
                 let local = LocalDir::new(local_path).map_err(|e| e.to_string())?;
@@ -95,6 +97,8 @@ impl BrumeService for BrumeDaemon {
 
         let mut synchro = self.synchro_list.write().await;
         synchro.insert(syncid, Mutex::new(sync));
+
+        info!("Synchro created with id {}", syncid.id());
 
         Ok(syncid)
     }
