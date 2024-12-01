@@ -7,6 +7,8 @@ use std::{
     time::SystemTime,
 };
 
+use log::warn;
+
 use crate::vfs::{DirTree, FileMeta, VfsNode};
 
 use super::{LocalDirError, LocalSyncInfo};
@@ -90,7 +92,7 @@ pub(crate) fn node_from_path_rec<P: LocalPath>(
             Ok(time) => LocalSyncInfo::new(time.into()),
             Err(err) => {
                 // File might be an invalid symlink, so we just log and skip it
-                println!("skipping file {path:?}: {err}");
+                warn!("skipping file {path:?}: {err}");
                 continue;
             }
         };

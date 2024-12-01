@@ -9,6 +9,7 @@ use futures::StreamExt;
 use interprocess::local_socket::{
     tokio::Listener, traits::tokio::Listener as _, GenericNamespaced, ListenerOptions, ToNsName,
 };
+use log::{error, info, warn};
 use tarpc::{
     serde_transport,
     server::{BaseChannel, Channel},
@@ -33,15 +34,16 @@ impl Server {
         let opts = ListenerOptions::new().name(name);
         let listener = match opts.create_tokio() {
             Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
-                return Err(e).context(
+                error!(
                     "Error: could not start server because the socket file is occupied. \
-Please check if {BRUME_SOCK_NAME} is in use by another process and try again.",
+Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                 );
+                return Err(e).context("Failed to start server");
             }
             x => x?,
         };
 
-        eprintln!("Server running at {BRUME_SOCK_NAME}");
+        info!("Server running at {BRUME_SOCK_NAME}");
 
         let codec_builder = LengthDelimitedCodec::builder();
         let daemon = BrumeDaemon::new();
@@ -63,7 +65,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again.",
             let conn = match self.listener.accept().await {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("There was an error with an incoming connection: {e}");
+                    warn!("There was an error with an incoming connection: {e}");
                     continue;
                 }
             };

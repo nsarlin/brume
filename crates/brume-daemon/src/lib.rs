@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fmt::Display, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -21,6 +21,10 @@ impl SynchroId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    pub fn id(&self) -> Uuid {
+        self.0
+    }
 }
 
 /// Required information for a Nextcloud connection
@@ -36,6 +40,17 @@ pub struct NextcloudLoginInfo {
 pub enum FsDescription {
     LocalDir(PathBuf),
     Nextcloud(NextcloudLoginInfo),
+}
+
+impl Display for FsDescription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FsDescription::LocalDir(path_buf) => write!(f, "local directory {:?}", path_buf),
+            FsDescription::Nextcloud(nextcloud_login_info) => {
+                write!(f, "nextcloud server {}", nextcloud_login_info.url)
+            }
+        }
+    }
 }
 
 #[tarpc::service]
