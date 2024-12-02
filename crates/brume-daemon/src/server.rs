@@ -4,7 +4,6 @@ use std::{future::Future, io};
 
 use anyhow::{Context, Result};
 
-use brume_daemon::BrumeService;
 use futures::StreamExt;
 use interprocess::local_socket::{
     tokio::Listener, traits::tokio::Listener as _, GenericNamespaced, ListenerOptions, ToNsName,
@@ -17,17 +16,20 @@ use tarpc::{
     tokio_util::codec::{length_delimited::Builder, LengthDelimitedCodec},
 };
 
-use crate::{daemon::BrumeDaemon, BRUME_SOCK_NAME};
+use crate::{
+    daemon::BrumeDaemon,
+    protocol::{BrumeService, BRUME_SOCK_NAME},
+};
 
 /// A Server that handle RPC connections from client applications
-pub(crate) struct Server {
+pub struct Server {
     codec_builder: Builder,
     listener: Listener,
     daemon: BrumeDaemon,
 }
 
 impl Server {
-    pub(crate) fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let name = BRUME_SOCK_NAME
             .to_ns_name::<GenericNamespaced>()
             .context("Invalid name for sock")?;
@@ -56,7 +58,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
     }
 
     /// Start a new rpc server that will handle incoming requests from client applications
-    pub(crate) async fn serve(&self) -> Result<()> {
+    pub async fn serve(&self) -> Result<()> {
         async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
             tokio::spawn(fut);
         }
@@ -80,7 +82,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
     }
 
-    pub(crate) fn daemon(&self) -> &BrumeDaemon {
+    pub fn daemon(&self) -> &BrumeDaemon {
         &self.daemon
     }
 }
