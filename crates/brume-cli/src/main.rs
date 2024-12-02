@@ -1,39 +1,86 @@
-use std::path::PathBuf;
+use std::fs;
 
-use interprocess::local_socket::{
-    tokio::{prelude::*, Stream},
-    GenericNamespaced,
-};
-use tarpc::{
-    context, serde_transport, tokio_serde::formats::Bincode,
-    tokio_util::codec::LengthDelimitedCodec,
-};
+use brume_cli::connect_to_daemon;
+use tarpc::context;
 
-use brume_daemon::{BrumeServiceClient, FsDescription, NextcloudLoginInfo, BRUME_SOCK_NAME};
+use clap::{Parser, Subcommand};
+use url::Url;
+
+use brume_daemon::protocol::{FsDescription, NextcloudLoginInfo};
+
+#[derive(Parser)]
+#[command(version, about, long_about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Create a new synchronization
+    #[command(after_help = "FILESYSTEM can be any of:
+\t- The path to a valid folder on the local machine
+\t- An URL to a Nextcloud server, structured as `http://user:password@domain.tld/endpoint`
+")]
+    New {
+        /// The local filesystem for the synchronization
+        #[arg(short, long, value_name = "FILESYSTEM", value_parser = parse_fs_argument)]
+        local: FsDescription,
+
+        /// The remote filesystem for the synchronization
+        #[arg(short, long, value_name = "FILESYSTEM", value_parser = parse_fs_argument)]
+        remote: FsDescription,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let name = BRUME_SOCK_NAME.to_ns_name::<GenericNamespaced>()?;
+    let cli = Cli::parse();
 
-    let conn = Stream::connect(name).await?;
+    match cli.command {
+        Commands::New { local, remote } => {
+            println!("Creating synchro between {local} and {remote}");
+            let res = connect_to_daemon()
+                .await
+                .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?
+                .new_synchro(context::current(), local, remote)
+                .await??;
 
-    let codec_builder = LengthDelimitedCodec::builder();
-
-    let transport = serde_transport::new(codec_builder.new_framed(conn), Bincode::default());
-    let res = BrumeServiceClient::new(Default::default(), transport)
-        .spawn()
-        .new_synchro(
-            context::current(),
-            FsDescription::LocalDir(PathBuf::from("/tmp/test")),
-            FsDescription::Nextcloud(NextcloudLoginInfo {
-                url: "http://localhost:8080".to_string(),
-                login: "admin".to_string(),
-                password: "admin".to_string(),
-            }),
-        )
-        .await??;
-
-    println!("{res:?}");
+            println!("Done: {}", res.id());
+        }
+    }
 
     Ok(())
+}
+
+fn parse_fs_argument(arg: &str) -> Result<FsDescription, String> {
+    if let Ok(url) = Url::parse(arg) {
+        let port_fmt = if let Some(port) = url.port() {
+            format!(":{port}")
+        } else {
+            String::new()
+        };
+        let address = format!(
+            "{}://{}{}{}",
+            url.scheme(),
+            url.host_str().ok_or("Invalid url".to_string())?,
+            port_fmt,
+            url.path()
+        );
+        let login = url.username().to_string();
+        let password = url.password().unwrap_or("").to_string();
+        Ok(FsDescription::Nextcloud(NextcloudLoginInfo {
+            url: address,
+            login,
+            password,
+        }))
+    } else if let Ok(path) = fs::canonicalize(arg) {
+        Ok(FsDescription::LocalDir(path))
+    } else {
+        Err(
+            "Invalid fs, please provide the url of your Nextcloud instance or the \
+path to a local folder"
+                .to_string(),
+        )
+    }
 }

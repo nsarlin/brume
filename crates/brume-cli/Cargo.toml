@@ -2,10 +2,13 @@
 name = "brume-cli"
 version = "0.1.0"
 edition = "2021"
+description = "CLI to manage folders synchronized with brume"
 
 [dependencies]
 interprocess = { version = "2.2", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
+clap = { version = "4.5", features = ["derive"] }
+url = "2.5"
 
 brume-daemon = { version = "0.1.0", path = "../brume-daemon", default-features = false }
