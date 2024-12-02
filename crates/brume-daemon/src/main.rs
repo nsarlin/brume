@@ -34,19 +34,21 @@ async fn main() -> Result<()> {
         let daemon = server.daemon();
         let synchro_list = daemon.synchro_list();
 
-        let synchro = synchro_list.read().await;
-        let synchro_fut = synchro
-            .values()
-            .map(|sync| async { sync.lock().await.full_sync().await });
+        let results = {
+            let synchro = synchro_list.read().await;
+            let synchro_fut = synchro
+                .values()
+                .map(|sync| async { sync.lock().await.full_sync().await });
 
-        let results = join_all(synchro_fut).await;
+            join_all(synchro_fut).await
+        };
+
         for res in results {
             if let Err(err) = res {
                 let wrapped_err = anyhow!(err);
                 error!("Failed to synchronize filesystems: {wrapped_err:?}")
             }
         }
-        info!("Full sync done");
         interval.tick().await;
     }
 }
