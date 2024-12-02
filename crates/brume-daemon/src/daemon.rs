@@ -2,19 +2,21 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use log::info;
+use tarpc::context::Context;
+use tokio::sync::{Mutex, RwLock};
+
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs},
     synchro::{Synchro, Synchronizable},
     Error,
 };
-use brume_daemon::{BrumeService, FsDescription, SynchroId};
-use log::info;
-use tarpc::context::Context;
-use tokio::sync::{Mutex, RwLock};
+
+use crate::protocol::{BrumeService, FsDescription, SynchroId};
 
 /// Represent [`Synchro`] object where both concrete Filesystem types are only known at runtime.
 // TODO: create using a macro ?
-pub(crate) enum AnySynchro {
+pub enum AnySynchro {
     LocalNextcloud(Synchro<LocalDir, NextcloudFs>),
     NextcloudLocal(Synchro<NextcloudFs, LocalDir>),
     LocalLocal(Synchro<LocalDir, LocalDir>),
@@ -34,7 +36,7 @@ impl Synchronizable for AnySynchro {
 
 /// The daemon holds the list of the synchronized folders, and can be queried by client applications
 #[derive(Clone)]
-pub(crate) struct BrumeDaemon {
+pub struct BrumeDaemon {
     synchro_list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
 }
 
@@ -45,8 +47,8 @@ impl BrumeDaemon {
         }
     }
 
-    /// The list of the synchronize fs
-    pub(crate) fn synchro_list(&self) -> Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>> {
+    /// The list of the synchronized fs
+    pub fn synchro_list(&self) -> Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>> {
         self.synchro_list.clone()
     }
 }

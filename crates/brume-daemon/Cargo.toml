@@ -4,17 +4,32 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0"
-tokio = { version = "1", features = ["full"] }
-interprocess = { version = "2.2", features = ["tokio"] }
+# Minimal dependencies needed by clients that will connect to the daemon
 tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
-futures = "0.3"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 serde = "1.0"
-log = "0.4"
-env_logger = "0.11"
 
-brume = { version = "0.1.0", path = "../brume" }
+# Dependencies needed by the daemon itself
+futures = { version = "0.3", optional = true }
+log = { version = "0.4", optional = true }
+env_logger = { version = "0.11", optional = true }
+anyhow = { version = "1.0", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+interprocess = { version = "2.2", features = ["tokio"], optional = true }
+
+brume = { version = "0.1.0", path = "../brume", optional = true }
+
+[features]
+default = ["server"]
+server = [
+	"dep:futures",
+	"dep:log",
+	"dep:env_logger",
+	"dep:anyhow",
+	"dep:tokio",
+	"dep:interprocess",
+	"dep:brume",
+]
 
 
 [[bin]]

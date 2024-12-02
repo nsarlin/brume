@@ -8,4 +8,4 @@ interprocess = { version = "2.2", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
 
-brume-daemon = { version = "0.1.0", path = "../brume-daemon" }
+brume-daemon = { version = "0.1.0", path = "../brume-daemon", default-features = false }

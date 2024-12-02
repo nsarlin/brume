@@ -2,18 +2,14 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use brume_daemon::BRUME_SOCK_NAME;
+use brume_daemon::server::Server as BrumeServer;
 
 use brume::synchro::Synchronizable;
 
 use env_logger::Builder;
 use futures::future::join_all;
 use log::{error, info, LevelFilter};
-use server::Server as BrumeServer;
 use tokio::time;
-
-mod daemon;
-mod server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
