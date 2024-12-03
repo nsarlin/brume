@@ -1,10 +1,8 @@
 //! The daemon provides rpc to remotely manipulate the list of synchronized Filesystems
 
-use std::{collections::HashMap, sync::Arc};
-
 use log::info;
 use tarpc::context::Context;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::mpsc::UnboundedSender;
 
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs},
@@ -37,19 +35,12 @@ impl Synchronizable for AnySynchro {
 /// The daemon holds the list of the synchronized folders, and can be queried by client applications
 #[derive(Clone)]
 pub struct BrumeDaemon {
-    synchro_list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
+    to_server: UnboundedSender<(SynchroId, AnySynchro)>,
 }
 
 impl BrumeDaemon {
-    pub(crate) fn new() -> Self {
-        Self {
-            synchro_list: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// The list of the synchronized fs
-    pub fn synchro_list(&self) -> Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>> {
-        self.synchro_list.clone()
+    pub(crate) fn new(to_server: UnboundedSender<(SynchroId, AnySynchro)>) -> Self {
+        Self { to_server }
     }
 }
 
@@ -95,10 +86,12 @@ impl BrumeService for BrumeDaemon {
             }
         };
 
+        // TODO: check if synchro already exists to send an error to the user
         let syncid = SynchroId::new();
 
-        let mut synchro = self.synchro_list.write().await;
-        synchro.insert(syncid, Mutex::new(sync));
+        self.to_server
+            .send((syncid, sync))
+            .map_err(|e| e.to_string())?;
 
         info!("Synchro created with id {}", syncid.id());
 

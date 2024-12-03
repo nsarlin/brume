@@ -31,8 +31,7 @@ async fn main() -> Result<()> {
     let mut interval = time::interval(time::Duration::from_secs(10));
     loop {
         info!("Starting full sync for all filesystems");
-        let daemon = server.daemon();
-        let synchro_list = daemon.synchro_list();
+        let synchro_list = server.synchro_list();
 
         let results = {
             let synchro = synchro_list.read().await;
@@ -49,6 +48,13 @@ async fn main() -> Result<()> {
                 error!("Failed to synchronize filesystems: {wrapped_err:?}")
             }
         }
-        interval.tick().await;
+
+        // Wait and update synchro list with any new sync from user
+        loop {
+            tokio::select! {
+                _ = interval.tick() => break,
+                _ = server.update_synchro_list() => continue
+            }
+        }
     }
 }
