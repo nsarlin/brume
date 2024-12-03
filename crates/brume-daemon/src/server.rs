@@ -1,6 +1,6 @@
 //! Handle connections to the daemon
 
-use std::{future::Future, io};
+use std::{collections::HashMap, future::Future, io, sync::Arc};
 
 use anyhow::{Context, Result};
 
@@ -15,17 +15,23 @@ use tarpc::{
     tokio_serde::formats::Bincode,
     tokio_util::codec::{length_delimited::Builder, LengthDelimitedCodec},
 };
+use tokio::sync::{
+    mpsc::{unbounded_channel, UnboundedReceiver},
+    Mutex, RwLock,
+};
 
 use crate::{
-    daemon::BrumeDaemon,
-    protocol::{BrumeService, BRUME_SOCK_NAME},
+    daemon::{AnySynchro, BrumeDaemon},
+    protocol::{BrumeService, SynchroId, BRUME_SOCK_NAME},
 };
 
 /// A Server that handle RPC connections from client applications
 pub struct Server {
     codec_builder: Builder,
-    listener: Listener,
+    rpc_listener: Listener,
+    synchro_list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
     daemon: BrumeDaemon,
+    from_daemon: Arc<Mutex<UnboundedReceiver<(SynchroId, AnySynchro)>>>,
 }
 
 impl Server {
@@ -48,12 +54,16 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         info!("Server running at {BRUME_SOCK_NAME}");
 
         let codec_builder = LengthDelimitedCodec::builder();
-        let daemon = BrumeDaemon::new();
+        let (to_server, from_daemon) = unbounded_channel();
+
+        let daemon = BrumeDaemon::new(to_server);
 
         Ok(Self {
             codec_builder,
-            listener,
+            rpc_listener: listener,
+            synchro_list: Arc::new(RwLock::new(HashMap::new())),
             daemon,
+            from_daemon: Arc::new(Mutex::new(from_daemon)),
         })
     }
 
@@ -64,7 +74,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
 
         loop {
-            let conn = match self.listener.accept().await {
+            let conn = match self.rpc_listener.accept().await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("There was an error with an incoming connection: {e}");
@@ -82,7 +92,24 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
     }
 
-    pub fn daemon(&self) -> &BrumeDaemon {
-        &self.daemon
+    /// The list of the synchronized fs
+    pub fn synchro_list(&self) -> Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>> {
+        self.synchro_list.clone()
+    }
+
+    pub async fn update_synchro_list(&self) {
+        let mut new_synchros = Vec::new();
+        {
+            let mut recver = self.from_daemon.lock().await;
+            recver.recv_many(&mut new_synchros, 100).await; // TODO: configure receive size ?
+        }
+
+        {
+            let mut list = self.synchro_list.write().await;
+            for (id, synchro) in new_synchros {
+                let synchro = Mutex::new(synchro);
+                list.insert(id, synchro);
+            }
+        }
     }
 }
