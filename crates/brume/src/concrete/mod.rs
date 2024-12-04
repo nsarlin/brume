@@ -41,17 +41,31 @@ pub enum ConcreteUpdateApplicationError {
 
 pub trait Named {
     /// Human readable name of the filesystem type, for user errors
-    const NAME: &'static str;
+    const TYPE_NAME: &'static str;
 }
 
 /// Definition of the operations needed for a concrete FS backend
-pub trait ConcreteFS: Named {
+pub trait ConcreteFS: Named + Sized {
+    /// Type used to detect updates on nodes of this filesystem. See [`IsModified`].
     type SyncInfo: IsModified + Named + Clone;
+    /// Errors returned by this FileSystem type
     type Error: Error + Send + Sync + 'static + Into<ConcreteFsError>;
+    /// Info needed to create a new filesystem of this type (url, login,...)
+    type CreationInfo: TryInto<Self, Error = Self::Error>;
+    /// A unique description of a particular filesystem instance
+    type Description: Display + PartialEq + for<'a> From<&'a Self::CreationInfo>;
+
+    /// Return a description of this filesystem instance.
+    ///
+    /// This description should uniquely identify the Filesystem but also have a human readable
+    /// form.
+    fn description(&self) -> Self::Description;
 
     /// Load a virtual FS from the concrete one, by parsing its structure
     fn load_virtual(&self) -> impl Future<Output = Result<Vfs<Self::SyncInfo>, Self::Error>>;
-    fn open(
+
+    /// Open and read a file on the concrete filesystem
+    fn read_file(
         &self,
         path: &VirtualPath,
     ) -> impl Future<
@@ -61,7 +75,8 @@ pub trait ConcreteFS: Named {
         >,
     >;
     // TODO: write and write_new for file modif or create
-    fn write<Data: TryStream + Send + 'static + Unpin>(
+    /// Write a file on the concrete filesystem
+    fn write_file<Data: TryStream + Send + 'static + Unpin>(
         &self,
         path: &VirtualPath,
         data: Data,
@@ -69,16 +84,22 @@ pub trait ConcreteFS: Named {
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>;
+
+    /// Remove a file on the concrete filesystem
     fn rm(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Create a directory on the concrete filesystem
     fn mkdir(
         &self,
         path: &VirtualPath,
     ) -> impl Future<Output = Result<Self::SyncInfo, Self::Error>>;
+
+    /// Remove a directory on the concrete filesystem
     fn rmdir(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 impl<T: ConcreteFS> Named for T {
-    const NAME: &'static str = T::SyncInfo::NAME;
+    const TYPE_NAME: &'static str = T::SyncInfo::TYPE_NAME;
 }
 
 /// Compute a hash of the content of the file, for cross-FS comparison

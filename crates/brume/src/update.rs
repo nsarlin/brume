@@ -187,11 +187,11 @@ impl VfsNodeUpdate {
                 let dir_self = vfs_self
                     .root()
                     .find_dir(pself)
-                    .map_err(|e| ReconciliationError::invalid_path(SyncInfo::NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(SyncInfo::TYPE_NAME, e))?;
                 let dir_other = vfs_other
                     .root()
                     .find_dir(pother)
-                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
 
                 let reconciled = dir_self.reconciliation_diff(
                     dir_other,
@@ -206,11 +206,11 @@ impl VfsNodeUpdate {
                 let file_self = vfs_self
                     .root()
                     .find_file(pself)
-                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
                 let file_other = vfs_other
                     .root()
                     .find_file(pother)
-                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
 
                 if file_self.size() == file_other.size() {
                     reconciled.insert(VirtualReconciledUpdate::NeedConcreteCheck(pself.to_owned()));

@@ -98,10 +98,10 @@ impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcret
         try_join!(
             self.local
                 .update_vfs()
-                .map_err(|e| Error::vfs_reload(LocalConcrete::NAME, e)),
+                .map_err(|e| Error::vfs_reload(LocalConcrete::TYPE_NAME, e)),
             self.remote
                 .update_vfs()
-                .map_err(|e| Error::vfs_reload(RemoteConcrete::NAME, e))
+                .map_err(|e| Error::vfs_reload(RemoteConcrete::TYPE_NAME, e))
         )
     }
 }
@@ -118,11 +118,11 @@ impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchronizable
         self.local
             .vfs_mut()
             .apply_updates_list(local_applied)
-            .map_err(|e| Error::vfs_update_application(LocalConcrete::NAME, e))?;
+            .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))?;
         self.remote
             .vfs_mut()
             .apply_updates_list(remote_applied)
-            .map_err(|e| Error::vfs_update_application(RemoteConcrete::NAME, e))?;
+            .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
 
         Ok(())
     }

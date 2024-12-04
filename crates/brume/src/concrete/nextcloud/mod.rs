@@ -1,7 +1,8 @@
 //! Manipulation of a Nextcloud filesystem with WebDAV
 
 use std::{
-    io::{self, ErrorKind},
+    fmt::{Display, Formatter},
+    io::{self},
     string::FromUtf8Error,
 };
 
@@ -61,6 +62,7 @@ pub struct NextcloudFs {
 }
 
 impl NextcloudFs {
+    // TODO: handle folders that are not the user root folder
     pub fn new(url: &str, login: &str, password: &str) -> Result<Self, NextcloudFsError> {
         let name = login.to_string();
         let client = ClientBuilder::new()
@@ -80,6 +82,17 @@ impl ConcreteFS for NextcloudFs {
 
     type Error = NextcloudFsError;
 
+    type CreationInfo = NextcloudFsCreationInfo;
+
+    type Description = NextcloudFsDescription;
+
+    fn description(&self) -> Self::Description {
+        NextcloudFsDescription {
+            server_url: self.client.host.clone(),
+            name: self.name.clone(),
+        }
+    }
+
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
         let elements = self.client.list("", Depth::Infinity).await?;
 
@@ -88,7 +101,7 @@ impl ConcreteFS for NextcloudFs {
         Ok(Vfs::new(vfs_root))
     }
 
-    async fn open(
+    async fn read_file(
         &self,
         path: &VirtualPath,
     ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
@@ -100,7 +113,7 @@ impl ConcreteFS for NextcloudFs {
             .map_err(|e| e.into()))
     }
 
-    async fn write<Data: TryStream + Send + 'static>(
+    async fn write_file<Data: TryStream + Send + 'static>(
         &self,
         path: &VirtualPath,
         data: Data,
@@ -159,7 +172,7 @@ impl NextcloudSyncInfo {
 }
 
 impl Named for NextcloudSyncInfo {
-    const NAME: &'static str = "Nextcloud";
+    const TYPE_NAME: &'static str = "Nextcloud";
 }
 
 impl IsModified for NextcloudSyncInfo {
@@ -180,4 +193,41 @@ impl<'a> From<&'a NextcloudSyncInfo> for NextcloudSyncInfo {
 
 impl<'a> From<&'a NextcloudSyncInfo> for () {
     fn from(_value: &'a NextcloudSyncInfo) -> Self {}
+}
+
+/// Description of a connection to a nextcloud instance
+#[derive(PartialEq, Eq)]
+pub struct NextcloudFsDescription {
+    server_url: String,
+    name: String,
+}
+
+impl Display for NextcloudFsDescription {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "url: {}, folder: {}", self.server_url, self.name)
+    }
+}
+
+/// Info needed to create a new connection to a nextcloud server
+pub struct NextcloudFsCreationInfo {
+    server_url: String,
+    login: String,
+    password: String,
+}
+
+impl From<&NextcloudFsCreationInfo> for NextcloudFsDescription {
+    fn from(value: &NextcloudFsCreationInfo) -> Self {
+        Self {
+            server_url: value.server_url.to_owned(),
+            name: value.login.to_owned(),
+        }
+    }
+}
+
+impl TryFrom<NextcloudFsCreationInfo> for NextcloudFs {
+    type Error = <NextcloudFs as ConcreteFS>::Error;
+
+    fn try_from(value: NextcloudFsCreationInfo) -> Result<Self, Self::Error> {
+        Self::new(&value.server_url, &value.login, &value.password)
+    }
 }

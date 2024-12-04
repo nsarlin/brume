@@ -1,10 +1,9 @@
-use std::{cell::RefCell, ffi::OsStr, io::ErrorKind, ops::Deref, time::SystemTime};
+use std::{cell::RefCell, ffi::OsStr, fmt::Display, io::ErrorKind, ops::Deref, time::SystemTime};
 
 use bytes::Bytes;
 use futures::{stream, Stream, TryStream, TryStreamExt};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
-use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
     concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError, Named},
@@ -423,7 +422,7 @@ impl InnerConcreteTestNode {
         }
     }
 
-    fn get_node(&self, path: &VirtualPath) -> &Self {
+    fn _get_node(&self, path: &VirtualPath) -> &Self {
         if path.is_root() {
             self
         } else {
@@ -437,7 +436,7 @@ impl InnerConcreteTestNode {
                             if remainder.is_root() {
                                 return child;
                             } else {
-                                return child.get_node(remainder);
+                                return child._get_node(remainder);
                             }
                         }
                     }
@@ -488,10 +487,40 @@ impl From<TestNode<'_>> for ConcreteTestNode {
     }
 }
 
+impl TryFrom<InnerConcreteTestNode> for ConcreteTestNode {
+    type Error = <ConcreteTestNode as ConcreteFS>::Error;
+
+    fn try_from(value: InnerConcreteTestNode) -> Result<Self, Self::Error> {
+        Ok(Self {
+            inner: RefCell::new(value),
+        })
+    }
+}
+
+impl Display for InnerConcreteTestNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+impl From<&InnerConcreteTestNode> for String {
+    fn from(value: &InnerConcreteTestNode) -> Self {
+        format!("{}", value)
+    }
+}
+
 impl ConcreteFS for ConcreteTestNode {
     type SyncInfo = ShallowTestSyncInfo;
 
     type Error = TestError;
+
+    type CreationInfo = InnerConcreteTestNode;
+
+    type Description = String;
+
+    fn description(&self) -> Self::Description {
+        self.inner.borrow().name().to_string()
+    }
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
         let inner = self.inner.borrow();
@@ -500,7 +529,7 @@ impl ConcreteFS for ConcreteTestNode {
         Ok(Vfs::new(root))
     }
 
-    async fn open(
+    async fn read_file(
         &self,
         path: &VirtualPath,
     ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
@@ -517,7 +546,7 @@ impl ConcreteFS for ConcreteTestNode {
         }
     }
 
-    async fn write<Data: TryStream + Send + Unpin>(
+    async fn write_file<Data: TryStream + Send + Unpin>(
         &self,
         path: &VirtualPath,
         data: Data,
@@ -617,16 +646,6 @@ impl ConcreteFS for ConcreteTestNode {
             InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
         }
     }
-
-    async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
-        let inner = self.inner.borrow_mut();
-
-        match inner.get_node(path) {
-            InnerConcreteTestNode::D(_, _) => panic!("{path:?}"),
-            InnerConcreteTestNode::DH(_, hash, _) => Ok(*hash),
-            InnerConcreteTestNode::FF(_, content) => Ok(xxh3_64(content)),
-        }
-    }
 }
 
 pub type TestError = ConcreteFsError;
@@ -674,7 +693,7 @@ impl ShallowTestSyncInfo {
 }
 
 impl Named for ShallowTestSyncInfo {
-    const NAME: &'static str = "Test FileSystem";
+    const TYPE_NAME: &'static str = "Test FileSystem";
 }
 
 impl IsModified for ShallowTestSyncInfo {

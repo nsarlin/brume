@@ -49,13 +49,13 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
 
     /// Query the concrete FS to update the in memory virtual representation
     pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, VfsReloadError> {
-        info!("Updating VFS from {}", Concrete::NAME);
+        info!("Updating VFS from {}", Concrete::TYPE_NAME);
         let new_vfs = self.concrete.load_virtual().await.map_err(|e| e.into())?;
 
         let updates = self.vfs.diff(&new_vfs)?;
 
         self.vfs = new_vfs;
-        info!("VFS from {} updated", Concrete::NAME);
+        info!("VFS from {} updated", Concrete::TYPE_NAME);
         Ok(updates)
     }
 
@@ -137,8 +137,8 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         );
 
         try_join!(
-            self_futures.map_err(|e| (e, Concrete::NAME)),
-            other_futures.map_err(|e| (e, OtherConcrete::NAME))
+            self_futures.map_err(|e| (e, Concrete::TYPE_NAME)),
+            other_futures.map_err(|e| (e, OtherConcrete::TYPE_NAME))
         )
     }
 
@@ -203,18 +203,18 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         info!(
             "Cloning file {:?} from {} to {}",
             path,
-            OtherConcrete::NAME,
-            Concrete::NAME
+            OtherConcrete::TYPE_NAME,
+            Concrete::TYPE_NAME
         );
         let counter = Arc::new(AtomicU64::new(0));
         let stream = ref_concrete
-            .open(path)
+            .read_file(path)
             .await
             .map_err(|e| e.into())?
             .count_bytes(counter.clone());
         let res = self
             .concrete
-            .write(path, stream)
+            .write_file(path, stream)
             .await
             .map_err(|e| e.into())
             .map(|info| (info, counter.load(std::sync::atomic::Ordering::SeqCst)))?;
