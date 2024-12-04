@@ -16,10 +16,9 @@ use futures::{Stream, TryStream, TryStreamExt};
 use path::{node_from_path_rec, LocalPath};
 use tokio::{
     fs::{self, File},
-    io::{AsyncRead, AsyncReadExt},
+    io::AsyncRead,
 };
 use tokio_util::io::{ReaderStream, StreamReader};
-use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
     update::{IsModified, ModificationState},
@@ -218,19 +217,6 @@ impl ConcreteFS for LocalDir {
         fs::remove_dir_all(&full_path)
             .await
             .map_err(|e| LocalDirError::io(&self.path, e))
-    }
-
-    async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
-        let stream = self.open(path).await?;
-        let mut reader = StreamReader::new(stream.map_err(|e| io::Error::new(ErrorKind::Other, e)));
-
-        let mut data = Vec::new();
-        reader
-            .read_to_end(&mut data)
-            .await
-            .map_err(|e| LocalDirError::io(&self.path, e))?;
-
-        Ok(xxh3_64(&data))
     }
 }
 

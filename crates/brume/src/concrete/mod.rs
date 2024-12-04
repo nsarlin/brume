@@ -4,11 +4,16 @@ pub mod local;
 pub mod nextcloud;
 
 use std::error::Error;
+use std::fmt::Display;
 use std::future::Future;
+use std::io::{self, ErrorKind};
 
 use bytes::Bytes;
-use futures::{Stream, TryStream};
+use futures::{Stream, TryStream, TryStreamExt};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
+use tokio_util::io::StreamReader;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::update::IsModified;
 use crate::vfs::{InvalidPathError, Vfs, VirtualPath};
@@ -70,11 +75,24 @@ pub trait ConcreteFS: Named {
         path: &VirtualPath,
     ) -> impl Future<Output = Result<Self::SyncInfo, Self::Error>>;
     fn rmdir(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::Error>>;
-    fn hash(&self, path: &VirtualPath) -> impl Future<Output = Result<u64, Self::Error>>;
 }
 
 impl<T: ConcreteFS> Named for T {
     const NAME: &'static str = T::SyncInfo::NAME;
+}
+
+/// Compute a hash of the content of the file, for cross-FS comparison
+async fn concrete_hash_file<Concrete: ConcreteFS>(
+    concrete: &Concrete,
+    path: &VirtualPath,
+) -> Result<u64, ConcreteFsError> {
+    let stream = concrete.read_file(path).await.map_err(|e| e.into())?;
+    let mut reader = StreamReader::new(stream.map_err(|e| io::Error::new(ErrorKind::Other, e)));
+
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data).await?;
+
+    Ok(xxh3_64(&data))
 }
 
 /// Check if two files on different filesystems are identical by reading them and computing a hash
@@ -88,8 +106,11 @@ pub async fn concrete_eq_file<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
     path: &VirtualPath,
 ) -> Result<bool, (ConcreteFsError, &'static str)> {
     // TODO: cache files when possible
-    let (self_hash, other_hash) = tokio::join!(concrete_self.hash(path), concrete_other.hash(path));
+    let (self_hash, other_hash) = tokio::join!(
+        concrete_hash_file(concrete_self, path),
+        concrete_hash_file(concrete_other, path)
+    );
 
-    Ok(self_hash.map_err(|e| (e.into(), Concrete::NAME))?
-        == other_hash.map_err(|e| (e.into(), Concrete::NAME))?)
+    Ok(self_hash.map_err(|e| (e, Concrete::TYPE_NAME))?
+        == other_hash.map_err(|e| (e, Concrete::TYPE_NAME))?)
 }
