@@ -10,9 +10,6 @@ use futures::{Stream, TryStream, TryStreamExt};
 use reqwest::Body;
 use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
-use tokio_util::io::StreamReader;
-use xxhash_rust::xxh3::xxh3_64;
 
 mod dav;
 
@@ -141,17 +138,6 @@ impl ConcreteFS for NextcloudFs {
 
     async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
         self.client.delete(path.into()).await.map_err(|e| e.into())
-    }
-
-    async fn hash(&self, path: &VirtualPath) -> Result<u64, Self::Error> {
-        let stream = self.open(path).await?;
-        let mut reader =
-            StreamReader::new(stream.map_err(|_| io::Error::new(ErrorKind::Other, "")));
-
-        let mut data = Vec::new();
-        reader.read_to_end(&mut data).await?;
-
-        Ok(xxh3_64(&data))
     }
 }
 
