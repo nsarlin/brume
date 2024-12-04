@@ -3,7 +3,7 @@
 pub mod path;
 
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display, Formatter},
     io::{self, ErrorKind},
     path::{Path, PathBuf},
     pin::Pin,
@@ -98,7 +98,7 @@ pub struct LocalDir {
 }
 
 impl LocalDir {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, LocalDirError> {
         let path = path.as_ref();
 
         Ok(Self {
@@ -118,6 +118,14 @@ impl ConcreteFS for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
     type Error = LocalDirError;
+
+    type CreationInfo = PathBuf;
+
+    type Description = LocalDirDescription;
+
+    fn description(&self) -> Self::Description {
+        LocalDirDescription(self.path.clone())
+    }
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
         let sync = LocalSyncInfo::new(
@@ -154,7 +162,7 @@ impl ConcreteFS for LocalDir {
         Ok(Vfs::new(root))
     }
 
-    async fn open(
+    async fn read_file(
         &self,
         path: &VirtualPath,
     ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
@@ -165,7 +173,7 @@ impl ConcreteFS for LocalDir {
             .map_err(|e| LocalDirError::io(&full_path, e))
     }
 
-    async fn write<Data: TryStream + Send + 'static + Unpin>(
+    async fn write_file<Data: TryStream + Send + 'static + Unpin>(
         &self,
         path: &VirtualPath,
         data: Data,
@@ -252,7 +260,7 @@ impl IsModified for LocalSyncInfo {
 }
 
 impl Named for LocalSyncInfo {
-    const NAME: &'static str = "local FileSystem";
+    const TYPE_NAME: &'static str = "local FileSystem";
 }
 
 impl<'a> From<&'a LocalSyncInfo> for LocalSyncInfo {
@@ -263,4 +271,28 @@ impl<'a> From<&'a LocalSyncInfo> for LocalSyncInfo {
 
 impl<'a> From<&'a LocalSyncInfo> for () {
     fn from(_value: &'a LocalSyncInfo) -> Self {}
+}
+
+/// Uniquely identify a path on the local filesystem
+#[derive(Eq, PartialEq)]
+pub struct LocalDirDescription(PathBuf);
+
+impl Display for LocalDirDescription {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
+impl From<&PathBuf> for LocalDirDescription {
+    fn from(value: &PathBuf) -> Self {
+        Self(value.clone())
+    }
+}
+
+impl TryFrom<PathBuf> for LocalDir {
+    type Error = <Self as ConcreteFS>::Error;
+
+    fn try_from(value: PathBuf) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
 }
