@@ -1,16 +1,19 @@
 //! The daemon provides rpc to remotely manipulate the list of synchronized Filesystems
 
-use log::info;
+use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use brume::{
-    concrete::{local::LocalDir, nextcloud::NextcloudFs},
+    concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS},
     synchro::{Synchro, Synchronizable},
     Error,
 };
 
-use crate::protocol::{BrumeService, FsDescription, SynchroId};
+use crate::{
+    protocol::{AnyFsCreationInfo, AnyFsDescription, BrumeService, SynchroId},
+    server::ReadOnlySynchroList,
+};
 
 /// Represent [`Synchro`] object where both concrete Filesystem types are only known at runtime.
 // TODO: create using a macro ?
@@ -19,6 +22,30 @@ pub enum AnySynchro {
     NextcloudLocal(Synchro<NextcloudFs, LocalDir>),
     LocalLocal(Synchro<LocalDir, LocalDir>),
     NextcloudNextcloud(Synchro<NextcloudFs, NextcloudFs>),
+}
+
+impl AnySynchro {
+    fn description(&self) -> (AnyFsDescription, AnyFsDescription) {
+        match self {
+            AnySynchro::LocalNextcloud(synchro) => (
+                AnyFsDescription::LocalDir(synchro.local().concrete().description()),
+                AnyFsDescription::Nextcloud(synchro.remote().concrete().description()),
+            ),
+            AnySynchro::NextcloudLocal(synchro) => (
+                AnyFsDescription::Nextcloud(synchro.local().concrete().description()),
+                AnyFsDescription::LocalDir(synchro.remote().concrete().description()),
+            ),
+            AnySynchro::LocalLocal(synchro) => (
+                AnyFsDescription::LocalDir(synchro.local().concrete().description()),
+                AnyFsDescription::LocalDir(synchro.remote().concrete().description()),
+            ),
+
+            AnySynchro::NextcloudNextcloud(synchro) => (
+                AnyFsDescription::Nextcloud(synchro.local().concrete().description()),
+                AnyFsDescription::Nextcloud(synchro.remote().concrete().description()),
+            ),
+        }
+    }
 }
 
 impl Synchronizable for AnySynchro {
@@ -36,11 +63,18 @@ impl Synchronizable for AnySynchro {
 #[derive(Clone)]
 pub struct BrumeDaemon {
     to_server: UnboundedSender<(SynchroId, AnySynchro)>,
+    synchro_list: ReadOnlySynchroList,
 }
 
 impl BrumeDaemon {
-    pub(crate) fn new(to_server: UnboundedSender<(SynchroId, AnySynchro)>) -> Self {
-        Self { to_server }
+    pub(crate) fn new(
+        to_server: UnboundedSender<(SynchroId, AnySynchro)>,
+        synchro_list: ReadOnlySynchroList,
+    ) -> Self {
+        Self {
+            to_server,
+            synchro_list,
+        }
     }
 }
 
@@ -48,45 +82,58 @@ impl BrumeService for BrumeDaemon {
     async fn new_synchro(
         self,
         _context: Context,
-        local: FsDescription,
-        remote: FsDescription,
+        local: AnyFsCreationInfo,
+        remote: AnyFsCreationInfo,
     ) -> Result<SynchroId, String> {
-        info!("Received synchro creation request: local {local}, remote {remote}");
+        let local_desc = AnyFsDescription::from(&local);
+        let remote_desc = AnyFsDescription::from(&remote);
+        info!("Received synchro creation request: local {local_desc}, remote {remote_desc}");
         let sync = match (local, remote) {
-            (FsDescription::LocalDir(local_path), FsDescription::LocalDir(remote_path)) => {
-                let local = LocalDir::new(local_path).map_err(|e| e.to_string())?;
-                let remote = LocalDir::new(remote_path).map_err(|e| e.to_string())?;
+            (AnyFsCreationInfo::LocalDir(local_path), AnyFsCreationInfo::LocalDir(remote_path)) => {
+                let local = LocalDir::try_from(local_path).map_err(|e| e.to_string())?;
+                let remote = LocalDir::try_from(remote_path).map_err(|e| e.to_string())?;
 
                 AnySynchro::LocalLocal(Synchro::new(local, remote))
             }
-            (FsDescription::LocalDir(local_path), FsDescription::Nextcloud(remote_log)) => {
-                let local = LocalDir::new(local_path).map_err(|e| e.to_string())?;
-                let remote =
-                    NextcloudFs::new(&remote_log.url, &remote_log.login, &remote_log.password)
-                        .map_err(|e| e.to_string())?;
+            (AnyFsCreationInfo::LocalDir(local_path), AnyFsCreationInfo::Nextcloud(remote_log)) => {
+                let local = LocalDir::try_from(local_path).map_err(|e| e.to_string())?;
+                let remote = NextcloudFs::try_from(remote_log).map_err(|e| e.to_string())?;
 
                 AnySynchro::LocalNextcloud(Synchro::new(local, remote))
             }
-            (FsDescription::Nextcloud(local_log), FsDescription::LocalDir(remote_path)) => {
-                let local = NextcloudFs::new(&local_log.url, &local_log.login, &local_log.password)
-                    .map_err(|e| e.to_string())?;
-                let remote = LocalDir::new(remote_path).map_err(|e| e.to_string())?;
+            (AnyFsCreationInfo::Nextcloud(local_log), AnyFsCreationInfo::LocalDir(remote_path)) => {
+                let local = NextcloudFs::try_from(local_log).map_err(|e| e.to_string())?;
+                let remote = LocalDir::try_from(remote_path).map_err(|e| e.to_string())?;
 
                 AnySynchro::NextcloudLocal(Synchro::new(local, remote))
             }
-            (FsDescription::Nextcloud(local_log), FsDescription::Nextcloud(remote_log)) => {
-                let local = NextcloudFs::new(&local_log.url, &local_log.login, &local_log.password)
-                    .map_err(|e| e.to_string())?;
+            (AnyFsCreationInfo::Nextcloud(local_log), AnyFsCreationInfo::Nextcloud(remote_log)) => {
+                let local = NextcloudFs::try_from(local_log).map_err(|e| e.to_string())?;
 
-                let remote =
-                    NextcloudFs::new(&remote_log.url, &remote_log.login, &remote_log.password)
-                        .map_err(|e| e.to_string())?;
+                let remote = NextcloudFs::try_from(remote_log).map_err(|e| e.to_string())?;
 
                 AnySynchro::NextcloudNextcloud(Synchro::new(local, remote))
             }
         };
 
-        // TODO: check if synchro already exists to send an error to the user
+        {
+            let list = self.synchro_list.read().await;
+
+            // TODO: also do before insertion to avoir race with elems in queue
+            for sync in list.values() {
+                let sync = sync.lock().await;
+                let (cur_local_desc, cur_remote_desc) = sync.description();
+                println!("cur: {cur_local_desc}, {cur_remote_desc}");
+                println!("adding: {local_desc}, {remote_desc}");
+                if (cur_local_desc == local_desc || cur_local_desc == cur_remote_desc)
+                    && (cur_remote_desc == local_desc || cur_remote_desc == remote_desc)
+                {
+                    warn!("Duplicate sync request, skipping");
+                    return Err("Filesystems are already in sync".to_string());
+                }
+            }
+        }
+
         let syncid = SynchroId::new();
 
         self.to_server

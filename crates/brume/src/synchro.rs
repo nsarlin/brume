@@ -46,6 +46,14 @@ impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcret
         Self { local, remote }
     }
 
+    pub fn local(&self) -> &FileSystem<LocalConcrete> {
+        &self.local
+    }
+
+    pub fn remote(&self) -> &FileSystem<RemoteConcrete> {
+        &self.remote
+    }
+
     /// Reconcile updates lists from both filesystems by removing duplicates and detecting
     /// conflicts.
     ///

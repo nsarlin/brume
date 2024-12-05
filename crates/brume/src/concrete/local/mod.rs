@@ -14,6 +14,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{Stream, TryStream, TryStreamExt};
 use path::{node_from_path_rec, LocalPath};
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
     io::AsyncRead,
@@ -117,9 +118,9 @@ impl LocalDir {
 impl ConcreteFS for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
-    type Error = LocalDirError;
+    type IoError = LocalDirError;
 
-    type CreationInfo = PathBuf;
+    type CreationInfo = LocalDirCreationInfo;
 
     type Description = LocalDirDescription;
 
@@ -127,7 +128,7 @@ impl ConcreteFS for LocalDir {
         LocalDirDescription(self.path.clone())
     }
 
-    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
+    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
         let sync = LocalSyncInfo::new(
             self.path
                 .modification_time()
@@ -165,7 +166,7 @@ impl ConcreteFS for LocalDir {
     async fn read_file(
         &self,
         path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
         let full_path = self.full_path(path);
         File::open(&full_path)
             .await
@@ -177,7 +178,7 @@ impl ConcreteFS for LocalDir {
         &self,
         path: &VirtualPath,
         data: Data,
-    ) -> Result<Self::SyncInfo, Self::Error>
+    ) -> Result<Self::SyncInfo, Self::IoError>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
@@ -201,14 +202,14 @@ impl ConcreteFS for LocalDir {
             .map_err(|e| LocalDirError::io(&self.path, e))
     }
 
-    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let full_path = self.full_path(path);
         fs::remove_file(&full_path)
             .await
             .map_err(|e| LocalDirError::io(&self.path, e))
     }
 
-    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::Error> {
+    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
         let full_path = self.full_path(path);
         fs::create_dir(&full_path)
             .await
@@ -220,7 +221,7 @@ impl ConcreteFS for LocalDir {
             .map_err(|e| LocalDirError::io(&self.path, e))
     }
 
-    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let full_path = self.full_path(path);
         fs::remove_dir_all(&full_path)
             .await
@@ -274,7 +275,7 @@ impl<'a> From<&'a LocalSyncInfo> for () {
 }
 
 /// Uniquely identify a path on the local filesystem
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LocalDirDescription(PathBuf);
 
 impl Display for LocalDirDescription {
@@ -283,16 +284,25 @@ impl Display for LocalDirDescription {
     }
 }
 
-impl From<&PathBuf> for LocalDirDescription {
-    fn from(value: &PathBuf) -> Self {
-        Self(value.clone())
+impl From<&LocalDirCreationInfo> for LocalDirDescription {
+    fn from(value: &LocalDirCreationInfo) -> Self {
+        Self(value.0.clone())
     }
 }
 
-impl TryFrom<PathBuf> for LocalDir {
-    type Error = <Self as ConcreteFS>::Error;
+#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct LocalDirCreationInfo(PathBuf);
 
-    fn try_from(value: PathBuf) -> Result<Self, Self::Error> {
-        Self::new(value)
+impl LocalDirCreationInfo {
+    pub fn new(path: &Path) -> Self {
+        Self(path.to_path_buf())
+    }
+}
+
+impl TryFrom<LocalDirCreationInfo> for LocalDir {
+    type Error = <Self as ConcreteFS>::IoError;
+
+    fn try_from(value: LocalDirCreationInfo) -> Result<Self, Self::Error> {
+        Self::new(value.0)
     }
 }

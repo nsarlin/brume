@@ -2,6 +2,7 @@ use std::{cell::RefCell, ffi::OsStr, fmt::Display, io::ErrorKind, ops::Deref, ti
 
 use bytes::Bytes;
 use futures::{stream, Stream, TryStream, TryStreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
 
@@ -351,7 +352,7 @@ impl<'a> LocalPath for TestNode<'a> {
 /// Like a TestNode, but own its content, wich allows modifications.
 ///
 /// Can be used to define a test concrete fs
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum InnerConcreteTestNode {
     D(String, Vec<InnerConcreteTestNode>),
     DH(String, u64, Vec<InnerConcreteTestNode>),
@@ -488,7 +489,7 @@ impl From<TestNode<'_>> for ConcreteTestNode {
 }
 
 impl TryFrom<InnerConcreteTestNode> for ConcreteTestNode {
-    type Error = <ConcreteTestNode as ConcreteFS>::Error;
+    type Error = <ConcreteTestNode as ConcreteFS>::IoError;
 
     fn try_from(value: InnerConcreteTestNode) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -512,7 +513,7 @@ impl From<&InnerConcreteTestNode> for String {
 impl ConcreteFS for ConcreteTestNode {
     type SyncInfo = ShallowTestSyncInfo;
 
-    type Error = TestError;
+    type IoError = TestError;
 
     type CreationInfo = InnerConcreteTestNode;
 
@@ -522,7 +523,7 @@ impl ConcreteFS for ConcreteTestNode {
         self.inner.borrow().name().to_string()
     }
 
-    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
+    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
         let inner = self.inner.borrow();
         let root = TestNode::from(inner.deref()).into_node();
 
@@ -532,7 +533,7 @@ impl ConcreteFS for ConcreteTestNode {
     async fn read_file(
         &self,
         path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
         let inner = self.inner.borrow();
         let root = TestNode::from(inner.deref());
         let node = root.get_node(path);
@@ -550,7 +551,7 @@ impl ConcreteFS for ConcreteTestNode {
         &self,
         path: &VirtualPath,
         data: Data,
-    ) -> Result<Self::SyncInfo, Self::Error>
+    ) -> Result<Self::SyncInfo, Self::IoError>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
@@ -586,7 +587,7 @@ impl ConcreteFS for ConcreteTestNode {
         }
     }
 
-    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let mut inner = self.inner.borrow_mut();
         let parent = inner.get_node_mut(path.parent().unwrap());
 
@@ -608,7 +609,7 @@ impl ConcreteFS for ConcreteTestNode {
         }
     }
 
-    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::Error> {
+    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
         let mut inner = self.inner.borrow_mut();
         let parent = inner.get_node_mut(path.parent().unwrap());
 
@@ -625,7 +626,7 @@ impl ConcreteFS for ConcreteTestNode {
         }
     }
 
-    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let mut inner = self.inner.borrow_mut();
         let parent = inner.get_node_mut(path.parent().unwrap());
 

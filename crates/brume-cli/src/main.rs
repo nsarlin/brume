@@ -6,7 +6,9 @@ use tarpc::context;
 use clap::{Parser, Subcommand};
 use url::Url;
 
-use brume_daemon::protocol::{FsDescription, NextcloudLoginInfo};
+use brume_daemon::protocol::{
+    AnyFsCreationInfo, AnyFsDescription, LocalDirCreationInfo, NextcloudFsCreationInfo,
+};
 
 #[derive(Parser)]
 #[command(version, about, long_about)]
@@ -25,11 +27,11 @@ enum Commands {
     New {
         /// The local filesystem for the synchronization
         #[arg(short, long, value_name = "FILESYSTEM", value_parser = parse_fs_argument)]
-        local: FsDescription,
+        local: AnyFsCreationInfo,
 
         /// The remote filesystem for the synchronization
         #[arg(short, long, value_name = "FILESYSTEM", value_parser = parse_fs_argument)]
-        remote: FsDescription,
+        remote: AnyFsCreationInfo,
     },
 }
 
@@ -39,7 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::New { local, remote } => {
-            println!("Creating synchro between {local} and {remote}");
+            let local_desc = AnyFsDescription::from(&local);
+            let remote_desc = AnyFsDescription::from(&remote);
+            println!("Creating synchro between {local_desc} and {remote_desc}");
             let res = connect_to_daemon()
                 .await
                 .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?
@@ -53,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn parse_fs_argument(arg: &str) -> Result<FsDescription, String> {
+fn parse_fs_argument(arg: &str) -> Result<AnyFsCreationInfo, String> {
     if let Ok(url) = Url::parse(arg) {
         let port_fmt = if let Some(port) = url.port() {
             format!(":{port}")
@@ -65,22 +69,20 @@ fn parse_fs_argument(arg: &str) -> Result<FsDescription, String> {
             url.scheme(),
             url.host_str().ok_or("Invalid url".to_string())?,
             port_fmt,
-            url.path()
+            url.path().trim_end_matches('/')
         );
         let login = url.username().to_string();
         let password = url.password().unwrap_or("").to_string();
-        Ok(FsDescription::Nextcloud(NextcloudLoginInfo {
-            url: address,
-            login,
-            password,
-        }))
+        Ok(AnyFsCreationInfo::Nextcloud(NextcloudFsCreationInfo::new(
+            &address, &login, &password,
+        )))
     } else if let Ok(path) = fs::canonicalize(arg) {
-        Ok(FsDescription::LocalDir(path))
+        Ok(AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new(
+            &path,
+        )))
     } else {
-        Err(
-            "Invalid fs, please provide the url of your Nextcloud instance or the \
-path to a local folder"
-                .to_string(),
-        )
+        Err(format!(
+            "{arg} is neither a valid path on your filesystem nor an url"
+        ))
     }
 }

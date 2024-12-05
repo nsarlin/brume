@@ -1,9 +1,12 @@
 //! Definition of the protocol needed to communicate with the daemon
 
-use std::{fmt::Display, path::PathBuf};
+use std::fmt::Display;
 
+use brume::concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
 
 // TODO: make configurable
 /// Name of the socket where the clients should connect
@@ -29,30 +32,34 @@ impl SynchroId {
     }
 }
 
-/// Required information for a Nextcloud connection
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NextcloudLoginInfo {
-    pub url: String,
-    pub login: String,
-    pub password: String,
+/// The information needed to create a FS that can be synchronized, remote or local
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AnyFsCreationInfo {
+    LocalDir(<LocalDir as ConcreteFS>::CreationInfo),
+    Nextcloud(<NextcloudFs as ConcreteFS>::CreationInfo),
 }
 
 /// The information needed to describe a FS that can be synchronized, remote or local
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum FsDescription {
-    LocalDir(PathBuf),
-    Nextcloud(NextcloudLoginInfo),
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AnyFsDescription {
+    LocalDir(<LocalDir as ConcreteFS>::Description),
+    Nextcloud(<NextcloudFs as ConcreteFS>::Description),
 }
 
-impl Display for FsDescription {
+impl Display for AnyFsDescription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FsDescription::LocalDir(path_buf) => {
-                write!(f, "local directory {}", path_buf.display())
-            }
-            FsDescription::Nextcloud(nextcloud_login_info) => {
-                write!(f, "nextcloud server {}", nextcloud_login_info.url)
-            }
+            AnyFsDescription::LocalDir(local) => local.fmt(f),
+            AnyFsDescription::Nextcloud(nextcloud) => nextcloud.fmt(f),
+        }
+    }
+}
+
+impl From<&AnyFsCreationInfo> for AnyFsDescription {
+    fn from(value: &AnyFsCreationInfo) -> Self {
+        match value {
+            AnyFsCreationInfo::LocalDir(dir) => Self::LocalDir(dir.into()),
+            AnyFsCreationInfo::Nextcloud(nextcloud) => Self::Nextcloud(nextcloud.into()),
         }
     }
 }
@@ -60,5 +67,8 @@ impl Display for FsDescription {
 #[tarpc::service]
 pub trait BrumeService {
     /// Create a new synchronization between a "remote" and a "local" fs
-    async fn new_synchro(local: FsDescription, remote: FsDescription) -> Result<SynchroId, String>;
+    async fn new_synchro(
+        local: AnyFsCreationInfo,
+        remote: AnyFsCreationInfo,
+    ) -> Result<SynchroId, String>;
 }
