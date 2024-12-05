@@ -4,12 +4,13 @@ pub mod local;
 pub mod nextcloud;
 
 use std::error::Error;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::io::{self, ErrorKind};
 
 use bytes::Bytes;
 use futures::{Stream, TryStream, TryStreamExt};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
@@ -39,21 +40,34 @@ pub enum ConcreteUpdateApplicationError {
     PathIsRoot,
 }
 
+pub trait FsInstanceDescription {}
+
+pub trait FsCreationInfo {
+    type Description: FsInstanceDescription;
+}
+
 pub trait Named {
     /// Human readable name of the filesystem type, for user errors
     const TYPE_NAME: &'static str;
 }
 
 /// Definition of the operations needed for a concrete FS backend
-pub trait ConcreteFS: Named + Sized {
+pub trait ConcreteFS:
+    Named + Sized + TryFrom<Self::CreationInfo, Error = <Self as ConcreteFS>::IoError>
+{
     /// Type used to detect updates on nodes of this filesystem. See [`IsModified`].
     type SyncInfo: IsModified + Named + Clone;
     /// Errors returned by this FileSystem type
-    type Error: Error + Send + Sync + 'static + Into<ConcreteFsError>;
+    type IoError: Error + Send + Sync + 'static + Into<ConcreteFsError>;
     /// Info needed to create a new filesystem of this type (url, login,...)
-    type CreationInfo: TryInto<Self, Error = Self::Error>;
+    type CreationInfo: Debug + Clone + Serialize + for<'a> Deserialize<'a>;
     /// A unique description of a particular filesystem instance
-    type Description: Display + PartialEq + for<'a> From<&'a Self::CreationInfo>;
+    type Description: Display
+        + for<'a> From<&'a Self::CreationInfo>
+        + PartialEq
+        + Debug
+        + Serialize
+        + for<'a> Deserialize<'a>;
 
     /// Return a description of this filesystem instance.
     ///

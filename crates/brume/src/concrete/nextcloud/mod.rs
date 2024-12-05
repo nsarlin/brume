@@ -10,6 +10,7 @@ use bytes::Bytes;
 use futures::{Stream, TryStream, TryStreamExt};
 use reqwest::Body;
 use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod dav;
@@ -80,7 +81,7 @@ impl NextcloudFs {
 impl ConcreteFS for NextcloudFs {
     type SyncInfo = NextcloudSyncInfo;
 
-    type Error = NextcloudFsError;
+    type IoError = NextcloudFsError;
 
     type CreationInfo = NextcloudFsCreationInfo;
 
@@ -88,12 +89,18 @@ impl ConcreteFS for NextcloudFs {
 
     fn description(&self) -> Self::Description {
         NextcloudFsDescription {
-            server_url: self.client.host.clone(),
+            server_url: self
+                .client
+                .host
+                .trim_end_matches('/')
+                .trim_end_matches(&self.name)
+                .trim_end_matches(&NC_DAV_PATH_STR)
+                .to_string(),
             name: self.name.clone(),
         }
     }
 
-    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::Error> {
+    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
         let elements = self.client.list("", Depth::Infinity).await?;
 
         let vfs_root = dav_parse_vfs(elements, &self.name)?;
@@ -104,7 +111,7 @@ impl ConcreteFS for NextcloudFs {
     async fn read_file(
         &self,
         path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::Error>> + 'static, Self::Error> {
+    ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
         Ok(self
             .client
             .get(path.into())
@@ -117,7 +124,7 @@ impl ConcreteFS for NextcloudFs {
         &self,
         path: &VirtualPath,
         data: Data,
-    ) -> Result<Self::SyncInfo, Self::Error>
+    ) -> Result<Self::SyncInfo, Self::IoError>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
@@ -134,11 +141,11 @@ impl ConcreteFS for NextcloudFs {
             .and_then(dav_parse_entity_tag)
     }
 
-    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         self.client.delete(path.into()).await.map_err(|e| e.into())
     }
 
-    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::Error> {
+    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
         self.client.mkcol(path.into()).await?;
 
         // Extract the tag of the created dir
@@ -149,7 +156,7 @@ impl ConcreteFS for NextcloudFs {
             .and_then(dav_parse_entity_tag)
     }
 
-    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::Error> {
+    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         self.client.delete(path.into()).await.map_err(|e| e.into())
     }
 }
@@ -196,7 +203,7 @@ impl<'a> From<&'a NextcloudSyncInfo> for () {
 }
 
 /// Description of a connection to a nextcloud instance
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct NextcloudFsDescription {
     server_url: String,
     name: String,
@@ -209,10 +216,21 @@ impl Display for NextcloudFsDescription {
 }
 
 /// Info needed to create a new connection to a nextcloud server
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextcloudFsCreationInfo {
     server_url: String,
     login: String,
     password: String,
+}
+
+impl NextcloudFsCreationInfo {
+    pub fn new(server_url: &str, login: &str, password: &str) -> Self {
+        Self {
+            server_url: server_url.to_string(),
+            login: login.to_string(),
+            password: password.to_string(),
+        }
+    }
 }
 
 impl From<&NextcloudFsCreationInfo> for NextcloudFsDescription {
@@ -225,7 +243,7 @@ impl From<&NextcloudFsCreationInfo> for NextcloudFsDescription {
 }
 
 impl TryFrom<NextcloudFsCreationInfo> for NextcloudFs {
-    type Error = <NextcloudFs as ConcreteFS>::Error;
+    type Error = <NextcloudFs as ConcreteFS>::IoError;
 
     fn try_from(value: NextcloudFsCreationInfo) -> Result<Self, Self::Error> {
         Self::new(&value.server_url, &value.login, &value.password)

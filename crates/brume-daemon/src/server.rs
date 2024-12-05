@@ -17,7 +17,7 @@ use tarpc::{
 };
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver},
-    Mutex, RwLock,
+    Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 
 use crate::{
@@ -25,11 +25,55 @@ use crate::{
     protocol::{BrumeService, SynchroId, BRUME_SOCK_NAME},
 };
 
+#[derive(Clone)]
+pub struct ReadOnlySynchroList {
+    list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
+}
+
+impl ReadOnlySynchroList {
+    pub async fn read(&self) -> RwLockReadGuard<HashMap<SynchroId, Mutex<AnySynchro>>> {
+        self.list.read().await
+    }
+}
+
+#[derive(Clone)]
+pub struct SynchroList {
+    list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
+}
+
+impl Default for SynchroList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SynchroList {
+    pub async fn read(&self) -> RwLockReadGuard<HashMap<SynchroId, Mutex<AnySynchro>>> {
+        self.list.read().await
+    }
+
+    pub async fn write(&self) -> RwLockWriteGuard<HashMap<SynchroId, Mutex<AnySynchro>>> {
+        self.list.write().await
+    }
+
+    pub fn as_read_only(&self) -> ReadOnlySynchroList {
+        ReadOnlySynchroList {
+            list: self.list.clone(),
+        }
+    }
+
+    pub fn new() -> Self {
+        Self {
+            list: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
 /// A Server that handle RPC connections from client applications
 pub struct Server {
     codec_builder: Builder,
     rpc_listener: Listener,
-    synchro_list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
+    synchro_list: SynchroList,
     daemon: BrumeDaemon,
     from_daemon: Arc<Mutex<UnboundedReceiver<(SynchroId, AnySynchro)>>>,
 }
@@ -56,12 +100,14 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         let codec_builder = LengthDelimitedCodec::builder();
         let (to_server, from_daemon) = unbounded_channel();
 
-        let daemon = BrumeDaemon::new(to_server);
+        let synchro_list = SynchroList::new();
+
+        let daemon = BrumeDaemon::new(to_server, synchro_list.as_read_only());
 
         Ok(Self {
             codec_builder,
             rpc_listener: listener,
-            synchro_list: Arc::new(RwLock::new(HashMap::new())),
+            synchro_list,
             daemon,
             from_daemon: Arc::new(Mutex::new(from_daemon)),
         })
@@ -93,7 +139,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
     }
 
     /// The list of the synchronized fs
-    pub fn synchro_list(&self) -> Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>> {
+    pub fn synchro_list(&self) -> SynchroList {
         self.synchro_list.clone()
     }
 
