@@ -32,15 +32,17 @@ impl SynchroId {
     }
 }
 
-/// The information needed to create a FS that can be synchronized, remote or local
+/// The information needed to create a FS that can be synchronized.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnyFsCreationInfo {
     LocalDir(<LocalDir as ConcreteFS>::CreationInfo),
     Nextcloud(<NextcloudFs as ConcreteFS>::CreationInfo),
 }
 
-/// The information needed to describe a FS that can be synchronized, remote or local
-#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// The information needed to describe a FS that can be synchronized.
+///
+/// This is used for display and to avoid duplicate synchros.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AnyFsDescription {
     LocalDir(<LocalDir as ConcreteFS>::Description),
     Nextcloud(<NextcloudFs as ConcreteFS>::Description),
@@ -55,8 +57,8 @@ impl Display for AnyFsDescription {
     }
 }
 
-impl From<&AnyFsCreationInfo> for AnyFsDescription {
-    fn from(value: &AnyFsCreationInfo) -> Self {
+impl From<AnyFsCreationInfo> for AnyFsDescription {
+    fn from(value: AnyFsCreationInfo) -> Self {
         match value {
             AnyFsCreationInfo::LocalDir(dir) => Self::LocalDir(dir.into()),
             AnyFsCreationInfo::Nextcloud(nextcloud) => Self::Nextcloud(nextcloud.into()),
@@ -67,8 +69,6 @@ impl From<&AnyFsCreationInfo> for AnyFsDescription {
 #[tarpc::service]
 pub trait BrumeService {
     /// Create a new synchronization between a "remote" and a "local" fs
-    async fn new_synchro(
-        local: AnyFsCreationInfo,
-        remote: AnyFsCreationInfo,
-    ) -> Result<SynchroId, String>;
+    async fn new_synchro(local: AnyFsCreationInfo, remote: AnyFsCreationInfo)
+        -> Result<(), String>;
 }

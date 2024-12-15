@@ -6,6 +6,7 @@ pub mod nextcloud;
 use std::error::Error;
 use std::fmt::{Debug, Display};
 use std::future::Future;
+use std::hash::Hash;
 use std::io::{self, ErrorKind};
 
 use bytes::Bytes;
@@ -63,7 +64,9 @@ pub trait ConcreteFS:
     type CreationInfo: Debug + Clone + Serialize + for<'a> Deserialize<'a>;
     /// A unique description of a particular filesystem instance
     type Description: Display
-        + for<'a> From<&'a Self::CreationInfo>
+        + From<Self::CreationInfo>
+        + Clone
+        + Hash
         + PartialEq
         + Debug
         + Serialize
