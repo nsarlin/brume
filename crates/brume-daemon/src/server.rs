@@ -1,8 +1,8 @@
 //! Handle connections to the daemon
 
-use std::{collections::HashMap, future::Future, io, sync::Arc};
+use std::{future::Future, io, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use futures::StreamExt;
 use interprocess::local_socket::{
@@ -17,65 +17,22 @@ use tarpc::{
 };
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver},
-    Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Mutex,
 };
 
 use crate::{
-    daemon::{AnySynchro, BrumeDaemon},
-    protocol::{BrumeService, SynchroId, BRUME_SOCK_NAME},
+    daemon::BrumeDaemon,
+    protocol::{AnyFsCreationInfo, BrumeService, BRUME_SOCK_NAME},
+    synchro_list::ReadWriteSynchroList,
 };
-
-#[derive(Clone)]
-pub struct ReadOnlySynchroList {
-    list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
-}
-
-impl ReadOnlySynchroList {
-    pub async fn read(&self) -> RwLockReadGuard<HashMap<SynchroId, Mutex<AnySynchro>>> {
-        self.list.read().await
-    }
-}
-
-#[derive(Clone)]
-pub struct SynchroList {
-    list: Arc<RwLock<HashMap<SynchroId, Mutex<AnySynchro>>>>,
-}
-
-impl Default for SynchroList {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SynchroList {
-    pub async fn read(&self) -> RwLockReadGuard<HashMap<SynchroId, Mutex<AnySynchro>>> {
-        self.list.read().await
-    }
-
-    pub async fn write(&self) -> RwLockWriteGuard<HashMap<SynchroId, Mutex<AnySynchro>>> {
-        self.list.write().await
-    }
-
-    pub fn as_read_only(&self) -> ReadOnlySynchroList {
-        ReadOnlySynchroList {
-            list: self.list.clone(),
-        }
-    }
-
-    pub fn new() -> Self {
-        Self {
-            list: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-}
 
 /// A Server that handle RPC connections from client applications
 pub struct Server {
     codec_builder: Builder,
     rpc_listener: Listener,
-    synchro_list: SynchroList,
+    synchro_list: ReadWriteSynchroList,
     daemon: BrumeDaemon,
-    from_daemon: Arc<Mutex<UnboundedReceiver<(SynchroId, AnySynchro)>>>,
+    from_daemon: Arc<Mutex<UnboundedReceiver<(AnyFsCreationInfo, AnyFsCreationInfo)>>>,
 }
 
 impl Server {
@@ -100,7 +57,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         let codec_builder = LengthDelimitedCodec::builder();
         let (to_server, from_daemon) = unbounded_channel();
 
-        let synchro_list = SynchroList::new();
+        let synchro_list = ReadWriteSynchroList::new();
 
         let daemon = BrumeDaemon::new(to_server, synchro_list.as_read_only());
 
@@ -139,7 +96,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
     }
 
     /// The list of the synchronized fs
-    pub fn synchro_list(&self) -> SynchroList {
+    pub fn synchro_list(&self) -> ReadWriteSynchroList {
         self.synchro_list.clone()
     }
 
@@ -151,10 +108,11 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
 
         {
-            let mut list = self.synchro_list.write().await;
-            for (id, synchro) in new_synchros {
-                let synchro = Mutex::new(synchro);
-                list.insert(id, synchro);
+            for (local, remote) in new_synchros {
+                if let Err(err) = self.synchro_list.insert(local, remote).await {
+                    let wrapped_err = anyhow!(err);
+                    error!("Failed insert new synchro: {wrapped_err:?}")
+                }
             }
         }
     }

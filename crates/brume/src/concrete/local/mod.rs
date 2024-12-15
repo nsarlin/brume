@@ -275,7 +275,7 @@ impl<'a> From<&'a LocalSyncInfo> for () {
 }
 
 /// Uniquely identify a path on the local filesystem
-#[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LocalDirDescription(PathBuf);
 
 impl Display for LocalDirDescription {
@@ -284,9 +284,9 @@ impl Display for LocalDirDescription {
     }
 }
 
-impl From<&LocalDirCreationInfo> for LocalDirDescription {
-    fn from(value: &LocalDirCreationInfo) -> Self {
-        Self(value.0.clone())
+impl From<LocalDirCreationInfo> for LocalDirDescription {
+    fn from(value: LocalDirCreationInfo) -> Self {
+        Self(value.0)
     }
 }
 

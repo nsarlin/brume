@@ -4,10 +4,7 @@ use anyhow::{anyhow, Result};
 
 use brume_daemon::server::Server as BrumeServer;
 
-use brume::synchro::Synchronizable;
-
 use env_logger::Builder;
-use futures::future::join_all;
 use log::{error, info, LevelFilter};
 use tokio::time;
 
@@ -33,14 +30,7 @@ async fn main() -> Result<()> {
         info!("Starting full sync for all filesystems");
         let synchro_list = server.synchro_list();
 
-        let results = {
-            let synchro = synchro_list.read().await;
-            let synchro_fut = synchro
-                .values()
-                .map(|sync| async { sync.lock().await.full_sync().await });
-
-            join_all(synchro_fut).await
-        };
+        let results = synchro_list.sync_all().await;
 
         for res in results {
             if let Err(err) = res {

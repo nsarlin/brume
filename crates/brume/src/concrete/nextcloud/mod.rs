@@ -203,7 +203,7 @@ impl<'a> From<&'a NextcloudSyncInfo> for () {
 }
 
 /// Description of a connection to a nextcloud instance
-#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Hash, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct NextcloudFsDescription {
     server_url: String,
     name: String,
@@ -233,11 +233,11 @@ impl NextcloudFsCreationInfo {
     }
 }
 
-impl From<&NextcloudFsCreationInfo> for NextcloudFsDescription {
-    fn from(value: &NextcloudFsCreationInfo) -> Self {
+impl From<NextcloudFsCreationInfo> for NextcloudFsDescription {
+    fn from(value: NextcloudFsCreationInfo) -> Self {
         Self {
-            server_url: value.server_url.to_owned(),
-            name: value.login.to_owned(),
+            server_url: value.server_url,
+            name: value.login,
         }
     }
 }

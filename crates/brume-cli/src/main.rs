@@ -41,16 +41,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::New { local, remote } => {
-            let local_desc = AnyFsDescription::from(&local);
-            let remote_desc = AnyFsDescription::from(&remote);
+            let local_desc = AnyFsDescription::from(local.clone());
+            let remote_desc = AnyFsDescription::from(remote.clone());
+
             println!("Creating synchro between {local_desc} and {remote_desc}");
-            let res = connect_to_daemon()
+            connect_to_daemon()
                 .await
                 .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?
                 .new_synchro(context::current(), local, remote)
                 .await??;
 
-            println!("Done: {}", res.id());
+            println!("Done");
         }
     }
 
@@ -81,8 +82,6 @@ fn parse_fs_argument(arg: &str) -> Result<AnyFsCreationInfo, String> {
             &path,
         )))
     } else {
-        Err(format!(
-            "{arg} is neither a valid path on your filesystem nor an url"
-        ))
+        Err("<FILESYSTEM> should be a valid path on your filesystem or an url".to_string())
     }
 }

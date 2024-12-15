@@ -1,7 +1,5 @@
 //! Link two [`FileSystem`] for bidirectional synchronization
 
-use std::future::Future;
-
 use futures::TryFutureExt;
 use tokio::try_join;
 
@@ -18,13 +16,29 @@ use crate::{
 /// Since synchronization is bidirectional, there is almost no difference between how the `local`
 /// and `remote` filesystems are handled. The only difference is that conflict files will only be
 /// created on the local side.
-pub struct Synchro<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> {
-    local: FileSystem<LocalConcrete>,
-    remote: FileSystem<RemoteConcrete>,
+pub struct Synchro<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> {
+    local: &'local mut FileSystem<LocalConcrete>,
+    remote: &'remote mut FileSystem<RemoteConcrete>,
 }
 
-/// Trait for a pair of Filesystems that can be synchronized
-pub trait Synchronizable {
+impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
+    Synchro<'local, 'remote, LocalConcrete, RemoteConcrete>
+{
+    pub fn new(
+        local: &'local mut FileSystem<LocalConcrete>,
+        remote: &'remote mut FileSystem<RemoteConcrete>,
+    ) -> Self {
+        Self { local, remote }
+    }
+
+    pub fn local(&self) -> &FileSystem<LocalConcrete> {
+        self.local
+    }
+
+    pub fn remote(&self) -> &FileSystem<RemoteConcrete> {
+        self.remote
+    }
+
     /// Fully synchronize both filesystems.
     ///
     /// This is done in three steps:
@@ -36,22 +50,22 @@ pub trait Synchronizable {
     ///   accordingly.
     ///
     /// See [`crate::update`] for more information about the update process.
-    fn full_sync(&mut self) -> impl Future<Output = Result<(), Error>>;
-}
+    pub async fn full_sync(&mut self) -> Result<(), Error> {
+        let (local_diff, remote_diff) = self.update_vfs().await?;
+        let reconciled = self.reconcile(local_diff, remote_diff).await?;
 
-impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcrete, RemoteConcrete> {
-    pub fn new(local: LocalConcrete, remote: RemoteConcrete) -> Self {
-        let local = FileSystem::new(local);
-        let remote = FileSystem::new(remote);
-        Self { local, remote }
-    }
+        let (local_applied, remote_applied) = self.apply_updates_list_concrete(reconciled).await?;
 
-    pub fn local(&self) -> &FileSystem<LocalConcrete> {
-        &self.local
-    }
+        self.local
+            .vfs_mut()
+            .apply_updates_list(local_applied)
+            .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))?;
+        self.remote
+            .vfs_mut()
+            .apply_updates_list(remote_applied)
+            .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
 
-    pub fn remote(&self) -> &FileSystem<RemoteConcrete> {
-        &self.remote
+        Ok(())
     }
 
     /// Reconcile updates lists from both filesystems by removing duplicates and detecting
@@ -92,7 +106,7 @@ impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcret
         Error,
     > {
         self.local
-            .apply_updates_list_concrete(&self.remote, updates)
+            .apply_updates_list_concrete(self.remote, updates)
             .await
             .map_err(|(e, name)| Error::concrete_application(name, e))
     }
@@ -111,28 +125,6 @@ impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchro<LocalConcret
                 .update_vfs()
                 .map_err(|e| Error::vfs_reload(RemoteConcrete::TYPE_NAME, e))
         )
-    }
-}
-
-impl<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> Synchronizable
-    for Synchro<LocalConcrete, RemoteConcrete>
-{
-    async fn full_sync(&mut self) -> Result<(), Error> {
-        let (local_diff, remote_diff) = self.update_vfs().await?;
-        let reconciled = self.reconcile(local_diff, remote_diff).await?;
-
-        let (local_applied, remote_applied) = self.apply_updates_list_concrete(reconciled).await?;
-
-        self.local
-            .vfs_mut()
-            .apply_updates_list(local_applied)
-            .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))?;
-        self.remote
-            .vfs_mut()
-            .apply_updates_list(remote_applied)
-            .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
-
-        Ok(())
     }
 }
 
@@ -159,7 +151,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_fs: ConcreteTestNode = local_base.clone().into();
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -169,9 +161,9 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let remote_fs: ConcreteTestNode = remote_base.into();
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base));
 
-        let mut synchro = Synchro::new(local_fs, remote_fs);
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         synchro.update_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
@@ -198,7 +190,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_fs: ConcreteTestNode = local_base.clone().into();
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -209,9 +201,9 @@ mod test {
             ],
         );
 
-        let remote_fs: ConcreteTestNode = remote_base.into();
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
 
-        let mut synchro = Synchro::new(local_fs, remote_fs);
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         synchro.update_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
@@ -251,7 +243,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_fs: ConcreteTestNode = local_base.clone().into();
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -264,9 +256,9 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let remote_fs: ConcreteTestNode = remote_base.into();
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
 
-        let mut synchro = Synchro::new(local_fs, remote_fs);
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         synchro.update_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
@@ -300,7 +292,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_fs: ConcreteTestNode = local_base.clone().into();
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -313,9 +305,9 @@ mod test {
                 D("e", vec![]),
             ],
         );
-        let remote_fs: ConcreteTestNode = remote_base.into();
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
 
-        let mut synchro = Synchro::new(local_fs, remote_fs);
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         synchro.update_vfs().await.unwrap();
 
         let local_diff =
@@ -341,7 +333,7 @@ mod test {
     #[tokio::test]
     async fn test_full_sync() {
         let local_base = D("", vec![]);
-        let local_fs: ConcreteTestNode = local_base.clone().into();
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -351,9 +343,9 @@ mod test {
             ],
         );
 
-        let remote_fs: ConcreteTestNode = remote_base.into();
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
 
-        let mut synchro = Synchro::new(local_fs, remote_fs);
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
         synchro.full_sync().await.unwrap();
 
