@@ -1,4 +1,4 @@
-use crate::concrete::ConcreteFsError;
+use crate::update::FailedUpdateApplication;
 
 use super::NodeState;
 
@@ -19,7 +19,7 @@ impl<SyncInfo> FileMeta<SyncInfo> {
         }
     }
 
-    pub fn new_error(name: &str, size: u64, error: ConcreteFsError) -> Self {
+    pub fn new_error(name: &str, size: u64, error: FailedUpdateApplication) -> Self {
         Self {
             name: name.to_string(),
             size,

@@ -4,7 +4,7 @@ use futures::TryFutureExt;
 use tokio::try_join;
 
 use crate::{
-    concrete::ConcreteFS,
+    concrete::{ConcreteFS, ConcreteUpdateApplicationError},
     filesystem::FileSystem,
     sorted_vec::SortedVec,
     update::{AppliedUpdate, ReconciledUpdate, VfsUpdateList},
@@ -52,9 +52,13 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
     /// See [`crate::update`] for more information about the update process.
     pub async fn full_sync(&mut self) -> Result<(), Error> {
         let (local_diff, remote_diff) = self.update_vfs().await?;
+
         let reconciled = self.reconcile(local_diff, remote_diff).await?;
 
-        let (local_applied, remote_applied) = self.apply_updates_list_concrete(reconciled).await?;
+        let (local_applied, remote_applied) = self
+            .apply_updates_list_concrete(reconciled)
+            .await
+            .map_err(|(e, name)| Error::concrete_application(name, e))?;
 
         self.local
             .vfs_mut()
@@ -103,12 +107,11 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
             Vec<AppliedUpdate<LocalConcrete::SyncInfo>>,
             Vec<AppliedUpdate<RemoteConcrete::SyncInfo>>,
         ),
-        Error,
+        (ConcreteUpdateApplicationError, &'static str),
     > {
         self.local
             .apply_updates_list_concrete(self.remote, updates)
             .await
-            .map_err(|(e, name)| Error::concrete_application(name, e))
     }
 
     /// Update both [`Vfs`] by querying and parsing their respective concrete FS.
@@ -134,10 +137,10 @@ mod test {
     use crate::{
         test_utils::{
             ConcreteTestNode,
-            TestNode::{D, FF},
+            TestNode::{D, FE, FF},
         },
         update::VfsNodeUpdate,
-        vfs::VirtualPathBuf,
+        vfs::{Vfs, VirtualPathBuf},
     };
 
     /// Check that duplicate diffs are correctly removed
@@ -282,6 +285,8 @@ mod test {
         assert_eq!(reconciled, reconciled_ref);
     }
 
+    /// Test reconciliation when directories with the same name but different content have been
+    /// created on both sides
     #[tokio::test]
     async fn test_reconciliation_created_dir() {
         let local_base = D(
@@ -349,9 +354,288 @@ mod test {
 
         synchro.full_sync().await.unwrap();
 
-        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
-
-        // TODO: add tests with conflicts
-        // TODO: add tests where fs are modified
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(synchro.remote.vfs())
+            .unwrap()
+            .is_empty());
     }
+
+    // TODO: add tests with conflicts
+    // TODO: add tests where fs are modified
+
+    // Test synchro with from scratch with a file where the concrete FS return an error
+    #[tokio::test]
+    async fn test_full_sync_errors() {
+        let local_base = D("", vec![]);
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FE("f2.pdf", "error")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
+
+        // Check 2 sync with an Io error on a file
+        synchro.full_sync().await.unwrap();
+        synchro.full_sync().await.unwrap();
+
+        // Everything should have been transfered except the file in error
+        let expected_local = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(&Vfs::new(expected_local.into_node()))
+            .unwrap()
+            .is_empty());
+
+        // fix the error
+        let remote_fixed = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .remote
+            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+
+        synchro.full_sync().await.unwrap();
+
+        // Both filesystems should be perfectly in sync
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(synchro.remote.vfs())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Test synchro with an error on a file that is only modified
+    #[tokio::test]
+    async fn test_full_sync_errors_file_modified() {
+        let local_base = D("", vec![]);
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
+        // First do a normal sync
+        synchro.full_sync().await.unwrap();
+
+        // Then put the file in error.
+        // The next `update_vfs` will consider the node as "changed" because by default error test
+        // nodes are converted to a vfs node with hash value 0
+        let remote_error = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FE("f2.pdf", "error")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+        synchro
+            .remote
+            .set_concrete(ConcreteTestNode::from(remote_error.clone()));
+
+        synchro.full_sync().await.unwrap();
+
+        // Everything should have been transfered except the file in error
+        let expected_local = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(&Vfs::new(expected_local.into_node()))
+            .unwrap()
+            .is_empty());
+
+        // Then fix the error
+        let remote_fixed = D(
+            "",
+            vec![
+                D(
+                    "Doc",
+                    vec![FF("f1.md", b"hello"), FF("f2.pdf", b"new world")],
+                ),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .remote
+            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+
+        synchro.full_sync().await.unwrap();
+
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(synchro.remote.vfs())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// test with a created file in error that is then removed
+    #[tokio::test]
+    async fn test_full_sync_errors_then_removed() {
+        // Test with an error during file creation
+        let local_base = D("", vec![]);
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FE("f2.pdf", "error")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
+
+        // sync with an Io error on a file
+        synchro.full_sync().await.unwrap();
+
+        // Everything should have been transfered except the file in error
+        let expected_local = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        assert!(synchro
+            .local
+            .vfs()
+            .structural_eq(&Vfs::new(expected_local.into_node())));
+
+        // Remove the file
+        let remote_fixed = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .remote
+            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
+
+        synchro.full_sync().await.unwrap();
+
+        // Both filesystems should be perfectly in sync
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+    }
+
+    /// test with a modified file in error that is then removed
+    #[tokio::test]
+    async fn test_full_sync_errors_modified_then_removed() {
+        let local_base = D("", vec![]);
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
+        // First do a normal sync
+        synchro.full_sync().await.unwrap();
+
+        // Then put the file in error.
+        // The next `update_vfs` will consider the node as "changed" because by default error test
+        // nodes are converted to a vfs node with hash value 0
+        let remote_error = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FE("f2.pdf", "error")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+        synchro
+            .remote
+            .set_concrete(ConcreteTestNode::from(remote_error.clone()));
+
+        synchro.full_sync().await.unwrap();
+
+        // Everything should have been transfered except the file in error
+        let expected_local = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(&Vfs::new(expected_local.into_node()))
+            .unwrap()
+            .is_empty());
+
+        // Now remove the file in error
+        let remote_fixed = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .remote
+            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+
+        synchro.full_sync().await.unwrap();
+
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(synchro.remote.vfs())
+            .unwrap()
+            .is_empty());
+    }
+
+    // TODO: test file in error then modified on the other side
 }

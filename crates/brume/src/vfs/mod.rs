@@ -119,6 +119,21 @@ impl<SyncInfo> Vfs<SyncInfo> {
                 .as_dir_mut()?
                 .delete_file(&path)
                 .map_err(|e| e.into()),
+            AppliedUpdate::FailedApplication(failure) => {
+                let node = self
+                    .root_mut()
+                    .find_node_mut(failure.path())
+                    .ok_or_else(|| {
+                        VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(
+                            failure.path().to_owned(),
+                        ))
+                    })?;
+
+                let state = NodeState::Error(failure);
+                node.set_state(state);
+
+                Ok(())
+            }
         }
     }
 }

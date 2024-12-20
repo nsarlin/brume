@@ -28,8 +28,6 @@ pub struct ConcreteFsError(Arc<dyn std::error::Error + Send + Sync>);
 /// Error encountered while applying an update to a ConcreteFS
 #[derive(Error, Debug)]
 pub enum ConcreteUpdateApplicationError {
-    #[error("error from the concrete fs during upgrade application")]
-    ConcreteFsError(#[from] ConcreteFsError),
     #[error("invalid path provided for update")]
     InvalidPath(#[from] InvalidPathError),
     #[error("cannot apply an update to the root dir itself")]
@@ -52,7 +50,7 @@ pub trait ConcreteFS:
     Named + Sized + TryFrom<Self::CreationInfo, Error = <Self as ConcreteFS>::IoError>
 {
     /// Type used to detect updates on nodes of this filesystem. See [`IsModified`].
-    type SyncInfo: IsModified + Named + Clone;
+    type SyncInfo: IsModified + Debug + Named + Clone;
     /// Errors returned by this FileSystem type
     type IoError: Error + Send + Sync + 'static + Into<ConcreteFsError>;
     /// Info needed to create a new filesystem of this type (url, login,...)
