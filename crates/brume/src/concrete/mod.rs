@@ -24,12 +24,6 @@ use crate::vfs::{InvalidPathError, Vfs, VirtualPath};
 #[error(transparent)]
 pub struct ConcreteFsError(Box<dyn std::error::Error + Send + Sync>);
 
-impl ConcreteFsError {
-    pub fn new<E: std::error::Error + Send + Sync + Sized + 'static>(err: E) -> Self {
-        Self(Box::new(err))
-    }
-}
-
 /// Error encountered while applying an update to a ConcreteFS
 #[derive(Error, Debug)]
 pub enum ConcreteUpdateApplicationError {
