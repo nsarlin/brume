@@ -1,9 +1,13 @@
+use crate::concrete::ConcreteFsError;
+
+use super::NodeState;
+
 /// Metadata of a File node
 #[derive(Debug, Clone)]
 pub struct FileMeta<SyncInfo> {
     name: String,
     size: u64,
-    sync: Option<SyncInfo>,
+    state: NodeState<SyncInfo>,
 }
 
 impl<SyncInfo> FileMeta<SyncInfo> {
@@ -11,7 +15,15 @@ impl<SyncInfo> FileMeta<SyncInfo> {
         Self {
             name: name.to_string(),
             size,
-            sync: Some(sync),
+            state: NodeState::Ok(sync),
+        }
+    }
+
+    pub fn new_error(name: &str, size: u64, error: ConcreteFsError) -> Self {
+        Self {
+            name: name.to_string(),
+            size,
+            state: NodeState::Error(error),
         }
     }
 
@@ -27,11 +39,11 @@ impl<SyncInfo> FileMeta<SyncInfo> {
         self.size = size;
     }
 
-    pub fn sync_info(&self) -> &Option<SyncInfo> {
-        &self.sync
+    pub fn state(&self) -> &NodeState<SyncInfo> {
+        &self.state
     }
 
-    pub fn sync_info_mut(&mut self) -> &mut Option<SyncInfo> {
-        &mut self.sync
+    pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
+        &mut self.state
     }
 }

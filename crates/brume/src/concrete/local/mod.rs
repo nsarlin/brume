@@ -7,6 +7,7 @@ use std::{
     io::{self, ErrorKind},
     path::{Path, PathBuf},
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -56,7 +57,7 @@ impl LocalDirError {
 
 impl From<LocalDirError> for ConcreteFsError {
     fn from(value: LocalDirError) -> Self {
-        Self(Box::new(value))
+        Self(Arc::new(value))
     }
 }
 
@@ -231,7 +232,7 @@ impl ConcreteFS for LocalDir {
 
 impl From<io::Error> for ConcreteFsError {
     fn from(value: io::Error) -> Self {
-        Self(Box::new(value))
+        Self(Arc::new(value))
     }
 }
 

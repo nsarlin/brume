@@ -8,6 +8,7 @@ use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::hash::Hash;
 use std::io::{self, ErrorKind};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{Stream, TryStream, TryStreamExt};
@@ -20,9 +21,9 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::update::IsModified;
 use crate::vfs::{InvalidPathError, Vfs, VirtualPath};
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 #[error(transparent)]
-pub struct ConcreteFsError(Box<dyn std::error::Error + Send + Sync>);
+pub struct ConcreteFsError(Arc<dyn std::error::Error + Send + Sync>);
 
 /// Error encountered while applying an update to a ConcreteFS
 #[derive(Error, Debug)]
@@ -73,7 +74,7 @@ pub trait ConcreteFS:
     fn description(&self) -> Self::Description;
 
     /// Load a virtual FS from the concrete one, by parsing its structure
-    fn load_virtual(&self) -> impl Future<Output = Result<Vfs<Self::SyncInfo>, Self::Error>>;
+    fn load_virtual(&self) -> impl Future<Output = Result<Vfs<Self::SyncInfo>, Self::IoError>>;
 
     /// Open and read a file on the concrete filesystem
     fn read_file(
@@ -82,7 +83,7 @@ pub trait ConcreteFS:
     ) -> impl Future<
         Output = Result<
             impl Stream<Item = Result<Bytes, Self::Error>> + Send + Unpin + 'static,
-            Self::Error,
+            Self::IoError,
         >,
     >;
     // TODO: write and write_new for file modif or create
@@ -91,22 +92,22 @@ pub trait ConcreteFS:
         &self,
         path: &VirtualPath,
         data: Data,
-    ) -> impl Future<Output = Result<Self::SyncInfo, Self::Error>>
+    ) -> impl Future<Output = Result<Self::SyncInfo, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>;
 
     /// Remove a file on the concrete filesystem
-    fn rm(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::Error>>;
+    fn rm(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::IoError>>;
 
     /// Create a directory on the concrete filesystem
     fn mkdir(
         &self,
         path: &VirtualPath,
-    ) -> impl Future<Output = Result<Self::SyncInfo, Self::Error>>;
+    ) -> impl Future<Output = Result<Self::SyncInfo, Self::IoError>>;
 
     /// Remove a directory on the concrete filesystem
-    fn rmdir(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::Error>>;
+    fn rmdir(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::IoError>>;
 }
 
 impl<T: ConcreteFS> Named for T {
