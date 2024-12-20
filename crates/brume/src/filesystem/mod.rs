@@ -14,8 +14,8 @@ use crate::{
     concrete::{ConcreteFS, ConcreteFsError, ConcreteUpdateApplicationError},
     sorted_vec::SortedVec,
     update::{
-        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, ReconciledUpdate,
-        UpdateTarget, VfsNodeUpdate, VfsUpdateList,
+        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, FailedUpdateApplication,
+        ReconciledUpdate, UpdateTarget, VfsNodeUpdate, VfsUpdateList,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
     Error,
@@ -32,11 +32,50 @@ pub enum VfsReloadError {
 /// Main representation of any kind of filesystem, remote or local.
 ///
 /// It is composed of a generic Concrete FS backend that used for file operations, and a Virtual FS
-/// that is its in-memory representation, using a tree-structure.#[derive(Clone, Debug)]
+/// that is its in-memory representation, using a tree-structure.
 #[derive(Debug)]
 pub struct FileSystem<Concrete: ConcreteFS> {
     concrete: Concrete,
     vfs: Vfs<Concrete::SyncInfo>,
+}
+
+/// Returned by [`FileSystem::clone_dir_concrete`]
+///
+/// This type holds the list of nodes that were successfully cloned and the one that resulted in an
+/// error.
+pub struct ConcreteDirCloneResult<SyncInfo> {
+    success: Option<DirTree<SyncInfo>>,
+    failures: Vec<FailedUpdateApplication>,
+}
+
+impl<SyncInfo> ConcreteDirCloneResult<SyncInfo> {
+    /// Create a new Clone result for a mkdir that failed
+    fn new_mkdir_failed<E: Into<ConcreteFsError>>(path: &VirtualPath, error: E) -> Self {
+        Self {
+            success: None,
+            failures: vec![FailedUpdateApplication::new(
+                VfsNodeUpdate::DirCreated(path.to_owned()),
+                error.into(),
+            )],
+        }
+    }
+
+    fn new(success: DirTree<SyncInfo>, failures: Vec<FailedUpdateApplication>) -> Self {
+        Self {
+            success: Some(success),
+            failures,
+        }
+    }
+
+    /// Returns the successfully cloned nodes, if any, sorted in a [`DirTree`]
+    pub fn take_success(&mut self) -> Option<DirTree<SyncInfo>> {
+        self.success.take()
+    }
+
+    /// Returned the nodes that failed to be cloned
+    pub fn take_failures(&mut self) -> Vec<FailedUpdateApplication> {
+        std::mem::take(&mut self.failures)
+    }
 }
 
 impl<Concrete: ConcreteFS> FileSystem<Concrete> {
@@ -45,6 +84,11 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
             concrete,
             vfs: Vfs::empty(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_concrete(&mut self, concrete: Concrete) {
+        self.concrete = concrete
     }
 
     /// Query the concrete FS to update the in memory virtual representation
@@ -127,19 +171,48 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         let self_futures = try_join_all(
             self_updates
                 .into_iter()
-                .map(|update| self.apply_update_concrete(other_fs, update.into())),
+                .map(|update| self.apply_update_concrete(other_fs, update.clone().into())),
         );
 
         let other_futures = try_join_all(
             other_updates
                 .into_iter()
-                .map(|update| other_fs.apply_update_concrete(self, update.into())),
+                .map(|update| other_fs.apply_update_concrete(self, update.clone().into())),
         );
 
-        try_join!(
+        let (self_applied, other_applied) = try_join!(
             self_futures.map_err(|e| (e, Concrete::TYPE_NAME)),
             other_futures.map_err(|e| (e, OtherConcrete::TYPE_NAME))
-        )
+        )?;
+
+        // Errors are applied on the source Vfs, to make them trigger a resync, so we need to move
+        // them from one to the other
+        let mut self_res = Vec::new();
+        let mut self_failed = Vec::new();
+        for applied in self_applied.into_iter().flatten() {
+            match applied {
+                AppliedUpdate::FailedApplication(failed_update) => {
+                    self_failed.push(AppliedUpdate::FailedApplication(failed_update))
+                }
+                _ => self_res.push(applied),
+            }
+        }
+
+        let mut other_res = Vec::new();
+        let mut other_failed = Vec::new();
+        for applied in other_applied.into_iter().flatten() {
+            match applied {
+                AppliedUpdate::FailedApplication(failed_update) => {
+                    other_failed.push(AppliedUpdate::FailedApplication(failed_update))
+                }
+                _ => other_res.push(applied),
+            }
+        }
+
+        self_res.extend(other_failed);
+        other_res.extend(self_failed);
+
+        Ok((self_res, other_res))
     }
 
     /// Apply an update on the concrete fs.
@@ -150,17 +223,19 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         &self,
         ref_fs: &FileSystem<OtherConcrete>,
         update: VfsNodeUpdate,
-    ) -> Result<AppliedUpdate<Concrete::SyncInfo>, ConcreteUpdateApplicationError> {
+    ) -> Result<Vec<AppliedUpdate<Concrete::SyncInfo>>, ConcreteUpdateApplicationError> {
         if update.path().is_root() {
             return Err(ConcreteUpdateApplicationError::PathIsRoot);
         }
 
-        match update {
+        match &update {
             VfsNodeUpdate::DirCreated(path) => {
-                let dir = ref_fs.find_dir(&path)?;
+                let dir = ref_fs.find_dir(path)?;
 
-                self.clone_dir_concrete(dir, &path)
-                    .await
+                let mut res = self.clone_dir_concrete(dir, path).await;
+
+                let mut updates: Vec<_> = res
+                    .take_success()
                     .map(|created_dir| {
                         AppliedUpdate::DirCreated(AppliedDirCreation::new(
                             // The update path is not root so we can unwrap
@@ -168,27 +243,62 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
                             created_dir,
                         ))
                     })
+                    .into_iter()
+                    .collect();
+
+                updates.extend(
+                    res.take_failures()
+                        .into_iter()
+                        .map(AppliedUpdate::FailedApplication),
+                );
+                Ok(updates)
             }
-            VfsNodeUpdate::DirRemoved(path) => {
-                self.concrete.rmdir(&path).await.map_err(|e| e.into())?;
-                Ok(AppliedUpdate::DirRemoved(path.to_owned()))
-            }
+            VfsNodeUpdate::DirRemoved(path) => self
+                .concrete
+                .rmdir(path)
+                .await
+                .map(|_| AppliedUpdate::DirRemoved(path.to_owned()))
+                .or_else(|e| {
+                    Ok(AppliedUpdate::FailedApplication(
+                        FailedUpdateApplication::new(update, e.into()),
+                    ))
+                })
+                .map(|update| vec![update]),
             VfsNodeUpdate::FileCreated(path) => self
-                .clone_file_concrete(&ref_fs.concrete, &path)
+                .clone_file_concrete(&ref_fs.concrete, path)
                 .await
                 .map(|(sync_info, size)| {
-                    AppliedUpdate::FileCreated(AppliedFileUpdate::new(&path, size, sync_info))
-                }),
+                    AppliedUpdate::FileCreated(AppliedFileUpdate::new(path, size, sync_info))
+                })
+                .or_else(|e| {
+                    Ok(AppliedUpdate::FailedApplication(
+                        FailedUpdateApplication::new(update, e),
+                    ))
+                })
+                .map(|update| vec![update]),
             VfsNodeUpdate::FileModified(path) => self
-                .clone_file_concrete(&ref_fs.concrete, &path)
+                .clone_file_concrete(&ref_fs.concrete, path)
                 .await
                 .map(|(sync_info, size)| {
-                    AppliedUpdate::FileModified(AppliedFileUpdate::new(&path, size, sync_info))
-                }),
-            VfsNodeUpdate::FileRemoved(path) => {
-                self.concrete.rm(&path).await.map_err(|e| e.into())?;
-                Ok(AppliedUpdate::FileRemoved(path.to_owned()))
-            }
+                    AppliedUpdate::FileModified(AppliedFileUpdate::new(path, size, sync_info))
+                })
+                .or_else(|e| {
+                    Ok(AppliedUpdate::FailedApplication(
+                        FailedUpdateApplication::new(update, e),
+                    ))
+                })
+                .map(|update| vec![update]),
+            VfsNodeUpdate::FileRemoved(path) => self
+                .concrete
+                .rm(path)
+                .await
+                .map(|_| AppliedUpdate::FileRemoved(path.to_owned()))
+                .or_else(|e| {
+                    Ok(AppliedUpdate::FailedApplication(
+                        FailedUpdateApplication::new(update, e.into()),
+                    ))
+                })
+                .map(|update| vec![update]),
         }
     }
 
@@ -199,7 +309,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         &self,
         ref_concrete: &OtherConcrete,
         path: &VirtualPath,
-    ) -> Result<(Concrete::SyncInfo, u64), ConcreteUpdateApplicationError> {
+    ) -> Result<(Concrete::SyncInfo, u64), ConcreteFsError> {
         info!(
             "Cloning file {:?} from {} to {}",
             path,
@@ -235,36 +345,57 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         &self,
         ref_fs: FileSystemDir<'otherfs, OtherConcrete>,
         path: &VirtualPath,
-    ) -> Result<DirTree<Concrete::SyncInfo>, ConcreteUpdateApplicationError> {
-        let sync_info = self.concrete.mkdir(path).await.map_err(|e| {
-            error!("Failed to create dir {path:?}: {e:?}");
-            e.into()
-        })?;
+    ) -> ConcreteDirCloneResult<Concrete::SyncInfo> {
+        let sync_info = match self.concrete.mkdir(path).await {
+            Ok(dir_info) => dir_info,
+            Err(err) => {
+                error!("Failed to create dir {path:?}: {err:?}");
+                return ConcreteDirCloneResult::new_mkdir_failed(path, err);
+            }
+        };
+
         let mut dir = DirTree::new(path.name(), sync_info);
+
+        let mut errors = Vec::new();
 
         // TODO: parallelize file download
         for ref_child in ref_fs.dir.children().iter() {
             let mut child_path = path.to_owned();
             child_path.push(ref_child.name());
-            let child =
-                match ref_child {
-                    VfsNode::Dir(ref_dir) => Box::pin(self.clone_dir_concrete(
+            match ref_child {
+                VfsNode::Dir(ref_dir) => {
+                    let mut result = Box::pin(self.clone_dir_concrete(
                         FileSystemDir::new(ref_fs.concrete, ref_dir),
                         &child_path,
                     ))
-                    .await
-                    .map(VfsNode::Dir)?,
-                    VfsNode::File(_) => self
-                        .clone_file_concrete(ref_fs.concrete, &child_path)
-                        .await
-                        .map(|(sync_info, size)| FileMeta::new(child_path.name(), size, sync_info))
-                        .map(VfsNode::File)?,
-                };
+                    .await;
 
-            dir.insert_child(child);
+                    if let Some(success) = result.take_success() {
+                        dir.insert_child(VfsNode::Dir(success));
+                    }
+
+                    errors.extend(result.take_failures())
+                }
+                VfsNode::File(_) => {
+                    match self.clone_file_concrete(ref_fs.concrete, &child_path).await {
+                        Ok((sync_info, size)) => {
+                            let node =
+                                VfsNode::File(FileMeta::new(child_path.name(), size, sync_info));
+                            dir.insert_child(node);
+                        }
+                        Err(error) => {
+                            let failure = FailedUpdateApplication::new(
+                                VfsNodeUpdate::FileCreated(child_path),
+                                error,
+                            );
+                            errors.push(failure)
+                        }
+                    }
+                }
+            };
         }
 
-        Ok(dir)
+        ConcreteDirCloneResult::new(dir, errors)
     }
 }
 
@@ -331,7 +462,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(applied.path(), dir_path);
+        assert_eq!(applied.first().unwrap().path(), dir_path);
         assert_eq!(local_fs.concrete, remote_fs.concrete);
 
         let mut local_fs = TestFileSystem::new(local_base.clone().into());
@@ -355,7 +486,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(applied.path(), dir_path);
+        assert_eq!(applied.first().unwrap().path(), dir_path);
         assert_eq!(local_fs.concrete, remote_fs.concrete);
 
         let mut local_fs = TestFileSystem::new(local_base.clone().into());
@@ -386,7 +517,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(applied.path(), dir_path);
+        assert_eq!(applied.first().unwrap().path(), dir_path);
         assert_eq!(local_fs.concrete, remote_fs.concrete);
 
         let mut local_fs = TestFileSystem::new(local_base.clone().into());
@@ -410,7 +541,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(applied.path(), dir_path);
+        assert_eq!(applied.first().unwrap().path(), dir_path);
         assert_eq!(local_fs.concrete, remote_fs.concrete);
 
         let mut local_fs = TestFileSystem::new(local_base.clone().into());
@@ -434,7 +565,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(applied.path(), dir_path);
+        assert_eq!(applied.first().unwrap().path(), dir_path);
         assert_eq!(local_fs.concrete, remote_fs.concrete);
     }
 }

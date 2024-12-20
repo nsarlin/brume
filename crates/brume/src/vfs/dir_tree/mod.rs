@@ -7,9 +7,8 @@ pub use dir::*;
 pub use file::*;
 
 use crate::{
-    concrete::ConcreteFsError,
     sorted_vec::{Sortable, SortedVec},
-    update::{ModificationState, VirtualReconciledUpdate},
+    update::{FailedUpdateApplication, ModificationState, VirtualReconciledUpdate},
     Error, NameMismatchError,
 };
 
@@ -37,16 +36,12 @@ pub enum NodeState<SyncInfo> {
     NeedResync,
     /// The previous syncronization of this node returned an error, it will be re-synchronized next
     /// time
-    Error(ConcreteFsError),
+    Error(FailedUpdateApplication),
 }
 
 impl<SyncInfo> NodeState<SyncInfo> {
     pub fn is_err(&self) -> bool {
-        if let Self::Error(_) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Error(_))
     }
 }
 
@@ -82,7 +77,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// Create a new directory in the error [`state`]
     ///
     /// [`state`]: NodeState
-    pub fn new_error(name: &str, error: ConcreteFsError) -> Self {
+    pub fn new_error(name: &str, error: FailedUpdateApplication) -> Self {
         Self {
             metadata: DirMeta::new_error(name, error),
             children: SortedNodeList::new(),
@@ -109,6 +104,10 @@ impl<SyncInfo> DirTree<SyncInfo> {
 
     pub fn state(&self) -> &NodeState<SyncInfo> {
         self.metadata.state()
+    }
+
+    pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
+        self.metadata.state_mut()
     }
 
     /// Invalidate the sync info to make them trigger a ConcreteFS sync on next run
@@ -394,7 +393,9 @@ impl<SyncInfo: IsModified> DirTree<SyncInfo> {
                         &other.children,
                         |self_child| -> Result<_, DiffError> {
                             let mut res = SortedVec::new();
-                            res.insert(self_child.to_removed_diff(&dir_path));
+                            if !self_child.can_skip_removal() {
+                                res.insert(self_child.to_removed_diff(&dir_path));
+                            }
                             Ok(res)
                         },
                         |self_child, other_child| self_child.diff(other_child, &dir_path),
@@ -459,6 +460,20 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         match self {
             VfsNode::Dir(_) => false,
             VfsNode::File(_) => true,
+        }
+    }
+
+    pub fn set_state(&mut self, state: NodeState<SyncInfo>) {
+        match self {
+            VfsNode::Dir(dir_tree) => *dir_tree.state_mut() = state,
+            VfsNode::File(file_meta) => *file_meta.state_mut() = state,
+        }
+    }
+
+    pub fn state(&self) -> &NodeState<SyncInfo> {
+        match self {
+            VfsNode::Dir(dir_tree) => dir_tree.state(),
+            VfsNode::File(file_meta) => file_meta.state(),
         }
     }
 
@@ -606,6 +621,18 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         path
     }
 
+    /// Return true if a node removal can be skipped because the node creation has not been applied
+    /// on the other FS
+    pub fn can_skip_removal(&self) -> bool {
+        if let NodeState::Error(failed_update) = self.state() {
+            return matches!(
+                failed_update.update(),
+                VfsNodeUpdate::DirCreated(_) | VfsNodeUpdate::FileCreated(_)
+            );
+        }
+        false
+    }
+
     /// Create a diff where this node has been removed from the VFS
     pub fn to_removed_diff(&self, parent_path: &VirtualPath) -> VfsNodeUpdate {
         match self {
@@ -638,6 +665,13 @@ impl<SyncInfo: IsModified> VfsNode<SyncInfo> {
                 expected: other.name().to_string(),
             }
             .into());
+        }
+
+        // If the node is in error state, we retry the same update
+        if let NodeState::Error(failed_update) = self.state() {
+            return Ok(VfsUpdateList::from_vec(vec![failed_update
+                .update()
+                .clone()]));
         }
 
         match (self, other) {
@@ -1072,7 +1106,7 @@ mod test {
 
         let modified = DH(
             "",
-            10,
+            0,
             vec![
                 DH("Doc", 1, vec![FH("f1.md", 2), FH("f2.pdf", 3)]),
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
@@ -1084,7 +1118,7 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsNodeUpdate::FileModified(
+            vec![VfsNodeUpdate::FileCreated(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap()
             )]
             .into()

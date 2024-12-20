@@ -128,6 +128,7 @@ impl SynchroList {
     }
 
     fn create_and_insert_fs(&mut self, fs_info: AnyFsCreationInfo) -> Result<(), ConcreteFsError> {
+        // TODO: improve duplicates handling
         match fs_info {
             AnyFsCreationInfo::LocalDir(info) => {
                 let creation_info = info.clone().try_into()?;

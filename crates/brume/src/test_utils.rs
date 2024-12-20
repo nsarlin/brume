@@ -5,12 +5,13 @@ use futures::{stream, Stream, TryStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
     concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError, Named},
     filesystem::FileSystem,
-    update::{IsModified, ModificationState},
-    vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
+    update::{FailedUpdateApplication, IsModified, ModificationState, VfsNodeUpdate},
+    vfs::{DirTree, FileMeta, NodeState, Vfs, VfsNode, VirtualPath, VirtualPathBuf},
 };
 
 /// Can be used to easily create Vfs for tests
@@ -48,72 +49,99 @@ impl TestNode<'_> {
         }
     }
 
-    pub(crate) fn content(&self) -> Option<&[u8]> {
-        match self {
-            TestNode::FF(_, content) => Some(content),
-            TestNode::L(_, target) => {
-                if let Some(node) = target.as_ref() {
-                    node.content()
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+    pub(crate) fn into_node_recursive_diff(self) -> VfsNode<RecursiveTestSyncInfo> {
+        self.into_node_recursive_diff_rec(VirtualPath::root())
     }
 
-    pub(crate) fn into_node_recursive_diff(self) -> VfsNode<RecursiveTestSyncInfo> {
+    pub(crate) fn into_node_recursive_diff_rec(
+        self,
+        parent: &VirtualPath,
+    ) -> VfsNode<RecursiveTestSyncInfo> {
         match self {
             Self::F(name) => {
                 let sync = RecursiveTestSyncInfo::new(0);
                 VfsNode::File(FileMeta::new(name, 0, sync))
             }
             Self::FF(name, content) => {
-                let sync = RecursiveTestSyncInfo::new(0);
+                let sync = RecursiveTestSyncInfo::new(xxh3_64(content));
                 VfsNode::File(FileMeta::new(name, content.len() as u64, sync))
             }
             Self::D(name, children) => {
-                let sync = RecursiveTestSyncInfo::new(0);
-                VfsNode::Dir(DirTree::new_with_children(
-                    name,
-                    sync,
-                    children
-                        .into_iter()
-                        .map(|child| child.into_node_recursive_diff())
-                        .collect(),
-                ))
+                let mut path = parent.to_owned();
+                path.push(name);
+                let children_nodes: Vec<_> = children
+                    .into_iter()
+                    .map(|child| child.into_node_recursive_diff_rec(&path))
+                    .collect();
+                // Compute recursive hash
+                let hash = xxh3_64(
+                    &children_nodes
+                        .iter()
+                        .flat_map(|node| {
+                            match node.state() {
+                                NodeState::Ok(info) => info.hash,
+                                NodeState::NeedResync => xxh3_64(b"Resync"),
+                                NodeState::Error(failed_update) => {
+                                    xxh3_64(failed_update.error().to_string().as_bytes())
+                                }
+                            }
+                            .to_le_bytes()
+                        })
+                        .collect::<Vec<_>>(),
+                );
+
+                let sync = RecursiveTestSyncInfo::new(hash);
+                VfsNode::Dir(DirTree::new_with_children(name, sync, children_nodes))
             }
             Self::FH(name, hash) => {
                 let sync = RecursiveTestSyncInfo::new(hash);
                 VfsNode::File(FileMeta::new(name, 0, sync))
             }
             Self::DH(name, hash, children) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
                 let sync = RecursiveTestSyncInfo::new(hash);
                 VfsNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
                     children
                         .into_iter()
-                        .map(|child| child.into_node_recursive_diff())
+                        .map(|child| child.into_node_recursive_diff_rec(&path))
                         .collect(),
                 ))
             }
-            Self::L(_, target) => {
+            Self::L(name, target) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
                 if let Some(node) = target {
-                    node.clone().into_node_recursive_diff()
+                    node.clone().into_node_recursive_diff_rec(&path)
                 } else {
                     panic!("Invalid symlink")
                 }
             }
-            Self::FE(name, error) => VfsNode::File(FileMeta::new_error(
-                name,
-                0,
-                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
-            )),
-            Self::DE(name, error) => VfsNode::Dir(DirTree::new_error(
-                name,
-                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
-            )),
+            Self::FE(name, error) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
+                let failed_update = FailedUpdateApplication::new(
+                    VfsNodeUpdate::FileCreated(path),
+                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                );
+                VfsNode::File(FileMeta::new_error(name, 0, failed_update))
+            }
+            Self::DE(name, error) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
+                let failed_update = FailedUpdateApplication::new(
+                    VfsNodeUpdate::DirCreated(path),
+                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                );
+
+                VfsNode::Dir(DirTree::new_error(name, failed_update))
+            }
         }
     }
 
@@ -122,57 +150,89 @@ impl TestNode<'_> {
     }
 
     pub(crate) fn into_node_shallow_diff(self) -> VfsNode<ShallowTestSyncInfo> {
+        self.into_node_shallow_diff_rec(VirtualPath::root())
+    }
+
+    pub(crate) fn into_node_shallow_diff_rec(
+        self,
+        parent: &VirtualPath,
+    ) -> VfsNode<ShallowTestSyncInfo> {
         match self {
             Self::F(name) => {
                 let sync = ShallowTestSyncInfo::new(0);
                 VfsNode::File(FileMeta::new(name, 0, sync))
             }
             Self::FF(name, content) => {
-                let sync = ShallowTestSyncInfo::new(0);
+                let sync = ShallowTestSyncInfo::new(xxh3_64(content));
                 VfsNode::File(FileMeta::new(name, content.len() as u64, sync))
             }
             Self::D(name, children) => {
-                let sync = ShallowTestSyncInfo::new(0);
-                VfsNode::Dir(DirTree::new_with_children(
-                    name,
-                    sync,
-                    children
-                        .into_iter()
-                        .map(|child| child.into_node())
-                        .collect(),
-                ))
+                let mut path = parent.to_owned();
+                path.push(name);
+
+                let children_nodes: Vec<_> = children
+                    .into_iter()
+                    .map(|child| child.into_node_shallow_diff_rec(&path))
+                    .collect();
+
+                // Since syncinfo is not recursive, only hash the names of the children
+                let hash = xxh3_64(
+                    &children_nodes
+                        .iter()
+                        .flat_map(|node| xxh3_64(node.name().as_bytes()).to_le_bytes())
+                        .collect::<Vec<_>>(),
+                );
+                let sync = ShallowTestSyncInfo::new(hash);
+                VfsNode::Dir(DirTree::new_with_children(name, sync, children_nodes))
             }
             Self::FH(name, hash) => {
                 let sync = ShallowTestSyncInfo::new(hash);
                 VfsNode::File(FileMeta::new(name, 0, sync))
             }
             Self::DH(name, hash, children) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
                 let sync = ShallowTestSyncInfo::new(hash);
                 VfsNode::Dir(DirTree::new_with_children(
                     name,
                     sync,
                     children
                         .into_iter()
-                        .map(|child| child.into_node())
+                        .map(|child| child.into_node_shallow_diff_rec(&path))
                         .collect(),
                 ))
             }
-            Self::L(_, target) => {
+            Self::L(name, target) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
                 if let Some(node) = target {
-                    node.clone().into_node_shallow_diff()
+                    node.clone().into_node_shallow_diff_rec(&path)
                 } else {
                     panic!("Invalid symlink")
                 }
             }
-            Self::FE(name, error) => VfsNode::File(FileMeta::new_error(
-                name,
-                0,
-                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
-            )),
-            Self::DE(name, error) => VfsNode::Dir(DirTree::new_error(
-                name,
-                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
-            )),
+            Self::FE(name, error) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
+                let failed_update = FailedUpdateApplication::new(
+                    VfsNodeUpdate::FileCreated(path),
+                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                );
+                VfsNode::File(FileMeta::new_error(name, 0, failed_update))
+            }
+            Self::DE(name, error) => {
+                let mut path = parent.to_owned();
+                path.push(name);
+
+                let failed_update = FailedUpdateApplication::new(
+                    VfsNodeUpdate::DirCreated(path),
+                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                );
+                VfsNode::Dir(DirTree::new_error(name, failed_update))
+            }
         }
     }
 
@@ -186,15 +246,21 @@ impl TestNode<'_> {
                 panic!()
             }
             Self::D(name, children) => {
-                let sync = ShallowTestSyncInfo::new(0);
-                DirTree::new_with_children(
-                    name,
-                    sync,
-                    children
-                        .into_iter()
-                        .map(|child| child.into_node())
-                        .collect(),
-                )
+                let children_nodes: Vec<_> = children
+                    .into_iter()
+                    .map(|child| child.into_node())
+                    .collect();
+
+                // Since syncinfo is not recursive, only hash the names of the children
+                let hash = xxh3_64(
+                    &children_nodes
+                        .iter()
+                        .flat_map(|node| xxh3_64(node.name().as_bytes()).to_le_bytes())
+                        .collect::<Vec<_>>(),
+                );
+
+                let sync = ShallowTestSyncInfo::new(hash);
+                DirTree::new_with_children(name, sync, children_nodes)
             }
             Self::FH(_, _) => {
                 panic!()
@@ -219,69 +285,12 @@ impl TestNode<'_> {
                 }
             }
             Self::FE(_, _) => panic!(),
-            Self::DE(name, error) => DirTree::new_error(
-                name,
-                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
-            ),
-        }
-    }
-
-    fn get_node(&self, path: &VirtualPath) -> &Self {
-        if path.is_root() {
-            self
-        } else {
-            let (top_level, remainder) = path.top_level_split().unwrap();
-
-            match self {
-                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) | Self::FE(_, _) | Self::DE(_, _) => {
-                    panic!()
-                }
-                Self::D(_, children) | Self::DH(_, _, children) => {
-                    for child in children {
-                        if child.name() == top_level {
-                            if remainder.is_root() {
-                                return child;
-                            } else {
-                                return child.get_node(remainder);
-                            }
-                        }
-                    }
-                    panic!("{path:?}")
-                }
-                Self::L(_, target) => {
-                    if let Some(node) = target {
-                        node.get_node(remainder)
-                    } else {
-                        panic!("Invalid symlink")
-                    }
-                }
-            }
-        }
-    }
-
-    fn _get_node_mut(&mut self, path: &VirtualPath) -> &mut Self {
-        if path.is_root() {
-            self
-        } else {
-            let (top_level, remainder) = path.top_level_split().unwrap();
-
-            match self {
-                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) | Self::FE(_, _) | Self::DE(_, _) => {
-                    panic!()
-                }
-                Self::D(_, children) | Self::DH(_, _, children) => {
-                    for child in children {
-                        if child.name() == top_level {
-                            if remainder.is_root() {
-                                return child;
-                            } else {
-                                return child._get_node_mut(remainder);
-                            }
-                        }
-                    }
-                    panic!("{path:?}")
-                }
-                Self::L(_, _) => todo!(),
+            Self::DE(name, error) => {
+                let failed_update = FailedUpdateApplication::new(
+                    VfsNodeUpdate::FileCreated(VirtualPathBuf::root()),
+                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                );
+                DirTree::new_error(name, failed_update)
             }
         }
     }
@@ -442,8 +451,8 @@ impl<'a> From<&'a InnerConcreteTestNode> for TestNode<'a> {
                 children.iter().map(|child| child.into()).collect(),
             ),
             InnerConcreteTestNode::FF(name, content) => Self::FF(name, content),
-            InnerConcreteTestNode::FE(name, err) => Self::FE(name, err),
-            InnerConcreteTestNode::DE(name, err) => Self::DE(name, err),
+            InnerConcreteTestNode::FE(name, _) => Self::F(name),
+            InnerConcreteTestNode::DE(name, _) => Self::D(name, Vec::new()),
         }
     }
 }
@@ -456,6 +465,13 @@ impl InnerConcreteTestNode {
             | Self::FF(name, _)
             | Self::FE(name, _)
             | Self::DE(name, _) => name,
+        }
+    }
+
+    fn content(&self) -> Option<&[u8]> {
+        match self {
+            Self::FF(_, content) => Some(content),
+            _ => None,
         }
     }
 
@@ -473,7 +489,7 @@ impl InnerConcreteTestNode {
         }
     }
 
-    fn _get_node(&self, path: &VirtualPath) -> &Self {
+    fn get_node(&self, path: &VirtualPath) -> &Self {
         if path.is_root() {
             self
         } else {
@@ -486,7 +502,7 @@ impl InnerConcreteTestNode {
                             if remainder.is_root() {
                                 return child;
                             } else {
-                                return child._get_node(remainder);
+                                return child.get_node(remainder);
                             }
                         }
                     }
@@ -526,6 +542,13 @@ impl InnerConcreteTestNode {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConcreteTestNode {
     inner: RefCell<InnerConcreteTestNode>,
+    propagate_err_to_vfs: bool,
+}
+
+impl ConcreteTestNode {
+    pub(crate) fn _propagate_err_to_vfs(&mut self) {
+        self.propagate_err_to_vfs = true
+    }
 }
 
 pub(crate) type TestFileSystem = FileSystem<ConcreteTestNode>;
@@ -534,6 +557,7 @@ impl From<TestNode<'_>> for ConcreteTestNode {
     fn from(value: TestNode) -> Self {
         Self {
             inner: RefCell::new(value.into()),
+            propagate_err_to_vfs: false,
         }
     }
 }
@@ -544,7 +568,19 @@ impl TryFrom<InnerConcreteTestNode> for ConcreteTestNode {
     fn try_from(value: InnerConcreteTestNode) -> Result<Self, Self::Error> {
         Ok(Self {
             inner: RefCell::new(value),
+            propagate_err_to_vfs: false,
         })
+    }
+}
+
+impl<'a> From<&'a ConcreteTestNode> for VfsNode<ShallowTestSyncInfo> {
+    fn from(value: &'a ConcreteTestNode) -> Self {
+        let inner = value.inner.borrow();
+        if !value.propagate_err_to_vfs {
+            TestNode::from(inner.deref()).into_node()
+        } else {
+            todo!()
+        }
     }
 }
 
@@ -574,8 +610,7 @@ impl ConcreteFS for ConcreteTestNode {
     }
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
-        let inner = self.inner.borrow();
-        let root = TestNode::from(inner.deref()).into_node();
+        let root = self.into();
 
         Ok(Vfs::new(root))
     }
@@ -585,15 +620,15 @@ impl ConcreteFS for ConcreteTestNode {
         path: &VirtualPath,
     ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
         let inner = self.inner.borrow();
-        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+
+        let node = inner.get_node(path);
+
+        if let InnerConcreteTestNode::FE(_, err) = node {
             return Err(ConcreteFsError::from(io::Error::new(
                 io::ErrorKind::NotFound,
                 err.as_str(),
             )));
         };
-
-        let root = TestNode::from(inner.deref());
-        let node = root.get_node(path);
 
         if let Some(content) = node.content() {
             let owned = content.to_vec();
@@ -638,14 +673,16 @@ impl ConcreteFS for ConcreteTestNode {
                 // Overwrite file
                 for child in children.iter_mut() {
                     if child.name() == path.name() {
+                        let hash = xxh3_64(&content);
                         *child = InnerConcreteTestNode::FF(path.name().to_owned(), content);
-                        return Ok(ShallowTestSyncInfo::new(0));
+                        return Ok(ShallowTestSyncInfo::new(hash));
                     }
                 }
 
                 // Create file
+                let hash = xxh3_64(&content);
                 children.push(InnerConcreteTestNode::FF(path.name().to_owned(), content));
-                Ok(ShallowTestSyncInfo::new(0))
+                Ok(ShallowTestSyncInfo::new(hash))
             }
             _ => panic!("{path:?}"),
         }
@@ -697,7 +734,14 @@ impl ConcreteFS for ConcreteTestNode {
                     Vec::new(),
                 ));
 
-                Ok(ShallowTestSyncInfo::new(0))
+                let hash = xxh3_64(
+                    &children
+                        .iter()
+                        .flat_map(|node| xxh3_64(node.name().as_bytes()).to_le_bytes())
+                        .collect::<Vec<_>>(),
+                );
+
+                Ok(ShallowTestSyncInfo::new(hash))
             }
             _ => panic!("{path:?}"),
         }

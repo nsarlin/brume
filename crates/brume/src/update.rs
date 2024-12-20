@@ -97,6 +97,7 @@ impl ReconciliationError {
 }
 
 /// Result of a VFS node comparison.
+#[derive(Debug)]
 pub enum ModificationState {
     /// The current node has not been modified, but this says nothing about its children
     ShallowUnmodified,
@@ -326,6 +327,10 @@ impl ApplicableUpdate {
 
     pub fn target(&self) -> UpdateTarget {
         self.target
+    }
+
+    pub fn update(&self) -> &VfsNodeUpdate {
+        &self.update
     }
 }
 
@@ -568,6 +573,7 @@ pub enum AppliedUpdate<SyncInfo> {
     FileCreated(AppliedFileUpdate<SyncInfo>),
     FileModified(AppliedFileUpdate<SyncInfo>),
     FileRemoved(VirtualPathBuf),
+    FailedApplication(FailedUpdateApplication),
     //TODO: detect moves
 }
 
@@ -579,6 +585,35 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
                 update.path()
             }
             AppliedUpdate::DirRemoved(path) | AppliedUpdate::FileRemoved(path) => path,
+            AppliedUpdate::FailedApplication(failed_update) => failed_update.path(),
         }
+    }
+
+    pub fn is_err(&self) -> bool {
+        matches!(self, Self::FailedApplication(_))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FailedUpdateApplication {
+    error: ConcreteFsError,
+    update: VfsNodeUpdate,
+}
+
+impl FailedUpdateApplication {
+    pub fn new(update: VfsNodeUpdate, error: ConcreteFsError) -> Self {
+        Self { update, error }
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        self.update.path()
+    }
+
+    pub fn update(&self) -> &VfsNodeUpdate {
+        &self.update
+    }
+
+    pub fn error(&self) -> &ConcreteFsError {
+        &self.error
     }
 }
