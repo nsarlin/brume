@@ -7,6 +7,7 @@ pub use dir::*;
 pub use file::*;
 
 use crate::{
+    concrete::ConcreteFsError,
     sorted_vec::{Sortable, SortedVec},
     update::{ModificationState, VirtualReconciledUpdate},
     Error, NameMismatchError,
@@ -26,6 +27,28 @@ pub enum DeleteNodeError {
 }
 
 type SortedNodeList<SyncInfo> = SortedVec<VfsNode<SyncInfo>>;
+
+/// The synchronization state of a node
+#[derive(Debug, Clone)]
+pub enum NodeState<SyncInfo> {
+    /// The node has been correctly synchronized
+    Ok(SyncInfo),
+    /// The node should be re-synchronized at the next synchro, whatever its state
+    NeedResync,
+    /// The previous syncronization of this node returned an error, it will be re-synchronized next
+    /// time
+    Error(ConcreteFsError),
+}
+
+impl<SyncInfo> NodeState<SyncInfo> {
+    pub fn is_err(&self) -> bool {
+        if let Self::Error(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// A directory, seen as a tree.
 ///
@@ -48,11 +71,20 @@ impl<SyncInfo> DirTree<SyncInfo> {
 
     /// Create a new directory without syncinfo.
     ///
-    /// This mean that the synchronization process will need to access the concrete fs at least
-    /// once.
+    /// This mean that the synchronization process will force a resync with the concrete Fs
     pub fn new_without_syncinfo(name: &str) -> Self {
         Self {
             metadata: DirMeta::new_without_syncinfo(name),
+            children: SortedNodeList::new(),
+        }
+    }
+
+    /// Create a new directory in the error [`state`]
+    ///
+    /// [`state`]: NodeState
+    pub fn new_error(name: &str, error: ConcreteFsError) -> Self {
+        Self {
+            metadata: DirMeta::new_error(name, error),
             children: SortedNodeList::new(),
         }
     }
@@ -75,13 +107,13 @@ impl<SyncInfo> DirTree<SyncInfo> {
         self.metadata.name()
     }
 
-    pub fn sync_info(&self) -> &Option<SyncInfo> {
-        self.metadata.sync_info()
+    pub fn state(&self) -> &NodeState<SyncInfo> {
+        self.metadata.state()
     }
 
     /// Invalidate the sync info to make them trigger a ConcreteFS sync on next run
-    pub fn invalidate_sync_info(&mut self) {
-        self.metadata.invalidate_sync_info()
+    pub fn force_resync(&mut self) {
+        self.metadata.force_resync()
     }
 
     pub fn children(&self) -> &SortedNodeList<SyncInfo> {
@@ -322,7 +354,7 @@ impl<SyncInfo: IsModified> DirTree<SyncInfo> {
         let mut dir_path = parent_path.to_owned();
         dir_path.push(self.name());
 
-        match self.sync_info().modification_state(other.sync_info()) {
+        match self.state().modification_state(other.state()) {
             // The SyncInfo tells us that nothing has been modified for this dir, but can't
             // speak about its children. So we need to walk them.
             ModificationState::ShallowUnmodified => {
@@ -345,29 +377,41 @@ impl<SyncInfo: IsModified> DirTree<SyncInfo> {
             // The SyncInfo tells us that nothing has been modified recursively, so we can
             // stop there
             ModificationState::RecursiveUnmodified => Ok(VfsUpdateList::new()),
-            // The directory has been modified, so we have to walk it recursively to find
-            // the modified nodes
             ModificationState::Modified => {
-                let diff_list = self.children.iter_zip_map(
-                    &other.children,
-                    |self_child| -> Result<_, DiffError> {
-                        let mut res = SortedVec::new();
-                        res.insert(self_child.to_removed_diff(&dir_path));
-                        Ok(res)
-                    },
-                    |self_child, other_child| self_child.diff(other_child, &dir_path),
-                    |other_child| {
-                        let mut res = SortedVec::new();
-                        res.insert(other_child.to_created_diff(&dir_path));
-                        Ok(res)
-                    },
-                )?;
+                // If one of the dir is in error state, resync it completely
+                if self.state().is_err() {
+                    let mut res = SortedVec::new();
+                    res.insert(VfsNodeUpdate::DirCreated(dir_path));
+                    Ok(res)
+                } else if other.state().is_err() {
+                    let mut res = SortedVec::new();
+                    res.insert(VfsNodeUpdate::DirRemoved(dir_path));
+                    Ok(res)
+                } else {
+                    // The directory has been modified, so we have to walk it recursively to find
+                    // the modified nodes
+                    let diff_list = self.children.iter_zip_map(
+                        &other.children,
+                        |self_child| -> Result<_, DiffError> {
+                            let mut res = SortedVec::new();
+                            res.insert(self_child.to_removed_diff(&dir_path));
+                            Ok(res)
+                        },
+                        |self_child, other_child| self_child.diff(other_child, &dir_path),
+                        |other_child| {
+                            let mut res = SortedVec::new();
+                            res.insert(other_child.to_created_diff(&dir_path));
+                            Ok(res)
+                        },
+                    )?;
 
-                // Since the children lists are sorted, we know that the produced updates will be
-                // too, so we can directly create the sorted list from the result
-                let diffs = SortedVec::unchecked_flatten(diff_list);
+                    // Since the children lists are sorted, we know that the produced updates will
+                    // be too, so we can directly create the sorted list from
+                    // the result
+                    let diffs = SortedVec::unchecked_flatten(diff_list);
 
-                Ok(diffs)
+                    Ok(diffs)
+                }
             }
         }
     }
@@ -600,7 +644,7 @@ impl<SyncInfo: IsModified> VfsNode<SyncInfo> {
             (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.diff(dother, parent_path),
             (VfsNode::File(fself), VfsNode::File(fother)) => {
                 // Diff the file based on their sync info
-                if fself.sync_info().is_modified(fother.sync_info()) {
+                if fself.state().is_modified(fother.state()) {
                     let mut file_path = parent_path.to_owned();
                     file_path.push(fself.name());
 
@@ -621,7 +665,7 @@ impl<SyncInfo: IsModified> VfsNode<SyncInfo> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_utils::TestNode::{D, DH, F, FH};
+    use crate::test_utils::TestNode::{D, DE, DH, F, FE, FH};
 
     #[test]
     fn test_find() {
@@ -1009,6 +1053,80 @@ mod test {
                 VfsNodeUpdate::DirRemoved(VirtualPathBuf::new("/a/b").unwrap()),
                 VfsNodeUpdate::DirCreated(VirtualPathBuf::new("/a/ba").unwrap(),)
             ]
+            .into()
+        );
+    }
+
+    /// Test a Vfs diff where some nodes are in error state
+    #[test]
+    fn test_diff_error() {
+        let reference = DH(
+            "",
+            0,
+            vec![
+                DH("Doc", 1, vec![FE("f1.md", ""), FH("f2.pdf", 3)]),
+                DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
+            ],
+        )
+        .into_node();
+
+        let modified = DH(
+            "",
+            10,
+            vec![
+                DH("Doc", 1, vec![FH("f1.md", 2), FH("f2.pdf", 3)]),
+                DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
+            ],
+        )
+        .into_node();
+
+        let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
+
+        assert_eq!(
+            diff,
+            vec![VfsNodeUpdate::FileModified(
+                VirtualPathBuf::new("/Doc/f1.md").unwrap()
+            )]
+            .into()
+        );
+
+        let reference = DH(
+            "",
+            0,
+            vec![
+                DE("Doc", ""),
+                DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
+            ],
+        )
+        .into_node();
+
+        let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
+
+        assert_eq!(
+            diff,
+            vec![VfsNodeUpdate::DirCreated(
+                VirtualPathBuf::new("/Doc").unwrap()
+            )]
+            .into()
+        );
+
+        let reference = DH(
+            "",
+            0,
+            vec![
+                DH("Doc", 1, vec![FH("f1.md", 2), FH("f2.pdf", 3)]),
+                DH("a", 4, vec![DE("b", "")]),
+            ],
+        )
+        .into_node();
+
+        let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
+
+        assert_eq!(
+            diff,
+            vec![VfsNodeUpdate::DirCreated(
+                VirtualPathBuf::new("/a/b").unwrap()
+            )]
             .into()
         );
     }

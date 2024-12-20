@@ -4,6 +4,7 @@ use std::{
     fmt::{Display, Formatter},
     io::{self},
     string::FromUtf8Error,
+    sync::Arc,
 };
 
 use bytes::Bytes;
@@ -51,7 +52,7 @@ impl From<reqwest::Error> for NextcloudFsError {
 
 impl From<NextcloudFsError> for ConcreteFsError {
     fn from(value: NextcloudFsError) -> Self {
-        Self(Box::new(value))
+        Self(Arc::new(value))
     }
 }
 

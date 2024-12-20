@@ -28,7 +28,9 @@ use futures::future::try_join_all;
 use crate::{
     concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, Named},
     sorted_vec::{Sortable, SortedVec},
-    vfs::{DeleteNodeError, DirTree, InvalidPathError, Vfs, VirtualPath, VirtualPathBuf},
+    vfs::{
+        DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
+    },
     Error, NameMismatchError,
 };
 
@@ -126,12 +128,14 @@ pub trait IsModified {
     }
 }
 
-impl<SyncInfo: IsModified> IsModified for Option<SyncInfo> {
+impl<SyncInfo: IsModified> IsModified for NodeState<SyncInfo> {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         match (self, reference) {
-            (Some(valid_self), Some(valid_other)) => valid_self.modification_state(valid_other),
-            // If at least one of the node lacks SyncInfo, we need to re-check with the concrete FS.
-            (Some(_), None) | (None, None) | (None, Some(_)) => ModificationState::Modified,
+            (NodeState::Ok(self_sync), NodeState::Ok(other_sync)) => {
+                self_sync.modification_state(other_sync)
+            }
+            // If at least one node is in error or wants a resync, we return modified
+            _ => ModificationState::Modified,
         }
     }
 }
@@ -578,6 +582,3 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
         }
     }
 }
-
-#[cfg(test)]
-mod test {}

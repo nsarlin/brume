@@ -71,7 +71,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
             .find_dir_mut(path.parent().ok_or(VfsUpdateApplicationError::PathIsRoot)?)?;
 
         // Invalidate parent sync info because its content has been changed
-        parent.invalidate_sync_info();
+        parent.force_resync();
 
         match update {
             AppliedUpdate::DirCreated(update) => {
@@ -110,8 +110,8 @@ impl<SyncInfo> Vfs<SyncInfo> {
             AppliedUpdate::FileModified(update) => {
                 let file = self.root_mut().find_file_mut(update.path())?;
                 file.set_size(update.file_size());
-                let info = file.sync_info_mut();
-                *info = Some(update.into_sync_info());
+                let state = file.state_mut();
+                *state = NodeState::Ok(update.into_sync_info());
                 Ok(())
             }
             AppliedUpdate::FileRemoved(path) => self

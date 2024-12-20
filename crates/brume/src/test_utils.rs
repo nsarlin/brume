@@ -16,12 +16,22 @@ use crate::{
 /// Can be used to easily create Vfs for tests
 #[derive(Clone, Debug)]
 pub(crate) enum TestNode<'a> {
+    /// A file node with a name
     F(&'a str),
+    /// A dir node with a name and children
     D(&'a str, Vec<TestNode<'a>>),
+    /// A dir node with a name and a syncinfo hash
     FH(&'a str, u64),
+    /// A dir node with a name, children and a syncinfo hash
     DH(&'a str, u64, Vec<TestNode<'a>>),
+    /// A file node with a name and byte content
     FF(&'a str, &'a [u8]),
+    /// A link with a name and a target
     L(&'a str, Option<&'a TestNode<'a>>),
+    /// A file node with a name and and error status
+    FE(&'a str, &'a str),
+    /// A dir node with a name and and error status
+    DE(&'a str, &'a str),
 }
 
 impl TestNode<'_> {
@@ -32,16 +42,14 @@ impl TestNode<'_> {
             | Self::FH(name, _)
             | Self::DH(name, _, _)
             | Self::FF(name, _)
-            | Self::L(name, _) => name,
+            | Self::L(name, _)
+            | Self::FE(name, _)
+            | Self::DE(name, _) => name,
         }
     }
 
     pub(crate) fn content(&self) -> Option<&[u8]> {
         match self {
-            TestNode::F(_) => None,
-            TestNode::D(_, _) => None,
-            TestNode::FH(_, _) => None,
-            TestNode::DH(_, _, _) => None,
             TestNode::FF(_, content) => Some(content),
             TestNode::L(_, target) => {
                 if let Some(node) = target.as_ref() {
@@ -50,6 +58,7 @@ impl TestNode<'_> {
                     None
                 }
             }
+            _ => None,
         }
     }
 
@@ -96,6 +105,15 @@ impl TestNode<'_> {
                     panic!("Invalid symlink")
                 }
             }
+            Self::FE(name, error) => VfsNode::File(FileMeta::new_error(
+                name,
+                0,
+                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+            )),
+            Self::DE(name, error) => VfsNode::Dir(DirTree::new_error(
+                name,
+                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+            )),
         }
     }
 
@@ -146,6 +164,15 @@ impl TestNode<'_> {
                     panic!("Invalid symlink")
                 }
             }
+            Self::FE(name, error) => VfsNode::File(FileMeta::new_error(
+                name,
+                0,
+                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+            )),
+            Self::DE(name, error) => VfsNode::Dir(DirTree::new_error(
+                name,
+                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+            )),
         }
     }
 
@@ -191,6 +218,11 @@ impl TestNode<'_> {
                     panic!("Invalid symlink")
                 }
             }
+            Self::FE(_, _) => panic!(),
+            Self::DE(name, error) => DirTree::new_error(
+                name,
+                ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+            ),
         }
     }
 
@@ -201,7 +233,9 @@ impl TestNode<'_> {
             let (top_level, remainder) = path.top_level_split().unwrap();
 
             match self {
-                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) => panic!(),
+                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) | Self::FE(_, _) | Self::DE(_, _) => {
+                    panic!()
+                }
                 Self::D(_, children) | Self::DH(_, _, children) => {
                     for child in children {
                         if child.name() == top_level {
@@ -232,7 +266,9 @@ impl TestNode<'_> {
             let (top_level, remainder) = path.top_level_split().unwrap();
 
             match self {
-                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) => panic!(),
+                Self::F(_) | Self::FF(_, _) | Self::FH(_, _) | Self::FE(_, _) | Self::DE(_, _) => {
+                    panic!()
+                }
                 Self::D(_, children) | Self::DH(_, _, children) => {
                     for child in children {
                         if child.name() == top_level {
@@ -255,8 +291,8 @@ impl<'a> LocalPath for TestNode<'a> {
     type DirEntry = Self;
     fn is_file(&self) -> bool {
         match self {
-            TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) => true,
-            TestNode::D(_, _) | TestNode::DH(_, _, _) => false,
+            TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) | TestNode::FE(_, _) => true,
+            TestNode::D(_, _) | TestNode::DH(_, _, _) | TestNode::DE(_, _) => false,
             TestNode::L(_, target) => {
                 if let Some(node) = target {
                     node.is_file()
@@ -269,8 +305,8 @@ impl<'a> LocalPath for TestNode<'a> {
 
     fn is_dir(&self) -> bool {
         match self {
-            TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) => false,
-            TestNode::D(_, _) | TestNode::DH(_, _, _) => true,
+            TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) | TestNode::FE(_, _) => false,
+            TestNode::D(_, _) | TestNode::DH(_, _, _) | TestNode::DE(_, _) => true,
             TestNode::L(_, target) => {
                 if let Some(node) = target {
                     node.is_dir()
@@ -287,10 +323,9 @@ impl<'a> LocalPath for TestNode<'a> {
 
     fn read_dir(&self) -> io::Result<impl Iterator<Item = io::Result<Self>>> {
         match self {
-            TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "expected a dir",
-            )),
+            TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) | TestNode::FE(_, _) => Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "expected a dir"),
+            ),
             TestNode::D(_, children) | TestNode::DH(_, _, children) => {
                 Ok(children.iter().cloned().map(Ok))
             }
@@ -304,6 +339,7 @@ impl<'a> LocalPath for TestNode<'a> {
                     ))
                 }
             }
+            TestNode::DE(_, err) => Err(io::Error::new(io::ErrorKind::InvalidInput, *err)),
         }
     }
 
@@ -323,6 +359,9 @@ impl<'a> LocalPath for TestNode<'a> {
                         "invalid symlink target",
                     ))
                 }
+            }
+            TestNode::FE(_, err) | TestNode::DE(_, err) => {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, *err))
             }
         }
     }
@@ -345,6 +384,9 @@ impl<'a> LocalPath for TestNode<'a> {
                     ))
                 }
             }
+            TestNode::FE(_, err) | TestNode::DE(_, err) => {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, *err))
+            }
         }
     }
 }
@@ -357,6 +399,8 @@ pub(crate) enum InnerConcreteTestNode {
     D(String, Vec<InnerConcreteTestNode>),
     DH(String, u64, Vec<InnerConcreteTestNode>),
     FF(String, Vec<u8>),
+    FE(String, String),
+    DE(String, String),
 }
 
 impl<'a> From<TestNode<'a>> for InnerConcreteTestNode {
@@ -380,6 +424,8 @@ impl<'a> From<TestNode<'a>> for InnerConcreteTestNode {
                     panic!("Invalid symlink")
                 }
             }
+            TestNode::FE(name, err) => Self::FE(name.to_string(), err.to_string()),
+            TestNode::DE(name, err) => Self::DE(name.to_string(), err.to_string()),
         }
     }
 }
@@ -396,6 +442,8 @@ impl<'a> From<&'a InnerConcreteTestNode> for TestNode<'a> {
                 children.iter().map(|child| child.into()).collect(),
             ),
             InnerConcreteTestNode::FF(name, content) => Self::FF(name, content),
+            InnerConcreteTestNode::FE(name, err) => Self::FE(name, err),
+            InnerConcreteTestNode::DE(name, err) => Self::DE(name, err),
         }
     }
 }
@@ -403,23 +451,25 @@ impl<'a> From<&'a InnerConcreteTestNode> for TestNode<'a> {
 impl InnerConcreteTestNode {
     fn name(&self) -> &str {
         match self {
-            InnerConcreteTestNode::D(name, _)
-            | InnerConcreteTestNode::DH(name, _, _)
-            | InnerConcreteTestNode::FF(name, _) => name,
+            Self::D(name, _)
+            | Self::DH(name, _, _)
+            | Self::FF(name, _)
+            | Self::FE(name, _)
+            | Self::DE(name, _) => name,
         }
     }
 
     fn is_file(&self) -> bool {
         match self {
-            InnerConcreteTestNode::D(_, _) | InnerConcreteTestNode::DH(_, _, _) => false,
-            InnerConcreteTestNode::FF(_, _) => true,
+            Self::D(_, _) | Self::DH(_, _, _) | Self::DE(_, _) => false,
+            Self::FF(_, _) | Self::FE(_, _) => true,
         }
     }
 
     fn is_dir(&self) -> bool {
         match self {
-            InnerConcreteTestNode::D(_, _) | InnerConcreteTestNode::DH(_, _, _) => true,
-            InnerConcreteTestNode::FF(_, _) => false,
+            Self::D(_, _) | Self::DH(_, _, _) | Self::DE(_, _) => true,
+            Self::FF(_, _) | Self::FE(_, _) => false,
         }
     }
 
@@ -430,7 +480,6 @@ impl InnerConcreteTestNode {
             let (top_level, remainder) = path.top_level_split().unwrap();
 
             match self {
-                Self::FF(_, _) => panic!(),
                 Self::D(_, children) | Self::DH(_, _, children) => {
                     for child in children {
                         if child.name() == top_level {
@@ -443,6 +492,7 @@ impl InnerConcreteTestNode {
                     }
                     panic!("{path:?}")
                 }
+                _ => panic!(),
             }
         }
     }
@@ -454,7 +504,6 @@ impl InnerConcreteTestNode {
             let (top_level, remainder) = path.top_level_split().unwrap();
 
             match self {
-                Self::FF(_, _) => panic!(),
                 Self::D(_, children) | Self::DH(_, _, children) => {
                     for child in children {
                         if child.name() == top_level {
@@ -467,6 +516,7 @@ impl InnerConcreteTestNode {
                     }
                     panic!("{path:?}")
                 }
+                _ => panic!(),
             }
         }
     }
@@ -535,6 +585,13 @@ impl ConcreteFS for ConcreteTestNode {
         path: &VirtualPath,
     ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
         let inner = self.inner.borrow();
+        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            return Err(ConcreteFsError::from(io::Error::new(
+                io::ErrorKind::NotFound,
+                err.as_str(),
+            )));
+        };
+
         let root = TestNode::from(inner.deref());
         let node = root.get_node(path);
 
@@ -567,6 +624,13 @@ impl ConcreteFS for ConcreteTestNode {
 
         // Write into the node
         let mut inner = self.inner.borrow_mut();
+        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            return Err(ConcreteFsError::from(io::Error::new(
+                io::ErrorKind::ReadOnlyFilesystem,
+                err.as_str(),
+            )));
+        };
+
         let parent = inner.get_node_mut(path.parent().unwrap());
 
         match parent {
@@ -583,12 +647,18 @@ impl ConcreteFS for ConcreteTestNode {
                 children.push(InnerConcreteTestNode::FF(path.name().to_owned(), content));
                 Ok(ShallowTestSyncInfo::new(0))
             }
-            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+            _ => panic!("{path:?}"),
         }
     }
 
     async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let mut inner = self.inner.borrow_mut();
+        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            return Err(ConcreteFsError::from(io::Error::new(
+                io::ErrorKind::ReadOnlyFilesystem,
+                err.as_str(),
+            )));
+        };
         let parent = inner.get_node_mut(path.parent().unwrap());
 
         match parent {
@@ -605,12 +675,19 @@ impl ConcreteFS for ConcreteTestNode {
                 }
                 Ok(())
             }
-            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+            _ => panic!("{path:?}"),
         }
     }
 
     async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
         let mut inner = self.inner.borrow_mut();
+        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            return Err(ConcreteFsError::from(io::Error::new(
+                io::ErrorKind::ReadOnlyFilesystem,
+                err.as_str(),
+            )));
+        };
+
         let parent = inner.get_node_mut(path.parent().unwrap());
 
         match parent {
@@ -622,12 +699,19 @@ impl ConcreteFS for ConcreteTestNode {
 
                 Ok(ShallowTestSyncInfo::new(0))
             }
-            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+            _ => panic!("{path:?}"),
         }
     }
 
     async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let mut inner = self.inner.borrow_mut();
+        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            return Err(ConcreteFsError::from(io::Error::new(
+                io::ErrorKind::ReadOnlyFilesystem,
+                err.as_str(),
+            )));
+        };
+
         let parent = inner.get_node_mut(path.parent().unwrap());
 
         match parent {
@@ -644,7 +728,7 @@ impl ConcreteFS for ConcreteTestNode {
                 }
                 Ok(())
             }
-            InnerConcreteTestNode::FF(_, _) => panic!("{path:?}"),
+            _ => panic!("{path:?}"),
         }
     }
 }
