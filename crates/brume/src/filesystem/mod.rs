@@ -3,7 +3,7 @@
 mod byte_counter;
 
 use byte_counter::ByteCounterExt;
-use log::{info, warn};
+use log::{error, info, warn};
 
 use std::sync::{atomic::AtomicU64, Arc};
 
@@ -210,16 +210,22 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         let stream = ref_concrete
             .read_file(path)
             .await
-            .map_err(|e| e.into())?
+            .map_err(|e| {
+                error!("Failed to read file {path:?}: {e:?}");
+                e.into()
+            })?
             .count_bytes(counter.clone());
         let res = self
             .concrete
             .write_file(path, stream)
             .await
-            .map_err(|e| e.into())
+            .map_err(|e| {
+                error!("Failed to clone file {path:?}: {e:?}");
+                e.into()
+            })
             .map(|info| (info, counter.load(std::sync::atomic::Ordering::SeqCst)))?;
 
-        info!("File {:?} successfully cloned", path);
+        info!("File {path:?} successfully cloned");
 
         Ok(res)
     }
@@ -230,7 +236,10 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         ref_fs: FileSystemDir<'otherfs, OtherConcrete>,
         path: &VirtualPath,
     ) -> Result<DirTree<Concrete::SyncInfo>, ConcreteUpdateApplicationError> {
-        let sync_info = self.concrete.mkdir(path).await.map_err(|e| e.into())?;
+        let sync_info = self.concrete.mkdir(path).await.map_err(|e| {
+            error!("Failed to create dir {path:?}: {e:?}");
+            e.into()
+        })?;
         let mut dir = DirTree::new(path.name(), sync_info);
 
         // TODO: parallelize file download
