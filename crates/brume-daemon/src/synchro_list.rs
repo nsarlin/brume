@@ -157,11 +157,11 @@ impl SynchroList {
             if (&sync.local == local_desc || &sync.local == remote_desc)
                 && (&sync.remote == local_desc || &sync.remote == remote_desc)
             {
-                return false;
+                return true;
             }
         }
 
-        true
+        false
     }
 
     /// Create and insert a new filesystem Synchro in the list
