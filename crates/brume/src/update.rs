@@ -135,32 +135,88 @@ impl<SyncInfo: IsModified> IsModified for NodeState<SyncInfo> {
             (NodeState::Ok(self_sync), NodeState::Ok(other_sync)) => {
                 self_sync.modification_state(other_sync)
             }
+            // Skip nodes in conflict until the conflicts are resolved
+            (NodeState::Conflict, _) | (_, NodeState::Conflict) => {
+                ModificationState::ShallowUnmodified
+            }
             // If at least one node is in error or wants a resync, we return modified
             _ => ModificationState::Modified,
         }
     }
 }
 
-/// A single node update
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub enum VfsNodeUpdate {
-    DirCreated(VirtualPathBuf),
-    DirRemoved(VirtualPathBuf),
-    FileCreated(VirtualPathBuf),
-    FileModified(VirtualPathBuf),
-    FileRemoved(VirtualPathBuf),
+/// The kinds of fs modifications that can be represented in an update
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum UpdateKind {
+    DirCreated,
+    DirRemoved,
+    FileCreated,
+    FileModified,
+    FileRemoved,
     //TODO: detect moves
 }
 
+impl UpdateKind {
+    /// The update removes a node (dir or file)
+    pub fn is_removal(self) -> bool {
+        matches!(self, Self::DirRemoved | Self::FileRemoved)
+    }
+
+    /// The update creates a node (dir or file)
+    pub fn is_creation(self) -> bool {
+        matches!(self, Self::DirCreated | Self::FileCreated)
+    }
+}
+
+/// A single node update
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct VfsNodeUpdate {
+    path: VirtualPathBuf,
+    kind: UpdateKind,
+}
+
 impl VfsNodeUpdate {
-    pub fn path(&self) -> &VirtualPath {
-        match self {
-            VfsNodeUpdate::DirCreated(path) => path,
-            VfsNodeUpdate::DirRemoved(path) => path,
-            VfsNodeUpdate::FileCreated(path) => path,
-            VfsNodeUpdate::FileModified(path) => path,
-            VfsNodeUpdate::FileRemoved(path) => path,
+    pub fn dir_created(path: VirtualPathBuf) -> Self {
+        Self {
+            path,
+            kind: UpdateKind::DirCreated,
         }
+    }
+
+    pub fn dir_removed(path: VirtualPathBuf) -> Self {
+        Self {
+            path,
+            kind: UpdateKind::DirRemoved,
+        }
+    }
+
+    pub fn file_created(path: VirtualPathBuf) -> Self {
+        Self {
+            path,
+            kind: UpdateKind::FileCreated,
+        }
+    }
+
+    pub fn file_modified(path: VirtualPathBuf) -> Self {
+        Self {
+            path,
+            kind: UpdateKind::FileModified,
+        }
+    }
+
+    pub fn file_removed(path: VirtualPathBuf) -> Self {
+        Self {
+            path,
+            kind: UpdateKind::FileRemoved,
+        }
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+
+    pub fn kind(&self) -> UpdateKind {
+        self.kind
     }
 
     /// Reconcile updates from two different VFS.
@@ -184,18 +240,18 @@ impl VfsNodeUpdate {
 
         let mut reconciled = SortedVec::new();
 
-        match (self, other) {
-            (VfsNodeUpdate::DirCreated(pself), VfsNodeUpdate::DirCreated(pother)) => {
+        match (self.kind, other.kind) {
+            (UpdateKind::DirCreated, UpdateKind::DirCreated) => {
                 // If the same dir has been created on both sides, we need to check if they are
                 // equivalent. If they are not, we generate updates that are only allowed to create
                 // nodes.
                 let dir_self = vfs_self
                     .root()
-                    .find_dir(pself)
+                    .find_dir(&self.path)
                     .map_err(|e| ReconciliationError::invalid_path(SyncInfo::TYPE_NAME, e))?;
                 let dir_other = vfs_other
                     .root()
-                    .find_dir(pother)
+                    .find_dir(&other.path)
                     .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
 
                 let reconciled = dir_self.reconciliation_diff(
@@ -205,32 +261,46 @@ impl VfsNodeUpdate {
                 // Since we iterate on sorted updates, the result will be sorted too
                 Ok(reconciled)
             }
-            (VfsNodeUpdate::DirRemoved(_), VfsNodeUpdate::DirRemoved(_)) => Ok(reconciled),
-            (VfsNodeUpdate::FileModified(pself), VfsNodeUpdate::FileModified(pother))
-            | (VfsNodeUpdate::FileCreated(pself), VfsNodeUpdate::FileCreated(pother)) => {
+            (UpdateKind::DirRemoved, UpdateKind::DirRemoved) => Ok(reconciled),
+            (UpdateKind::FileModified, UpdateKind::FileModified)
+            | (UpdateKind::FileCreated, UpdateKind::FileCreated) => {
                 let file_self = vfs_self
                     .root()
-                    .find_file(pself)
+                    .find_file(&self.path)
                     .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
                 let file_other = vfs_other
                     .root()
-                    .find_file(pother)
+                    .find_file(&other.path)
                     .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
 
-                if file_self.size() == file_other.size() {
-                    reconciled.insert(VirtualReconciledUpdate::NeedConcreteCheck(pself.to_owned()));
+                let (self_update, other_update) = if file_self.size() == file_other.size() {
+                    VirtualReconciledUpdate::concrete_check_both(self)
                 } else {
-                    reconciled.insert(VirtualReconciledUpdate::Conflict(self.path().to_owned()));
-                }
+                    VirtualReconciledUpdate::conflict_both(self)
+                };
+
+                reconciled.insert(self_update);
+                reconciled.insert(other_update);
 
                 Ok(reconciled)
             }
-            (VfsNodeUpdate::FileRemoved(_), VfsNodeUpdate::FileRemoved(_)) => Ok(reconciled),
-            _ => {
-                reconciled.insert(VirtualReconciledUpdate::Conflict(self.path().to_owned()));
+            (UpdateKind::FileRemoved, UpdateKind::FileRemoved) => Ok(reconciled),
+            (_, _) => {
+                reconciled.insert(VirtualReconciledUpdate::conflict_self(self));
+                reconciled.insert(VirtualReconciledUpdate::conflict_other(other));
                 Ok(reconciled)
             }
         }
+    }
+
+    /// The update removes a node (dir or file)
+    pub fn is_removal(&self) -> bool {
+        self.kind.is_removal()
+    }
+
+    /// The update creates a node (dir or file)
+    pub fn is_creation(&self) -> bool {
+        self.kind.is_creation()
     }
 }
 
@@ -304,17 +374,17 @@ impl VfsUpdateList {
 
 /// The target of the update, from the point of view of the FileSystem on which `reconcile` has been
 /// called
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum UpdateTarget {
     SelfFs,
     OtherFs,
 }
 
 /// An update that is ready to be applied
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ApplicableUpdate {
+    update: VfsNodeUpdate, // Fields order is important for the ord implementation
     target: UpdateTarget,
-    update: VfsNodeUpdate,
 }
 
 impl ApplicableUpdate {
@@ -325,12 +395,33 @@ impl ApplicableUpdate {
         }
     }
 
+    /// The Filesystem targeted by the update "self" or "other based on the Filesystem where the
+    /// diff has been performed
     pub fn target(&self) -> UpdateTarget {
         self.target
     }
 
     pub fn update(&self) -> &VfsNodeUpdate {
         &self.update
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        self.update.path()
+    }
+
+    pub fn is_removal(&self) -> bool {
+        self.update.is_removal()
+    }
+
+    /// Return a new update with inverted [`UpdateTarget`]
+    pub fn inverse_target(&self) -> Self {
+        Self {
+            update: self.update.clone(),
+            target: match self.target {
+                UpdateTarget::SelfFs => UpdateTarget::OtherFs,
+                UpdateTarget::OtherFs => UpdateTarget::SelfFs,
+            },
+        }
     }
 }
 
@@ -348,16 +439,16 @@ pub(crate) enum VirtualReconciledUpdate {
     /// access. The outcome of the check can be:
     /// - Remove the update if both files are identical
     /// - Mark the update as a conflict if they are different
-    NeedConcreteCheck(VirtualPathBuf),
-    Conflict(VirtualPathBuf),
+    NeedConcreteCheck(ApplicableUpdate),
+    Conflict(ApplicableUpdate),
 }
 
 impl VirtualReconciledUpdate {
-    fn path(&self) -> &VirtualPath {
+    fn update(&self) -> &ApplicableUpdate {
         match self {
-            Self::Applicable(update) => update.update.path(),
-            Self::NeedConcreteCheck(path) => path.as_ref(),
-            Self::Conflict(path) => path.as_ref(),
+            VirtualReconciledUpdate::Applicable(update) => update,
+            VirtualReconciledUpdate::NeedConcreteCheck(update) => update,
+            VirtualReconciledUpdate::Conflict(update) => update,
         }
     }
 
@@ -371,6 +462,41 @@ impl VirtualReconciledUpdate {
         Self::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
     }
 
+    /// Create a new `Conflict` update with [`UpdateTarget::SelfFs`]
+    pub(crate) fn conflict_self(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    }
+
+    /// Create a new `Conflict` update with [`UpdateTarget::OtherFs`]
+    pub(crate) fn conflict_other(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    }
+
+    /// Create two new `Conflict` updates with [`UpdateTarget::SelfFs`] and
+    /// [`UpdateTarget::OtherFs`]
+    pub(crate) fn conflict_both(update: &VfsNodeUpdate) -> (Self, Self) {
+        (Self::conflict_self(update), Self::conflict_other(update))
+    }
+
+    /// Create a new `NeedConcreteCheck` update with [`UpdateTarget::SelfFs`]
+    pub(crate) fn concrete_check_self(update: &VfsNodeUpdate) -> Self {
+        Self::NeedConcreteCheck(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    }
+
+    /// Create a new `NeedConcreteCheck` update with [`UpdateTarget::OtherFs`]
+    pub(crate) fn concrete_check_other(update: &VfsNodeUpdate) -> Self {
+        Self::NeedConcreteCheck(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    }
+
+    /// Create two new `NeedConcreteCheck` updates with [`UpdateTarget::SelfFs`] and
+    /// [`UpdateTarget::OtherFs`]
+    pub(crate) fn concrete_check_both(update: &VfsNodeUpdate) -> (Self, Self) {
+        (
+            Self::concrete_check_self(update),
+            Self::concrete_check_other(update),
+        )
+    }
+
     /// Resolve an update with `NeedConcreteCheck` by comparing hashes of the file on both concrete
     /// FS
     async fn resolve_concrete<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
@@ -382,14 +508,14 @@ impl VirtualReconciledUpdate {
             VirtualReconciledUpdate::Applicable(update) => {
                 Ok(Some(ReconciledUpdate::Applicable(update)))
             }
-            VirtualReconciledUpdate::NeedConcreteCheck(path) => {
-                if concrete_eq_file(concrete_self, concrete_other, &path)
+            VirtualReconciledUpdate::NeedConcreteCheck(update) => {
+                if concrete_eq_file(concrete_self, concrete_other, update.path())
                     .await
                     .map_err(|(e, name)| ReconciliationError::concrete(name, e))?
                 {
                     Ok(None)
                 } else {
-                    Ok(Some(ReconciledUpdate::Conflict(path)))
+                    Ok(Some(ReconciledUpdate::Conflict(update)))
                 }
             }
             VirtualReconciledUpdate::Conflict(conflict) => {
@@ -400,10 +526,10 @@ impl VirtualReconciledUpdate {
 }
 
 impl Sortable for VirtualReconciledUpdate {
-    type Key = VirtualPath;
+    type Key = ApplicableUpdate;
 
     fn key(&self) -> &Self::Key {
-        self.path()
+        self.update()
     }
 }
 
@@ -434,15 +560,22 @@ impl SortedVec<VirtualReconciledUpdate> {
 pub enum ReconciledUpdate {
     /// Updates in this state can be applied to the target concrete FS
     Applicable(ApplicableUpdate),
-    /// There is a conflict that needs user input for resolution
-    Conflict(VirtualPathBuf),
+    /// There is a conflict that needs user input for resolution before the update can be applied
+    Conflict(ApplicableUpdate),
 }
 
 impl ReconciledUpdate {
     pub fn path(&self) -> &VirtualPath {
         match self {
-            ReconciledUpdate::Applicable(update) => update.update.path(),
-            ReconciledUpdate::Conflict(path) => path.as_ref(),
+            ReconciledUpdate::Applicable(update) => update.path(),
+            ReconciledUpdate::Conflict(update) => update.path(),
+        }
+    }
+
+    pub fn update(&self) -> &ApplicableUpdate {
+        match self {
+            ReconciledUpdate::Applicable(update) => update,
+            ReconciledUpdate::Conflict(update) => update,
         }
     }
 
@@ -455,13 +588,29 @@ impl ReconciledUpdate {
     pub fn applicable_other(update: &VfsNodeUpdate) -> Self {
         Self::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
     }
+
+    /// Create a new `Conflict` update with [`UpdateTarget::SelfFs`]
+    pub fn conflict_self(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    }
+
+    /// Create a new `Conflict` update with [`UpdateTarget::OtherFs`]
+    pub fn conflict_other(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    }
+
+    /// Create two new `Conflict` updates with [`UpdateTarget::SelfFs`] and
+    /// [`UpdateTarget::OtherFs`]
+    pub fn conflict_both(update: &VfsNodeUpdate) -> (Self, Self) {
+        (Self::conflict_self(update), Self::conflict_other(update))
+    }
 }
 
 impl Sortable for ReconciledUpdate {
-    type Key = VirtualPath;
+    type Key = ApplicableUpdate;
 
     fn key(&self) -> &Self::Key {
-        self.path()
+        self.update()
     }
 }
 
@@ -474,22 +623,28 @@ impl SortedVec<ReconciledUpdate> {
         let mut resolved = Vec::new();
         let mut iter = self.into_iter().peekable();
 
-        while let Some(mut update) = iter.next() {
+        while let Some(mut parent_update) = iter.next() {
+            // Skip if the path is already a conflict
+            if matches!(parent_update, ReconciledUpdate::Conflict(_)) {
+                resolved.push(parent_update);
+                continue;
+            }
             let mut conflict = false;
             let mut updates = Vec::new();
             while let Some(mut next_update) =
-                iter.next_if(|next_update| next_update.path().is_inside(update.path()))
+                iter.next_if(|next_update| next_update.path().is_inside(parent_update.path()))
             {
                 conflict = true;
-                next_update = ReconciledUpdate::Conflict(next_update.path().to_owned());
+                // Swap the targets because we store the conflicts in the source filesystem
+                next_update = ReconciledUpdate::Conflict(next_update.update().inverse_target());
                 updates.push(next_update);
             }
 
             if conflict {
-                update = ReconciledUpdate::Conflict(update.path().to_owned())
+                parent_update = ReconciledUpdate::Conflict(parent_update.update().inverse_target())
             }
 
-            resolved.push(update);
+            resolved.push(parent_update);
             resolved.extend(updates);
         }
 
@@ -574,6 +729,7 @@ pub enum AppliedUpdate<SyncInfo> {
     FileModified(AppliedFileUpdate<SyncInfo>),
     FileRemoved(VirtualPathBuf),
     FailedApplication(FailedUpdateApplication),
+    Conflict(VfsNodeUpdate),
     //TODO: detect moves
 }
 
@@ -586,6 +742,7 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
             }
             AppliedUpdate::DirRemoved(path) | AppliedUpdate::FileRemoved(path) => path,
             AppliedUpdate::FailedApplication(failed_update) => failed_update.path(),
+            AppliedUpdate::Conflict(update) => update.path(),
         }
     }
 
@@ -594,6 +751,7 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
     }
 }
 
+/// An update that failed because an error occured on one of the concrete fs
 #[derive(Clone, Debug)]
 pub struct FailedUpdateApplication {
     error: ConcreteFsError,

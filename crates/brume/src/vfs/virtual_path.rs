@@ -27,7 +27,7 @@ impl InvalidPathError {
 
 /// A wrapper type that allows doing path operations on strings, without considerations for any
 /// concrete file system. These paths are supposed to be absolute and should start with a '/'.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(transparent)]
 pub struct VirtualPath {
     path: str,
@@ -93,11 +93,12 @@ impl VirtualPath {
     }
 
     /// Return true if the node pointed by "self" is contained in "other", eventualy recursively
+    /// Return also true if self == other
     pub fn is_inside(&self, other: &VirtualPath) -> bool {
         if let Some(suffix) = self.path.strip_prefix(other.trimmed_path()) {
             // Check for false positives caused by files that are in the same dir and start with the
             // same name. For example: /some/file and /some/file_long should return false
-            suffix.starts_with('/')
+            suffix.is_empty() || suffix.starts_with('/')
         } else {
             false
         }
@@ -166,18 +167,6 @@ impl VirtualPath {
     /// Return an iterator over the components of the path
     pub fn iter(&self) -> VirtualPathIterator {
         VirtualPathIterator { path: self }
-    }
-}
-
-impl PartialOrd for VirtualPath {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.path.cmp(&other.path))
-    }
-}
-
-impl Ord for VirtualPath {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.path.cmp(&other.path)
     }
 }
 
@@ -269,7 +258,7 @@ impl<'a> Iterator for VirtualPathIterator<'a> {
 
 /// Similar to the distinction with Path and PathBuf, this is a VirtualPath that owns the underlying
 /// data.
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
 #[repr(transparent)]
 pub struct VirtualPathBuf {
     path: String,
@@ -467,6 +456,10 @@ mod test {
         let elem = VirtualPathBuf::new("/a/baba").unwrap();
 
         assert!(!elem.is_inside(&base));
+
+        let elem = VirtualPathBuf::new("/a/b").unwrap();
+
+        assert!(elem.is_inside(&base));
     }
 
     #[test]
