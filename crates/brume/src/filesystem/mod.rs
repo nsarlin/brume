@@ -15,7 +15,7 @@ use crate::{
     sorted_vec::SortedVec,
     update::{
         AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, FailedUpdateApplication,
-        ReconciledUpdate, UpdateTarget, VfsNodeUpdate, VfsUpdateList,
+        ReconciledUpdate, UpdateKind, UpdateTarget, VfsNodeUpdate, VfsUpdateList,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
     Error,
@@ -54,7 +54,7 @@ impl<SyncInfo> ConcreteDirCloneResult<SyncInfo> {
         Self {
             success: None,
             failures: vec![FailedUpdateApplication::new(
-                VfsNodeUpdate::DirCreated(path.to_owned()),
+                VfsNodeUpdate::dir_created(path.to_owned()),
                 error.into(),
             )],
         }
@@ -138,7 +138,6 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     /// error occurred.
     ///
     /// [`ApplicableUpdate`]: crate::update::ApplicableUpdate
-    // TODO: handle conflicts
     pub async fn apply_updates_list_concrete<OtherConcrete: ConcreteFS>(
         &self,
         other_fs: &FileSystem<OtherConcrete>,
@@ -150,23 +149,37 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         ),
         (ConcreteUpdateApplicationError, &'static str),
     > {
-        let handle_conflicts: Vec<_> = updates
-            .into_iter()
-            .filter_map(|update| match update {
-                ReconciledUpdate::Applicable(update) => Some(update),
-                ReconciledUpdate::Conflict(path) => {
-                    warn!("WARNING: conflict on {path:?}");
-                    None
+        let mut applicables = Vec::new();
+        let mut conflicts = Vec::new();
+        for update in updates {
+            match update {
+                ReconciledUpdate::Applicable(applicable) => applicables.push(applicable),
+                ReconciledUpdate::Conflict(update) => {
+                    warn!("conflict on {update:?}");
+                    // Don't push removal updates since the node will not exist anymore in the
+                    // source Vfs
+                    if !update.is_removal() {
+                        conflicts.push(update)
+                    }
                 }
-            })
-            .collect();
+            }
+        }
 
-        let (self_updates, other_updates): (Vec<_>, Vec<_>) = handle_conflicts
-            .into_iter()
-            .partition(|update| match update.target() {
-                UpdateTarget::SelfFs => true,
-                UpdateTarget::OtherFs => false,
-            });
+        let (self_updates, other_updates): (Vec<_>, Vec<_>) =
+            applicables
+                .into_iter()
+                .partition(|update| match update.target() {
+                    UpdateTarget::SelfFs => true,
+                    UpdateTarget::OtherFs => false,
+                });
+
+        let (self_conflicts, other_conflicts): (Vec<_>, Vec<_>) =
+            conflicts
+                .into_iter()
+                .partition(|update| match update.target() {
+                    UpdateTarget::SelfFs => true,
+                    UpdateTarget::OtherFs => false,
+                });
 
         let self_futures = try_join_all(
             self_updates
@@ -210,7 +223,19 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         }
 
         self_res.extend(other_failed);
+        self_res.extend(
+            self_conflicts
+                .clone()
+                .into_iter()
+                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
+        );
         other_res.extend(self_failed);
+        other_res.extend(
+            other_conflicts
+                .clone()
+                .into_iter()
+                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
+        );
 
         Ok((self_res, other_res))
     }
@@ -219,6 +244,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     ///
     /// The file contents will be taken from `ref_fs`
     // TODO: handle if ref_fs is not sync ?
+    // TODO: check for "last minute" changes in target fs
     pub async fn apply_update_concrete<OtherConcrete: ConcreteFS>(
         &self,
         ref_fs: &FileSystem<OtherConcrete>,
@@ -228,8 +254,9 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
             return Err(ConcreteUpdateApplicationError::PathIsRoot);
         }
 
-        match &update {
-            VfsNodeUpdate::DirCreated(path) => {
+        match update.kind() {
+            UpdateKind::DirCreated => {
+                let path = update.path();
                 let dir = ref_fs.find_dir(path)?;
 
                 let mut res = self.clone_dir_concrete(dir, path).await;
@@ -253,52 +280,60 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
                 );
                 Ok(updates)
             }
-            VfsNodeUpdate::DirRemoved(path) => self
-                .concrete
-                .rmdir(path)
-                .await
-                .map(|_| AppliedUpdate::DirRemoved(path.to_owned()))
-                .or_else(|e| {
-                    Ok(AppliedUpdate::FailedApplication(
-                        FailedUpdateApplication::new(update, e.into()),
-                    ))
-                })
-                .map(|update| vec![update]),
-            VfsNodeUpdate::FileCreated(path) => self
-                .clone_file_concrete(&ref_fs.concrete, path)
-                .await
-                .map(|(sync_info, size)| {
-                    AppliedUpdate::FileCreated(AppliedFileUpdate::new(path, size, sync_info))
-                })
-                .or_else(|e| {
-                    Ok(AppliedUpdate::FailedApplication(
-                        FailedUpdateApplication::new(update, e),
-                    ))
-                })
-                .map(|update| vec![update]),
-            VfsNodeUpdate::FileModified(path) => self
-                .clone_file_concrete(&ref_fs.concrete, path)
-                .await
-                .map(|(sync_info, size)| {
-                    AppliedUpdate::FileModified(AppliedFileUpdate::new(path, size, sync_info))
-                })
-                .or_else(|e| {
-                    Ok(AppliedUpdate::FailedApplication(
-                        FailedUpdateApplication::new(update, e),
-                    ))
-                })
-                .map(|update| vec![update]),
-            VfsNodeUpdate::FileRemoved(path) => self
-                .concrete
-                .rm(path)
-                .await
-                .map(|_| AppliedUpdate::FileRemoved(path.to_owned()))
-                .or_else(|e| {
-                    Ok(AppliedUpdate::FailedApplication(
-                        FailedUpdateApplication::new(update, e.into()),
-                    ))
-                })
-                .map(|update| vec![update]),
+            UpdateKind::DirRemoved => {
+                let path = update.path();
+                self.concrete
+                    .rmdir(path)
+                    .await
+                    .map(|_| AppliedUpdate::DirRemoved(path.to_owned()))
+                    .or_else(|e| {
+                        Ok(AppliedUpdate::FailedApplication(
+                            FailedUpdateApplication::new(update, e.into()),
+                        ))
+                    })
+                    .map(|update| vec![update])
+            }
+            UpdateKind::FileCreated => {
+                let path = update.path();
+                self.clone_file_concrete(&ref_fs.concrete, path)
+                    .await
+                    .map(|(sync_info, size)| {
+                        AppliedUpdate::FileCreated(AppliedFileUpdate::new(path, size, sync_info))
+                    })
+                    .or_else(|e| {
+                        Ok(AppliedUpdate::FailedApplication(
+                            FailedUpdateApplication::new(update, e),
+                        ))
+                    })
+                    .map(|update| vec![update])
+            }
+            UpdateKind::FileModified => {
+                let path = update.path();
+                self.clone_file_concrete(&ref_fs.concrete, path)
+                    .await
+                    .map(|(sync_info, size)| {
+                        AppliedUpdate::FileModified(AppliedFileUpdate::new(path, size, sync_info))
+                    })
+                    .or_else(|e| {
+                        Ok(AppliedUpdate::FailedApplication(
+                            FailedUpdateApplication::new(update, e),
+                        ))
+                    })
+                    .map(|update| vec![update])
+            }
+            UpdateKind::FileRemoved => {
+                let path = update.path();
+                self.concrete
+                    .rm(path)
+                    .await
+                    .map(|_| AppliedUpdate::FileRemoved(path.to_owned()))
+                    .or_else(|e| {
+                        Ok(AppliedUpdate::FailedApplication(
+                            FailedUpdateApplication::new(update, e.into()),
+                        ))
+                    })
+                    .map(|update| vec![update])
+            }
         }
     }
 
@@ -385,7 +420,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
                         }
                         Err(error) => {
                             let failure = FailedUpdateApplication::new(
-                                VfsNodeUpdate::FileCreated(child_path),
+                                VfsNodeUpdate::file_created(child_path),
                                 error,
                             );
                             errors.push(failure)
@@ -458,7 +493,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/e/g/h").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::DirCreated(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::dir_created(dir_path.clone()))
             .await
             .unwrap();
 
@@ -482,7 +517,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/a/b").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::DirRemoved(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::dir_removed(dir_path.clone()))
             .await
             .unwrap();
 
@@ -513,7 +548,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f3.rs").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::FileCreated(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::file_created(dir_path.clone()))
             .await
             .unwrap();
 
@@ -537,7 +572,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f1.md").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::FileModified(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::file_modified(dir_path.clone()))
             .await
             .unwrap();
 
@@ -561,7 +596,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f2.pdf").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::FileRemoved(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsNodeUpdate::file_removed(dir_path.clone()))
             .await
             .unwrap();
 

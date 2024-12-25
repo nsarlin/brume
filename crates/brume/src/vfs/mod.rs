@@ -134,6 +134,21 @@ impl<SyncInfo> Vfs<SyncInfo> {
 
                 Ok(())
             }
+            AppliedUpdate::Conflict(update) => {
+                let node = self
+                    .root_mut()
+                    .find_node_mut(update.path())
+                    .ok_or_else(|| {
+                        VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(
+                            update.path().to_owned(),
+                        ))
+                    })?;
+
+                let state = NodeState::Conflict;
+                node.set_state(state);
+
+                Ok(())
+            }
         }
     }
 }
