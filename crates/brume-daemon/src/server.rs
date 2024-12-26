@@ -1,6 +1,13 @@
 //! Handle connections to the daemon
 
-use std::{future::Future, io, sync::Arc};
+use std::{
+    future::Future,
+    io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -36,6 +43,15 @@ pub struct Server {
     synchro_list: ReadWriteSynchroList,
     daemon: BrumeDaemon,
     from_daemon: Arc<Mutex<UnboundedReceiver<(AnyFsCreationInfo, AnyFsCreationInfo)>>>,
+    error_mode: ErrorMode,
+    is_running: AtomicBool,
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub enum ErrorMode {
+    #[default]
+    Log,
+    Exit,
 }
 
 impl Server {
@@ -70,11 +86,18 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             synchro_list,
             daemon,
             from_daemon: Arc::new(Mutex::new(from_daemon)),
+            error_mode: ErrorMode::default(),
+            is_running: AtomicBool::new(false),
         })
+    }
+
+    pub fn set_error_mode(&mut self, mode: ErrorMode) {
+        self.error_mode = mode;
     }
 
     /// Handle client connections and periodically synchronize filesystems
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        self.is_running.store(true, Ordering::Relaxed);
         // Handle connections from client apps
         {
             let server = self.clone();
@@ -93,7 +116,11 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             for res in results {
                 if let Err(err) = res {
                     let wrapped_err = anyhow!(err);
-                    error!("Failed to synchronize filesystems: {wrapped_err:?}")
+                    error!("Failed to synchronize filesystems: {wrapped_err:?}");
+                    if self.error_mode == ErrorMode::Exit {
+                        self.is_running.store(false, Ordering::Relaxed);
+                        return Err(wrapped_err);
+                    }
                 }
             }
 
@@ -101,14 +128,18 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             loop {
                 tokio::select! {
                     _ = interval.tick() => break,
-                    _ = self.update_synchro_list() => continue
+                    res = self.update_synchro_list() => {
+                        res.inspect_err(|_| {
+                            self.is_running.store(false, Ordering::Relaxed);
+                        })?
+                    }
                 }
             }
         }
     }
 
     /// Start a new rpc server that will handle incoming requests from client applications
-    pub async fn serve(&self) -> Result<()> {
+    pub async fn serve(&self) {
         async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
             tokio::spawn(fut);
         }
@@ -132,12 +163,17 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
     }
 
+    /// Return true if the server is running
+    pub fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::Relaxed)
+    }
+
     /// The list of the synchronized fs
     pub fn synchro_list(&self) -> ReadWriteSynchroList {
         self.synchro_list.clone()
     }
 
-    pub async fn update_synchro_list(&self) {
+    pub async fn update_synchro_list(&self) -> Result<()> {
         let mut new_synchros = Vec::new();
         {
             let mut recver = self.from_daemon.lock().await;
@@ -148,9 +184,13 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             for (local, remote) in new_synchros {
                 if let Err(err) = self.synchro_list.insert(local, remote).await {
                     let wrapped_err = anyhow!(err);
-                    error!("Failed insert new synchro: {wrapped_err:?}")
+                    error!("Failed insert new synchro: {wrapped_err:?}");
+                    if self.error_mode == ErrorMode::Exit {
+                        return Err(wrapped_err);
+                    }
                 }
             }
+            Ok(())
         }
     }
 }
