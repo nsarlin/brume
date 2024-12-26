@@ -282,6 +282,8 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
             }
             UpdateKind::DirRemoved => {
                 let path = update.path();
+                info!("Removing dir {:?} from {}", path, Concrete::TYPE_NAME);
+
                 self.concrete
                     .rmdir(path)
                     .await
@@ -323,6 +325,8 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
             }
             UpdateKind::FileRemoved => {
                 let path = update.path();
+                info!("Removing file {:?} from {}", path, Concrete::TYPE_NAME);
+
                 self.concrete
                     .rm(path)
                     .await
