@@ -15,9 +15,12 @@ use tarpc::{
     tokio_serde::formats::Bincode,
     tokio_util::codec::{length_delimited::Builder, LengthDelimitedCodec},
 };
-use tokio::sync::{
-    mpsc::{unbounded_channel, UnboundedReceiver},
-    Mutex,
+use tokio::{
+    sync::{
+        mpsc::{unbounded_channel, UnboundedReceiver},
+        Mutex,
+    },
+    time,
 };
 
 use crate::{
@@ -68,6 +71,40 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             daemon,
             from_daemon: Arc::new(Mutex::new(from_daemon)),
         })
+    }
+
+    /// Handle client connections and periodically synchronize filesystems
+    pub async fn run(self: Arc<Self>) -> Result<()> {
+        // Handle connections from client apps
+        {
+            let server = self.clone();
+            tokio::spawn(async move { server.serve().await });
+        }
+
+        // Synchronize all filesystems
+        // TODO: configure duration
+        let mut interval = time::interval(time::Duration::from_secs(10));
+        loop {
+            info!("Starting full sync for all filesystems");
+            let synchro_list = self.synchro_list();
+
+            let results = synchro_list.sync_all().await;
+
+            for res in results {
+                if let Err(err) = res {
+                    let wrapped_err = anyhow!(err);
+                    error!("Failed to synchronize filesystems: {wrapped_err:?}")
+                }
+            }
+
+            // Wait and update synchro list with any new sync from user
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => break,
+                    _ = self.update_synchro_list() => continue
+                }
+            }
+        }
     }
 
     /// Start a new rpc server that will handle incoming requests from client applications
