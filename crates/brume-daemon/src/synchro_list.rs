@@ -160,7 +160,6 @@ impl SynchroList {
         fs_info: AnyFsCreationInfo,
     ) -> Result<AnyFsRef, ConcreteFsError> {
         let fs_ref: AnyFsRef = fs_info.clone().into();
-        // TODO: improve duplicates handling
         match fs_info {
             AnyFsCreationInfo::LocalDir(info) => {
                 let concrete = info.try_into()?;

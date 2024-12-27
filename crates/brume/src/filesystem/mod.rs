@@ -7,7 +7,10 @@ use log::{error, info, warn};
 
 use std::sync::{atomic::AtomicU64, Arc};
 
-use futures::{future::try_join_all, TryFutureExt};
+use futures::{
+    future::{join_all, try_join_all},
+    TryFutureExt,
+};
 use tokio::try_join;
 
 use crate::{
@@ -72,7 +75,7 @@ impl<SyncInfo> ConcreteDirCloneResult<SyncInfo> {
         self.success.take()
     }
 
-    /// Returned the nodes that failed to be cloned
+    /// Returns the nodes that failed to be cloned
     pub fn take_failures(&mut self) -> Vec<FailedUpdateApplication> {
         std::mem::take(&mut self.failures)
     }
@@ -394,44 +397,58 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         };
 
         let mut dir = DirTree::new(path.name(), sync_info);
-
         let mut errors = Vec::new();
 
-        // TODO: parallelize file download
-        for ref_child in ref_fs.dir.children().iter() {
-            let mut child_path = path.to_owned();
-            child_path.push(ref_child.name());
-            match ref_child {
-                VfsNode::Dir(ref_dir) => {
-                    let mut result = Box::pin(self.clone_dir_concrete(
-                        FileSystemDir::new(ref_fs.concrete, ref_dir),
-                        &child_path,
-                    ))
-                    .await;
+        let futures: Vec<_> = ref_fs
+            .dir
+            .children()
+            .iter()
+            .map(|ref_child| async move {
+                let mut child_path = path.to_owned();
+                child_path.push(ref_child.name());
+                match ref_child {
+                    VfsNode::Dir(ref_dir) => {
+                        let mut result = Box::pin(self.clone_dir_concrete(
+                            FileSystemDir::new(ref_fs.concrete, ref_dir),
+                            &child_path,
+                        ))
+                        .await;
 
-                    if let Some(success) = result.take_success() {
-                        dir.insert_child(VfsNode::Dir(success));
+                        let success = result.take_success().map(VfsNode::Dir);
+                        let failures = result.take_failures();
+                        (success, failures)
                     }
+                    VfsNode::File(_) => {
+                        match self.clone_file_concrete(ref_fs.concrete, &child_path).await {
+                            Ok((sync_info, size)) => {
+                                let node = VfsNode::File(FileMeta::new(
+                                    child_path.name(),
+                                    size,
+                                    sync_info,
+                                ));
+                                (Some(node), Vec::new())
+                            }
+                            Err(error) => {
+                                let failure = FailedUpdateApplication::new(
+                                    VfsNodeUpdate::file_created(child_path),
+                                    error,
+                                );
+                                (None, vec![failure])
+                            }
+                        }
+                    }
+                }
+            })
+            .collect();
 
-                    errors.extend(result.take_failures())
-                }
-                VfsNode::File(_) => {
-                    match self.clone_file_concrete(ref_fs.concrete, &child_path).await {
-                        Ok((sync_info, size)) => {
-                            let node =
-                                VfsNode::File(FileMeta::new(child_path.name(), size, sync_info));
-                            dir.insert_child(node);
-                        }
-                        Err(error) => {
-                            let failure = FailedUpdateApplication::new(
-                                VfsNodeUpdate::file_created(child_path),
-                                error,
-                            );
-                            errors.push(failure)
-                        }
-                    }
-                }
-            };
+        let results = join_all(futures).await;
+
+        for (success, failures) in results {
+            if let Some(node) = success {
+                dir.insert_child(node);
+            }
+
+            errors.extend(failures);
         }
 
         ConcreteDirCloneResult::new(dir, errors)
