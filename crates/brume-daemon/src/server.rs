@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -36,6 +37,44 @@ use crate::{
     synchro_list::ReadWriteSynchroList,
 };
 
+/// Configuration of a [`Server`]
+#[derive(Copy, Clone)]
+pub struct ServerConfig {
+    /// Time between two synchronizations
+    sync_interval: Duration,
+    /// How internal errors are handled
+    error_mode: ErrorMode,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            sync_interval: Duration::from_secs(10),
+            error_mode: ErrorMode::default(),
+        }
+    }
+}
+
+impl ServerConfig {
+    pub fn with_sync_interval(self, sync_interval: Duration) -> Self {
+        Self {
+            sync_interval,
+            ..self
+        }
+    }
+
+    pub fn with_error_mode(self, error_mode: ErrorMode) -> Self {
+        Self { error_mode, ..self }
+    }
+}
+
+#[derive(Default, Copy, Clone, PartialEq, Eq)]
+pub enum ErrorMode {
+    #[default]
+    Log,
+    Exit,
+}
+
 /// A Server that handle RPC connections from client applications
 pub struct Server {
     codec_builder: Builder,
@@ -43,19 +82,12 @@ pub struct Server {
     synchro_list: ReadWriteSynchroList,
     daemon: BrumeDaemon,
     from_daemon: Arc<Mutex<UnboundedReceiver<(AnyFsCreationInfo, AnyFsCreationInfo)>>>,
-    error_mode: ErrorMode,
     is_running: AtomicBool,
-}
-
-#[derive(Default, PartialEq, Eq)]
-pub enum ErrorMode {
-    #[default]
-    Log,
-    Exit,
+    config: ServerConfig,
 }
 
 impl Server {
-    pub fn new() -> Result<Self> {
+    pub fn new(config: ServerConfig) -> Result<Self> {
         let name = BRUME_SOCK_NAME
             .to_ns_name::<GenericNamespaced>()
             .context("Invalid name for sock")?;
@@ -86,13 +118,9 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             synchro_list,
             daemon,
             from_daemon: Arc::new(Mutex::new(from_daemon)),
-            error_mode: ErrorMode::default(),
             is_running: AtomicBool::new(false),
+            config,
         })
-    }
-
-    pub fn set_error_mode(&mut self, mode: ErrorMode) {
-        self.error_mode = mode;
     }
 
     /// Handle client connections and periodically synchronize filesystems
@@ -105,8 +133,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
 
         // Synchronize all filesystems
-        // TODO: configure duration
-        let mut interval = time::interval(time::Duration::from_secs(10));
+        let mut interval = time::interval(self.config.sync_interval);
         loop {
             info!("Starting full sync for all filesystems");
             let synchro_list = self.synchro_list();
@@ -117,7 +144,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                 if let Err(err) = res {
                     let wrapped_err = anyhow!(err);
                     error!("Failed to synchronize filesystems: {wrapped_err:?}");
-                    if self.error_mode == ErrorMode::Exit {
+                    if self.config.error_mode == ErrorMode::Exit {
                         self.is_running.store(false, Ordering::Relaxed);
                         return Err(wrapped_err);
                     }
@@ -173,6 +200,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         self.synchro_list.clone()
     }
 
+    /// Update the synchro list from messages of client applications
     pub async fn update_synchro_list(&self) -> Result<()> {
         let mut new_synchros = Vec::new();
         {
@@ -185,7 +213,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                 if let Err(err) = self.synchro_list.insert(local, remote).await {
                     let wrapped_err = anyhow!(err);
                     error!("Failed insert new synchro: {wrapped_err:?}");
-                    if self.error_mode == ErrorMode::Exit {
+                    if self.config.error_mode == ErrorMode::Exit {
                         return Err(wrapped_err);
                     }
                 }
