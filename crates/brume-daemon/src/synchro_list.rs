@@ -1,17 +1,14 @@
 use std::{any::Any, collections::HashMap, fmt::Display, sync::Arc};
 
 use brume::{
-    concrete::{
-        local::{LocalDir, LocalDirDescription},
-        nextcloud::{NextcloudFs, NextcloudFsDescription},
-        ConcreteFS, ConcreteFsError,
-    },
+    concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, ConcreteFsError},
     filesystem::FileSystem,
     synchro::Synchro,
 };
 use futures::future::join_all;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
+use uuid::Uuid;
 
 use crate::protocol::{AnyFsCreationInfo, AnyFsDescription, SynchroId};
 
@@ -50,6 +47,37 @@ pub enum SynchroCreationError {
     FileSystemCreationError(#[from] ConcreteFsError),
 }
 
+/// A reference to a filesystem in the [`SynchroList`]
+///
+/// This type represents only an index and needs a valid [`SynchroList`], to actually be used. It
+/// must not be used after the Filesystem it points to has been removed from the SynchroList.
+#[derive(Clone, Debug)]
+pub struct AnyFsRef {
+    id: Uuid,
+    description: AnyFsDescription,
+}
+
+impl Display for AnyFsRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.description)
+    }
+}
+
+impl From<AnyFsCreationInfo> for AnyFsRef {
+    fn from(value: AnyFsCreationInfo) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            description: value.into(),
+        }
+    }
+}
+
+impl AnyFsRef {
+    pub fn description(&self) -> &AnyFsDescription {
+        &self.description
+    }
+}
+
 /// A [`Synchro`] where the [`Concrete`] filesystems are only known at runtime.
 ///
 /// This type represents only an index and needs a valid [`SynchroList`], to actually be used. It
@@ -58,8 +86,8 @@ pub enum SynchroCreationError {
 /// [`Concrete`]: ConcreteFS
 #[derive(Clone, Debug)]
 pub struct AnySynchroRef {
-    local: AnyFsDescription,
-    remote: AnyFsDescription,
+    local: AnyFsRef,
+    remote: AnyFsRef,
     _id: SynchroId,
 }
 
@@ -117,8 +145,8 @@ impl<T: ConcreteFS + 'static> DynTyped for Mutex<FileSystem<T>> {
 #[derive(Default)]
 pub struct SynchroList {
     synchros: Vec<AnySynchroRef>,
-    nextcloud_list: HashMap<NextcloudFsDescription, Mutex<FileSystem<NextcloudFs>>>,
-    local_dir_list: HashMap<LocalDirDescription, Mutex<FileSystem<LocalDir>>>,
+    nextcloud_list: HashMap<Uuid, Mutex<FileSystem<NextcloudFs>>>,
+    local_dir_list: HashMap<Uuid, Mutex<FileSystem<LocalDir>>>,
 }
 
 impl SynchroList {
@@ -127,22 +155,24 @@ impl SynchroList {
         Self::default()
     }
 
-    fn create_and_insert_fs(&mut self, fs_info: AnyFsCreationInfo) -> Result<(), ConcreteFsError> {
+    fn create_and_insert_fs(
+        &mut self,
+        fs_info: AnyFsCreationInfo,
+    ) -> Result<AnyFsRef, ConcreteFsError> {
+        let fs_ref: AnyFsRef = fs_info.clone().into();
         // TODO: improve duplicates handling
         match fs_info {
             AnyFsCreationInfo::LocalDir(info) => {
-                let creation_info = info.clone().try_into()?;
+                let concrete = info.try_into()?;
                 self.local_dir_list
-                    .entry(info.into())
-                    .or_insert_with(|| Mutex::new(FileSystem::new(creation_info)));
-                Ok(())
+                    .insert(fs_ref.id, Mutex::new(FileSystem::new(concrete)));
+                Ok(fs_ref)
             }
             AnyFsCreationInfo::Nextcloud(info) => {
-                let creation_info = info.clone().try_into()?;
+                let concrete = info.try_into()?;
                 self.nextcloud_list
-                    .entry(info.into())
-                    .or_insert_with(|| Mutex::new(FileSystem::new(creation_info)));
-                Ok(())
+                    .insert(fs_ref.id, Mutex::new(FileSystem::new(concrete)));
+                Ok(fs_ref)
             }
         }
     }
@@ -154,8 +184,9 @@ impl SynchroList {
         remote_desc: &AnyFsDescription,
     ) -> bool {
         for sync in &self.synchros {
-            if (&sync.local == local_desc || &sync.local == remote_desc)
-                && (&sync.remote == local_desc || &sync.remote == remote_desc)
+            if (sync.local.description() == local_desc || sync.local.description() == remote_desc)
+                && (sync.remote.description() == local_desc
+                    || sync.remote.description() == remote_desc)
             {
                 return true;
             }
@@ -178,12 +209,12 @@ impl SynchroList {
         }
         let id = SynchroId::new();
 
-        self.create_and_insert_fs(local.clone())?;
-        self.create_and_insert_fs(remote.clone())?;
+        let local_ref = self.create_and_insert_fs(local.clone())?;
+        let remote_ref = self.create_and_insert_fs(remote.clone())?;
 
         let synchro = AnySynchroRef {
-            local: local.into(),
-            remote: remote.into(),
+            local: local_ref,
+            remote: remote_ref,
             _id: id,
         };
 
@@ -194,16 +225,16 @@ impl SynchroList {
 
     fn get_fs<Concrete: ConcreteFS + 'static>(
         &self,
-        desc: &AnyFsDescription,
+        fs: &AnyFsRef,
     ) -> Option<&Mutex<FileSystem<Concrete>>> {
-        match desc {
-            AnyFsDescription::LocalDir(desc) => self
+        match fs.description() {
+            AnyFsDescription::LocalDir(_) => self
                 .local_dir_list
-                .get(desc)
+                .get(&fs.id)
                 .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Concrete>>>()),
-            AnyFsDescription::Nextcloud(desc) => self
+            AnyFsDescription::Nextcloud(_) => self
                 .nextcloud_list
-                .get(desc)
+                .get(&fs.id)
                 .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Concrete>>>()),
         }
     }
@@ -252,7 +283,7 @@ impl SynchroList {
             .synchros
             .iter()
             .map(|synchro| async {
-                match (&synchro.local, &synchro.remote) {
+                match (synchro.local.description(), synchro.remote.description()) {
                     (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
                         self.sync_one::<LocalDir, LocalDir>(synchro).await
                     }
