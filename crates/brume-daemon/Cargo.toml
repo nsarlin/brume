@@ -20,6 +20,10 @@ interprocess = { version = "2.2", features = ["tokio"], optional = true }
 
 brume = { version = "0.1.0", path = "../brume", optional = true }
 
+[dev-dependencies]
+tempfile = "3.14"
+testcontainers = { version = "0.23", features = ["http_wait"] }
+
 [features]
 default = ["server"]
 server = [

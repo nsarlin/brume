@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use brume_daemon::server::Server as BrumeServer;
+use brume_daemon::server::{Server as BrumeServer, ServerConfig};
 
 use env_logger::Builder;
 use log::LevelFilter;
@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
         .filter(Some("tarpc"), LevelFilter::Error)
         .init();
 
-    let server = Arc::new(BrumeServer::new()?);
+    let server = Arc::new(BrumeServer::new(ServerConfig::default())?);
 
     server.run().await
 }
