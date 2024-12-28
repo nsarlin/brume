@@ -65,6 +65,12 @@ pub trait ConcreteFS:
         + Serialize
         + for<'a> Deserialize<'a>;
 
+    /// Checks if the creation info can be used to instantiate a concrete FS
+    ///
+    /// This is used to allow clients to return early errors to users.
+    /// For example, it may imply checking that a login/password is valid or that a path exists
+    fn validate(info: &Self::CreationInfo) -> impl Future<Output = Result<(), Self::IoError>>;
+
     /// Return a description of this filesystem instance.
     ///
     /// This description should uniquely identify the Filesystem but also have a human readable

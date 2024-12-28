@@ -3,6 +3,7 @@
 use std::fmt::Display;
 
 use brume::concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS};
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -37,6 +38,24 @@ impl SynchroId {
 pub enum AnyFsCreationInfo {
     LocalDir(<LocalDir as ConcreteFS>::CreationInfo),
     Nextcloud(<NextcloudFs as ConcreteFS>::CreationInfo),
+}
+
+impl AnyFsCreationInfo {
+    pub async fn validate(&self) -> Result<(), String> {
+        match self {
+            AnyFsCreationInfo::LocalDir(info) => LocalDir::validate(info)
+                .await
+                .map_err(|_| "Invalid directory for synchronization".to_string()),
+            AnyFsCreationInfo::Nextcloud(info) => NextcloudFs::validate(info).await.map_err(|e| {
+                let msg = if let Some(msg) = e.protocol_error_message() {
+                    msg
+                } else {
+                    e.to_string()
+                };
+                format!("Failed to connect to Nextcloud server: {msg}")
+            }),
+        }
+    }
 }
 
 /// The information needed to describe a FS that can be synchronized.

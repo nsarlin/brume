@@ -39,6 +39,9 @@ impl BrumeService for BrumeDaemon {
         let remote_desc = AnyFsDescription::from(remote.clone());
         info!("Received synchro creation request: local {local_desc}, remote {remote_desc}");
 
+        local.validate().await.inspect_err(|e| warn!("{e}"))?;
+        remote.validate().await.inspect_err(|e| warn!("{e}"))?;
+
         // Check if the fs pair is already in sync to return an error to the user
         {
             let list = self.synchro_list.read().await;
