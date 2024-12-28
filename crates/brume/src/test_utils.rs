@@ -606,6 +606,10 @@ impl ConcreteFS for ConcreteTestNode {
 
     type Description = String;
 
+    async fn validate(_info: &Self::CreationInfo) -> Result<(), Self::IoError> {
+        Ok(())
+    }
+
     fn description(&self) -> Self::Description {
         self.inner.borrow().name().to_string()
     }

@@ -1,6 +1,7 @@
 //! Manipulation of a Nextcloud filesystem with WebDAV
 
 use std::{
+    error::Error,
     fmt::{Display, Formatter},
     io::{self},
     string::FromUtf8Error,
@@ -42,6 +43,26 @@ pub enum NextcloudFsError {
     ProtocolError(#[from] reqwest_dav::Error),
     #[error("io error while sending or receiving a file")]
     IoError(#[from] io::Error),
+}
+
+impl NextcloudFsError {
+    /// Return the inner error message in case of protocol error
+    pub fn protocol_error_message(&self) -> Option<String> {
+        match self {
+            NextcloudFsError::ProtocolError(reqwest_dav::Error::Reqwest(error)) => {
+                if let Some(source) = error.source() {
+                    if let Some(source2) = source.source() {
+                        Some(source2.to_string())
+                    } else {
+                        Some(source.to_string())
+                    }
+                } else {
+                    Some(error.to_string())
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 impl From<reqwest::Error> for NextcloudFsError {
@@ -87,6 +108,17 @@ impl ConcreteFS for NextcloudFs {
     type CreationInfo = NextcloudFsCreationInfo;
 
     type Description = NextcloudFsDescription;
+
+    async fn validate(info: &Self::CreationInfo) -> Result<(), Self::IoError> {
+        // Try to create a nextcloud client instance and access the remote url
+        let nextcloud: Self = info.clone().try_into()?;
+        nextcloud
+            .client
+            .list("", Depth::Number(0))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.into())
+    }
 
     fn description(&self) -> Self::Description {
         NextcloudFsDescription {

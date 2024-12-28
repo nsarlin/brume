@@ -125,6 +125,14 @@ impl ConcreteFS for LocalDir {
 
     type Description = LocalDirDescription;
 
+    async fn validate(info: &Self::CreationInfo) -> Result<(), Self::IoError> {
+        if info.0.exists() {
+            Ok(())
+        } else {
+            Err(LocalDirError::invalid_path(&info.0))
+        }
+    }
+
     fn description(&self) -> Self::Description {
         LocalDirDescription(self.path.clone())
     }
