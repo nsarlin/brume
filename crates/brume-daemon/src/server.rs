@@ -1,13 +1,11 @@
 //! The server provides rpc to remotely manipulate the list of synchronized Filesystems
 
-use std::borrow::Borrow;
-
 use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    protocol::{AnyFsCreationInfo, AnyFsDescription, BrumeService},
+    protocol::{AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService},
     synchro_list::{AnySynchroRef, ReadOnlySynchroList},
 };
 
@@ -15,19 +13,21 @@ use crate::{
 ///
 /// The server and the [`Daemon`] are running in separate tasks to be able to give a quick feedback
 /// to client applications even when a synchronization is in progress.
+///
+/// [`Daemon`]: crate::daemon::Daemon
 #[derive(Clone)]
 pub struct Server {
-    to_daemon: UnboundedSender<(AnyFsCreationInfo, AnyFsCreationInfo)>,
+    to_server: UnboundedSender<AnySynchroCreationInfo>,
     synchro_list: ReadOnlySynchroList,
 }
 
 impl Server {
     pub(crate) fn new(
-        to_server: UnboundedSender<(AnyFsCreationInfo, AnyFsCreationInfo)>,
+        to_server: UnboundedSender<AnySynchroCreationInfo>,
         synchro_list: ReadOnlySynchroList,
     ) -> Self {
         Self {
-            to_daemon: to_server,
+            to_server,
             synchro_list,
         }
     }
@@ -39,6 +39,7 @@ impl BrumeService for Server {
         _context: Context,
         local: AnyFsCreationInfo,
         remote: AnyFsCreationInfo,
+        name: Option<String>,
     ) -> Result<(), String> {
         let local_desc = AnyFsDescription::from(local.clone());
         let remote_desc = AnyFsDescription::from(remote.clone());
@@ -64,9 +65,9 @@ impl BrumeService for Server {
             }
         }
 
-        self.to_daemon
-            .send((local, remote))
-            .map_err(|e| e.to_string())?;
+        let synchro = AnySynchroCreationInfo::new(local, remote, name);
+
+        self.to_server.send(synchro).map_err(|e| e.to_string())?;
 
         Ok(())
     }

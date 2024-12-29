@@ -33,6 +33,10 @@ enum Commands {
         /// The remote filesystem for the synchronization
         #[arg(short, long, value_name = "FILESYSTEM", value_parser = parse_fs_argument)]
         remote: AnyFsCreationInfo,
+
+        /// An optional name that will be given to the synchro instead of the default one
+        #[arg(short, long)]
+        name: Option<String>,
     },
 
     /// List all synchronizations
@@ -49,25 +53,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?;
 
     match cli.command {
-        Commands::New { local, remote } => {
+        Commands::New {
+            local,
+            remote,
+            name,
+        } => {
             let local_desc = AnyFsDescription::from(local.clone());
             let remote_desc = AnyFsDescription::from(remote.clone());
             println!("Creating synchro between {local_desc} and {remote_desc}");
             daemon
-                .new_synchro(context::current(), local, remote)
+                .new_synchro(context::current(), local, remote, name)
                 .await??;
             println!("Done");
         }
         Commands::List {} => {
             let synchros = daemon.list_synchros(context::current()).await?;
             let mut table = Table::new();
-            table.set_header(vec!["ID", "Local", "Remote"]);
+            table.set_header(vec!["ID", "Local", "Remote", "Name"]);
 
             for synchro in synchros {
                 table.add_row(vec![
-                    format!("{:x}", synchro.id().short()),
+                    format!("{:08x}", synchro.id().short()),
                     synchro.local().to_string(),
                     synchro.remote().to_string(),
+                    synchro.name().to_string(),
                 ]);
             }
 
