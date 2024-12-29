@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 pub use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
 
+use crate::synchro_list::AnySynchroRef;
+
 // TODO: make configurable
 /// Name of the socket where the clients should connect
 pub const BRUME_SOCK_NAME: &str = "brume.socket";
@@ -30,6 +32,10 @@ impl SynchroId {
 
     pub fn id(&self) -> Uuid {
         self.0
+    }
+
+    pub fn short(&self) -> u32 {
+        self.0.as_fields().0
     }
 }
 
@@ -90,4 +96,6 @@ pub trait BrumeService {
     /// Create a new synchronization between a "remote" and a "local" fs
     async fn new_synchro(local: AnyFsCreationInfo, remote: AnyFsCreationInfo)
         -> Result<(), String>;
+
+    async fn list_synchros() -> Vec<AnySynchroRef>;
 }
