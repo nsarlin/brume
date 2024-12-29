@@ -34,10 +34,8 @@ pub enum ConcreteUpdateApplicationError {
     PathIsRoot,
 }
 
-pub trait FsInstanceDescription {}
-
-pub trait FsCreationInfo {
-    type Description: FsInstanceDescription;
+pub trait FsInstanceDescription: Display {
+    fn name(&self) -> &str;
 }
 
 pub trait Named {
@@ -56,7 +54,7 @@ pub trait ConcreteFS:
     /// Info needed to create a new filesystem of this type (url, login,...)
     type CreationInfo: Debug + Clone + Serialize + for<'a> Deserialize<'a>;
     /// A unique description of a particular filesystem instance
-    type Description: Display
+    type Description: FsInstanceDescription
         + From<Self::CreationInfo>
         + Clone
         + Hash

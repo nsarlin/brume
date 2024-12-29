@@ -117,7 +117,7 @@ async fn main() {
     connect_to_daemon()
         .await
         .unwrap()
-        .new_synchro(context::current(), local_a, remote.clone())
+        .new_synchro(context::current(), local_a, remote.clone(), None)
         .await
         .unwrap()
         .unwrap();
@@ -135,7 +135,7 @@ async fn main() {
     connect_to_daemon()
         .await
         .unwrap()
-        .new_synchro(context::current(), local_b, remote)
+        .new_synchro(context::current(), local_b, remote, None)
         .await
         .unwrap()
         .unwrap();

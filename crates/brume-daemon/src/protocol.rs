@@ -2,7 +2,7 @@
 
 use std::fmt::Display;
 
-use brume::concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS};
+use brume::concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, FsInstanceDescription};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -64,6 +64,35 @@ impl AnyFsCreationInfo {
     }
 }
 
+/// The information needed to create a new synchro between filesystems
+pub struct AnySynchroCreationInfo {
+    local: AnyFsCreationInfo,
+    remote: AnyFsCreationInfo,
+    name: Option<String>,
+}
+
+impl AnySynchroCreationInfo {
+    pub fn new(local: AnyFsCreationInfo, remote: AnyFsCreationInfo, name: Option<String>) -> Self {
+        Self {
+            local,
+            remote,
+            name,
+        }
+    }
+
+    pub fn local(&self) -> &AnyFsCreationInfo {
+        &self.local
+    }
+
+    pub fn remote(&self) -> &AnyFsCreationInfo {
+        &self.remote
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 /// The information needed to describe a FS that can be synchronized.
 ///
 /// This is used for display and to avoid duplicate synchros.
@@ -71,6 +100,15 @@ impl AnyFsCreationInfo {
 pub enum AnyFsDescription {
     LocalDir(<LocalDir as ConcreteFS>::Description),
     Nextcloud(<NextcloudFs as ConcreteFS>::Description),
+}
+
+impl AnyFsDescription {
+    pub fn name(&self) -> &str {
+        match self {
+            AnyFsDescription::LocalDir(desc) => desc.name(),
+            AnyFsDescription::Nextcloud(desc) => desc.name(),
+        }
+    }
 }
 
 impl Display for AnyFsDescription {
@@ -94,8 +132,11 @@ impl From<AnyFsCreationInfo> for AnyFsDescription {
 #[tarpc::service]
 pub trait BrumeService {
     /// Create a new synchronization between a "remote" and a "local" fs
-    async fn new_synchro(local: AnyFsCreationInfo, remote: AnyFsCreationInfo)
-        -> Result<(), String>;
+    async fn new_synchro(
+        local: AnyFsCreationInfo,
+        remote: AnyFsCreationInfo,
+        name: Option<String>,
+    ) -> Result<(), String>;
 
     async fn list_synchros() -> Vec<AnySynchroRef>;
 }

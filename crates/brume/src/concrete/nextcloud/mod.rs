@@ -24,7 +24,7 @@ use crate::{
 
 use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
 
-use super::{ConcreteFS, ConcreteFsError, Named};
+use super::{ConcreteFS, ConcreteFsError, FsInstanceDescription, Named};
 
 const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
@@ -240,6 +240,12 @@ impl<'a> From<&'a NextcloudSyncInfo> for () {
 pub struct NextcloudFsDescription {
     server_url: String,
     name: String,
+}
+
+impl FsInstanceDescription for NextcloudFsDescription {
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl Display for NextcloudFsDescription {

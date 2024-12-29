@@ -8,7 +8,7 @@ use tokio_util::io::StreamReader;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError, Named},
+    concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError, FsInstanceDescription, Named},
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsNodeUpdate},
     vfs::{DirTree, FileMeta, NodeState, Vfs, VfsNode, VirtualPath, VirtualPathBuf},
@@ -783,6 +783,12 @@ impl ConcreteFS for ConcreteTestNode {
 }
 
 pub type TestError = ConcreteFsError;
+
+impl FsInstanceDescription for String {
+    fn name(&self) -> &str {
+        self
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecursiveTestSyncInfo {

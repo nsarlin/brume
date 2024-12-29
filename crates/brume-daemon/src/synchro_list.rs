@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use uuid::Uuid;
 
-use crate::protocol::{AnyFsCreationInfo, AnyFsDescription, SynchroId};
+use crate::protocol::{AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, SynchroId};
 
 #[derive(Error, Debug)]
 pub enum SyncError {
@@ -90,6 +90,7 @@ pub struct AnySynchroRef {
     local: AnyFsRef,
     remote: AnyFsRef,
     id: SynchroId,
+    name: String,
 }
 
 impl Display for AnySynchroRef {
@@ -99,16 +100,29 @@ impl Display for AnySynchroRef {
 }
 
 impl AnySynchroRef {
+    /// Returns the local counterpart of the synchro
     pub fn local(&self) -> &AnyFsRef {
         &self.local
     }
 
+    /// Returns the remote counterpart of the synchro
     pub fn remote(&self) -> &AnyFsRef {
         &self.remote
     }
 
+    /// Returns the unique id of the synchro.
+    ///
+    /// This id is "universally unique", meaning that they are never reused
     pub fn id(&self) -> SynchroId {
         self.id
+    }
+
+    /// Returns the name of the synchro
+    ///
+    /// This name is only "relatively" unique, meaning that names can be reused. However, at a
+    /// specific point in time and for a specific [`SynchroList`], there should be no collision.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -195,7 +209,7 @@ impl SynchroList {
         }
     }
 
-    /// Check if the two Filesystems in the pair are already synchronized together.
+    /// Checks if the two Filesystems in the pair are already synchronized together.
     pub fn is_synchronized(
         &self,
         local_desc: &AnyFsDescription,
@@ -213,27 +227,81 @@ impl SynchroList {
         false
     }
 
-    /// Create and insert a new filesystem Synchro in the list
+    fn name_is_unique(&self, name: &str) -> bool {
+        !self.synchros.iter().any(|sync| sync.name == name)
+    }
+
+    fn make_unique_name(&self, name: &str) -> String {
+        if self.name_is_unique(name) {
+            return name.to_string();
+        }
+
+        let mut counter = 1;
+        loop {
+            let new_name = format!("{}{}", name, counter);
+            if self.name_is_unique(name) {
+                return new_name;
+            }
+            counter += 1;
+        }
+    }
+
+    /// Generates a unique and simple name for a synchro, based on the name of the remote and local
+    /// fs
+    fn unique_synchro_name(&self, local_name: &str, remote_name: &str) -> String {
+        let same_remote: Vec<_> = self
+            .synchros
+            .iter()
+            .filter(|sync| sync.remote.description.name() == remote_name)
+            .collect();
+
+        if same_remote.is_empty() && self.name_is_unique(remote_name) {
+            return remote_name.to_string();
+        }
+
+        let same_local: Vec<_> = same_remote
+            .iter()
+            .filter(|sync| sync.remote.description.name() == remote_name)
+            .collect();
+
+        let name = format!("{local_name}-{remote_name}");
+        if same_local.is_empty() && self.name_is_unique(&name) {
+            return name;
+        }
+
+        self.make_unique_name(&name)
+    }
+
+    /// Creates and inserts a new filesystem Synchro in the list
     pub fn insert(
         &mut self,
-        local: AnyFsCreationInfo,
-        remote: AnyFsCreationInfo,
+        sync_info: AnySynchroCreationInfo,
     ) -> Result<(), SynchroCreationError> {
-        let local_desc = local.clone().into();
-        let remote_desc = remote.clone().into();
+        let local_desc = sync_info.local().clone().into();
+        let remote_desc = sync_info.remote().clone().into();
 
         if self.is_synchronized(&local_desc, &remote_desc) {
             return Err(SynchroCreationError::AlreadyPresent);
         }
         let id = SynchroId::new();
 
-        let local_ref = self.create_and_insert_fs(local.clone())?;
-        let remote_ref = self.create_and_insert_fs(remote.clone())?;
+        let local_ref = self.create_and_insert_fs(sync_info.local().clone())?;
+        let remote_ref = self.create_and_insert_fs(sync_info.remote().clone())?;
+        let name = sync_info
+            .name()
+            .map(|n| self.make_unique_name(n))
+            .unwrap_or_else(|| {
+                self.unique_synchro_name(
+                    local_ref.description.name(),
+                    remote_ref.description.name(),
+                )
+            });
 
         let synchro = AnySynchroRef {
             local: local_ref,
             remote: remote_ref,
             id,
+            name,
         };
 
         self.synchros.push(synchro);
@@ -267,7 +335,7 @@ impl SynchroList {
         Some(SynchroMutex { local, remote })
     }
 
-    /// Perfom a [`full_sync`] on the provided synchro, that should be in the list
+    /// Perfoms a [`full_sync`] on the provided synchro, that should be in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
     pub async fn sync_one<
@@ -293,7 +361,7 @@ impl SynchroList {
         })
     }
 
-    /// Perfom a [`full_sync`] on all the synchro in the list
+    /// Perfoms a [`full_sync`] on all the synchro in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
     pub async fn sync_all(&self) -> Vec<Result<(), SyncError>> {
@@ -340,30 +408,29 @@ impl ReadWriteSynchroList {
         self.maps.read().await
     }
 
-    /// Insert a new synchronized pair of filesystem in the list
+    /// Inserts a new synchronized pair of filesystem in the list
     pub async fn insert(
         &self,
-        local: AnyFsCreationInfo,
-        remote: AnyFsCreationInfo,
+        sync_info: AnySynchroCreationInfo,
     ) -> Result<(), SynchroCreationError> {
-        self.maps.write().await.insert(local, remote)
+        self.maps.write().await.insert(sync_info)
     }
 
-    /// Force a synchro of all the filesystems in the list
+    /// Forces a synchro of all the filesystems in the list
     pub async fn sync_all(&self) -> Vec<Result<(), SyncError>> {
         let maps = self.maps.read().await;
 
         maps.sync_all().await
     }
 
-    /// Return a read-only view of the list
+    /// Returns a read-only view of the list
     pub fn as_read_only(&self) -> ReadOnlySynchroList {
         ReadOnlySynchroList {
             maps: self.maps.clone(),
         }
     }
 
-    /// Create a new empty list
+    /// Creates a new empty list
     pub fn new() -> Self {
         Self {
             maps: Arc::new(RwLock::new(SynchroList::new())),

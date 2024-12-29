@@ -28,7 +28,7 @@ use crate::{
     Error,
 };
 
-use super::{ConcreteFS, ConcreteFsError, Named};
+use super::{ConcreteFS, ConcreteFsError, FsInstanceDescription, Named};
 
 #[derive(Error, Debug)]
 pub enum LocalDirError {
@@ -134,7 +134,7 @@ impl ConcreteFS for LocalDir {
     }
 
     fn description(&self) -> Self::Description {
-        LocalDirDescription(self.path.clone())
+        LocalDirDescription::new(&self.path)
     }
 
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
@@ -285,17 +285,38 @@ impl<'a> From<&'a LocalSyncInfo> for () {
 
 /// Uniquely identify a path on the local filesystem
 #[derive(Clone, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
-pub struct LocalDirDescription(PathBuf);
+pub struct LocalDirDescription {
+    path: PathBuf,
+    name: String,
+}
+
+impl LocalDirDescription {
+    pub fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            name: path
+                .canonicalize()
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                .unwrap_or("<anonymous>".to_string()),
+        }
+    }
+}
+
+impl FsInstanceDescription for LocalDirDescription {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 impl Display for LocalDirDescription {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.display())
+        write!(f, "{}", self.path.display())
     }
 }
 
 impl From<LocalDirCreationInfo> for LocalDirDescription {
     fn from(value: LocalDirCreationInfo) -> Self {
-        Self(value.0)
+        Self::new(&value.0)
     }
 }
 

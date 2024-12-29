@@ -1,7 +1,7 @@
 //! Handles the list of [`brume::synchro::Synchro`] in the background
 //!
-//! The daemon can be queried through the [`Server`] by multiple client applications to add or remove
-//! filesystem pairs to synchronize. It regularly synchronizes them.
+//! The daemon can be queried through the [`Server`] by multiple client applications to add or
+//! remove filesystem pairs to synchronize. It regularly synchronizes them.
 
 use std::{
     future::Future,
@@ -35,7 +35,7 @@ use tokio::{
 };
 
 use crate::{
-    protocol::{AnyFsCreationInfo, BrumeService, BRUME_SOCK_NAME},
+    protocol::{AnySynchroCreationInfo, BrumeService, BRUME_SOCK_NAME},
     server::Server,
     synchro_list::ReadWriteSynchroList,
 };
@@ -86,7 +86,7 @@ pub struct Daemon {
     rpc_listener: Listener,
     synchro_list: ReadWriteSynchroList,
     server: Server,
-    from_server: Arc<Mutex<UnboundedReceiver<(AnyFsCreationInfo, AnyFsCreationInfo)>>>,
+    from_server: Arc<Mutex<UnboundedReceiver<AnySynchroCreationInfo>>>,
     is_running: AtomicBool,
     config: DaemonConfig,
 }
@@ -214,8 +214,8 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
 
         {
-            for (local, remote) in new_synchros {
-                if let Err(err) = self.synchro_list.insert(local, remote).await {
+            for synchro_info in new_synchros {
+                if let Err(err) = self.synchro_list.insert(synchro_info).await {
                     let wrapped_err = anyhow!(err);
                     error!("Failed insert new synchro: {wrapped_err:?}");
                     if self.config.error_mode == ErrorMode::Exit {
@@ -227,3 +227,5 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
     }
 }
+
+// TODO: Add tests for synchro list
