@@ -1,12 +1,14 @@
 //! The server provides rpc to remotely manipulate the list of synchronized Filesystems
 
+use std::borrow::Borrow;
+
 use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     protocol::{AnyFsCreationInfo, AnyFsDescription, BrumeService},
-    synchro_list::ReadOnlySynchroList,
+    synchro_list::{AnySynchroRef, ReadOnlySynchroList},
 };
 
 /// A Server that handle RPC connections from client applications
@@ -67,5 +69,11 @@ impl BrumeService for Server {
             .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+
+    async fn list_synchros(self, _context: Context) -> Vec<AnySynchroRef> {
+        let list = self.synchro_list.read().await;
+
+        list.synchro_ref_list().to_vec()
     }
 }

@@ -12,3 +12,4 @@ clap = { version = "4.5", features = ["derive"] }
 url = "2.5"
 
 brume-daemon = { version = "0.1.0", path = "../brume-daemon", default-features = false }
+comfy-table = "7.1.3"

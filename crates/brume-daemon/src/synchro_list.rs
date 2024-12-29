@@ -6,6 +6,7 @@ use brume::{
     synchro::Synchro,
 };
 use futures::future::join_all;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use uuid::Uuid;
@@ -51,7 +52,7 @@ pub enum SynchroCreationError {
 ///
 /// This type represents only an index and needs a valid [`SynchroList`], to actually be used. It
 /// must not be used after the Filesystem it points to has been removed from the SynchroList.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnyFsRef {
     id: Uuid,
     description: AnyFsDescription,
@@ -84,16 +85,30 @@ impl AnyFsRef {
 /// must not be used after the Synchro it points to has been removed from the SynchroList.
 ///
 /// [`Concrete`]: ConcreteFS
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnySynchroRef {
     local: AnyFsRef,
     remote: AnyFsRef,
-    _id: SynchroId,
+    id: SynchroId,
 }
 
 impl Display for AnySynchroRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "synchro between {} and {}", self.local, self.remote)
+    }
+}
+
+impl AnySynchroRef {
+    pub fn local(&self) -> &AnyFsRef {
+        &self.local
+    }
+
+    pub fn remote(&self) -> &AnyFsRef {
+        &self.remote
+    }
+
+    pub fn id(&self) -> SynchroId {
+        self.id
     }
 }
 
@@ -155,6 +170,10 @@ impl SynchroList {
         Self::default()
     }
 
+    pub fn synchro_ref_list(&self) -> &[AnySynchroRef] {
+        &self.synchros
+    }
+
     fn create_and_insert_fs(
         &mut self,
         fs_info: AnyFsCreationInfo,
@@ -214,7 +233,7 @@ impl SynchroList {
         let synchro = AnySynchroRef {
             local: local_ref,
             remote: remote_ref,
-            _id: id,
+            id,
         };
 
         self.synchros.push(synchro);

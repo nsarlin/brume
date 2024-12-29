@@ -1,6 +1,7 @@
 use std::fs;
 
 use brume_cli::connect_to_daemon;
+use comfy_table::Table;
 use tarpc::context;
 
 use clap::{Parser, Subcommand};
@@ -33,25 +34,44 @@ enum Commands {
         #[arg(short, long, value_name = "FILESYSTEM", value_parser = parse_fs_argument)]
         remote: AnyFsCreationInfo,
     },
+
+    /// List all synchronizations
+    #[command(visible_alias = "ls")]
+    List {},
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    let daemon = connect_to_daemon()
+        .await
+        .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?;
+
     match cli.command {
         Commands::New { local, remote } => {
             let local_desc = AnyFsDescription::from(local.clone());
             let remote_desc = AnyFsDescription::from(remote.clone());
-
             println!("Creating synchro between {local_desc} and {remote_desc}");
-            connect_to_daemon()
-                .await
-                .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?
+            daemon
                 .new_synchro(context::current(), local, remote)
                 .await??;
-
             println!("Done");
+        }
+        Commands::List {} => {
+            let synchros = daemon.list_synchros(context::current()).await?;
+            let mut table = Table::new();
+            table.set_header(vec!["ID", "Local", "Remote"]);
+
+            for synchro in synchros {
+                table.add_row(vec![
+                    format!("{:x}", synchro.id().short()),
+                    synchro.local().to_string(),
+                    synchro.remote().to_string(),
+                ]);
+            }
+
+            println!("{table}");
         }
     }
 
