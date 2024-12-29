@@ -19,11 +19,11 @@ use testcontainers::{
 };
 
 use brume_daemon::{
+    daemon::{Daemon, DaemonConfig, ErrorMode},
     protocol::{
         AnyFsCreationInfo, BrumeServiceClient, LocalDirCreationInfo, NextcloudFsCreationInfo,
         BRUME_SOCK_NAME,
     },
-    server::{ErrorMode, Server as BrumeServer, ServerConfig},
 };
 use tokio::time::sleep;
 
@@ -77,16 +77,16 @@ async fn main() {
         .init();
 
     // Start daemon
-    let config = ServerConfig::default()
+    let config = DaemonConfig::default()
         .with_sync_interval(Duration::from_secs(2))
         .with_error_mode(ErrorMode::Exit);
-    let server = BrumeServer::new(config).unwrap();
-    let server = Arc::new(server);
+    let daemon = Daemon::new(config).unwrap();
+    let daemon = Arc::new(daemon);
 
-    let daemon = {
-        let server = server.clone();
+    let daemon_task = {
+        let daemon = daemon.clone();
         tokio::spawn(async move {
-            server.run().await.unwrap();
+            daemon.run().await.unwrap();
         })
     };
 
@@ -124,7 +124,7 @@ async fn main() {
 
     // Wait a full sync
     sleep(Duration::from_secs(15)).await;
-    if !server.is_running() {
+    if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
@@ -142,7 +142,7 @@ async fn main() {
 
     // Wait a full sync
     sleep(Duration::from_secs(15)).await;
-    if !server.is_running() {
+    if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
@@ -163,7 +163,7 @@ async fn main() {
 
     // Wait for propagation on both fs
     sleep(Duration::from_secs(10)).await;
-    if !server.is_running() {
+    if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
@@ -182,7 +182,7 @@ async fn main() {
 
     // Wait for propagation on both fs
     sleep(Duration::from_secs(10)).await;
-    if !server.is_running() {
+    if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
@@ -198,7 +198,7 @@ async fn main() {
 
     // Wait for propagation on both fs
     sleep(Duration::from_secs(10)).await;
-    if !server.is_running() {
+    if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
@@ -217,7 +217,7 @@ async fn main() {
 
     // Wait for propagation on both fs
     sleep(Duration::from_secs(10)).await;
-    if !server.is_running() {
+    if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
@@ -232,7 +232,7 @@ async fn main() {
 
     // Wait for propagation on both fs
     sleep(Duration::from_secs(10)).await;
-    if !server.is_running() {
+    if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
@@ -241,6 +241,6 @@ async fn main() {
     fs_b.update_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
 
-    daemon.abort();
-    daemon.await.unwrap_err();
+    daemon_task.abort();
+    daemon_task.await.unwrap_err();
 }
