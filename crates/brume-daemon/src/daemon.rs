@@ -35,7 +35,7 @@ use tokio::{
 };
 
 use crate::{
-    protocol::{AnySynchroCreationInfo, BrumeService, BRUME_SOCK_NAME},
+    protocol::{AnySynchroCreationInfo, BrumeService, SynchroId, BRUME_SOCK_NAME},
     server::Server,
     synchro_list::ReadWriteSynchroList,
 };
@@ -86,7 +86,8 @@ pub struct Daemon {
     rpc_listener: Listener,
     synchro_list: ReadWriteSynchroList,
     server: Server,
-    from_server: Arc<Mutex<UnboundedReceiver<AnySynchroCreationInfo>>>,
+    creation_chan: Arc<Mutex<UnboundedReceiver<AnySynchroCreationInfo>>>,
+    deletion_chan: Arc<Mutex<UnboundedReceiver<SynchroId>>>,
     is_running: AtomicBool,
     config: DaemonConfig,
 }
@@ -111,18 +112,24 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         info!("Server running at {BRUME_SOCK_NAME}");
 
         let codec_builder = LengthDelimitedCodec::builder();
-        let (to_daemon, from_server) = unbounded_channel();
+        let (creation_to_daemon, creation_from_server) = unbounded_channel();
+        let (deletion_to_daemon, deletion_from_server) = unbounded_channel();
 
         let synchro_list = ReadWriteSynchroList::new();
 
-        let server = Server::new(to_daemon, synchro_list.as_read_only());
+        let server = Server::new(
+            creation_to_daemon,
+            deletion_to_daemon,
+            synchro_list.as_read_only(),
+        );
 
         Ok(Self {
             codec_builder,
             rpc_listener: listener,
             synchro_list,
             server,
-            from_server: Arc::new(Mutex::new(from_server)),
+            creation_chan: Arc::new(Mutex::new(creation_from_server)),
+            deletion_chan: Arc::new(Mutex::new(deletion_from_server)),
             is_running: AtomicBool::new(false),
             config,
         })
@@ -205,26 +212,48 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         self.synchro_list.clone()
     }
 
+    pub async fn recv_creations(&self) -> Vec<AnySynchroCreationInfo> {
+        let mut list = Vec::new();
+        let mut receiver = self.creation_chan.lock().await;
+        receiver.recv_many(&mut list, 100).await; // TODO: configure recv size ?
+        list
+    }
+
+    pub async fn recv_deletions(&self) -> Vec<SynchroId> {
+        let mut list = Vec::new();
+        let mut receiver = self.deletion_chan.lock().await;
+        receiver.recv_many(&mut list, 100).await; // TODO: configure recv size ?
+        list
+    }
+
     /// Updates the synchro list from messages of client applications
     pub async fn update_synchro_list(&self) -> Result<()> {
-        let mut new_synchros = Vec::new();
-        {
-            let mut recver = self.from_server.lock().await;
-            recver.recv_many(&mut new_synchros, 100).await; // TODO: configure receive size ?
-        }
-
-        {
-            for synchro_info in new_synchros {
-                if let Err(err) = self.synchro_list.insert(synchro_info).await {
-                    let wrapped_err = anyhow!(err);
-                    error!("Failed insert new synchro: {wrapped_err:?}");
-                    if self.config.error_mode == ErrorMode::Exit {
-                        return Err(wrapped_err);
+        tokio::select! {
+            new_synchros = self.recv_creations() => {
+                for synchro_info in new_synchros {
+                    if let Err(err) = self.synchro_list.insert(synchro_info).await {
+                        let wrapped_err = anyhow!(err);
+                        error!("Failed insert new synchro: {wrapped_err:?}");
+                        if self.config.error_mode == ErrorMode::Exit {
+                            return Err(wrapped_err);
+                        }
                     }
                 }
             }
-            Ok(())
+            to_delete = self.recv_deletions() => {
+                for synchro_id in to_delete {
+                    if let Err(err) = self.synchro_list.remove(synchro_id).await {
+                        let wrapped_err = anyhow!(err);
+                        error!("Failed delete synchro: {wrapped_err:?}");
+                        if self.config.error_mode == ErrorMode::Exit {
+                            return Err(wrapped_err);
+                        }
+                    }
+                }
+            }
         }
+
+        Ok(())
     }
 }
 

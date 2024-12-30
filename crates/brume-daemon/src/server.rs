@@ -1,11 +1,15 @@
 //! The server provides rpc to remotely manipulate the list of synchronized Filesystems
 
+use std::collections::HashMap;
+
 use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    protocol::{AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService},
+    protocol::{
+        AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService, SynchroId,
+    },
     synchro_list::{AnySynchroRef, ReadOnlySynchroList},
 };
 
@@ -17,17 +21,20 @@ use crate::{
 /// [`Daemon`]: crate::daemon::Daemon
 #[derive(Clone)]
 pub struct Server {
-    to_server: UnboundedSender<AnySynchroCreationInfo>,
+    creation_chan: UnboundedSender<AnySynchroCreationInfo>,
+    deletion_chan: UnboundedSender<SynchroId>,
     synchro_list: ReadOnlySynchroList,
 }
 
 impl Server {
     pub(crate) fn new(
-        to_server: UnboundedSender<AnySynchroCreationInfo>,
+        creation_chan: UnboundedSender<AnySynchroCreationInfo>,
+        deletion_chan: UnboundedSender<SynchroId>,
         synchro_list: ReadOnlySynchroList,
     ) -> Self {
         Self {
-            to_server,
+            creation_chan,
+            deletion_chan,
             synchro_list,
         }
     }
@@ -67,14 +74,21 @@ impl BrumeService for Server {
 
         let synchro = AnySynchroCreationInfo::new(local, remote, name);
 
-        self.to_server.send(synchro).map_err(|e| e.to_string())?;
+        self.creation_chan
+            .send(synchro)
+            .map_err(|e| e.to_string())?;
 
         Ok(())
     }
 
-    async fn list_synchros(self, _context: Context) -> Vec<AnySynchroRef> {
+    async fn list_synchros(self, _context: Context) -> HashMap<SynchroId, AnySynchroRef> {
         let list = self.synchro_list.read().await;
 
-        list.synchro_ref_list().to_vec()
+        list.synchro_ref_list().to_owned()
+    }
+
+    async fn delete_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {
+        info!("Received synchro deletion request: id {id:?}");
+        self.deletion_chan.send(id).map_err(|e| e.to_string())
     }
 }
