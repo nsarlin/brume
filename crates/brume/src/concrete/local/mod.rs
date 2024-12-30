@@ -324,8 +324,8 @@ impl From<LocalDirCreationInfo> for LocalDirDescription {
 pub struct LocalDirCreationInfo(PathBuf);
 
 impl LocalDirCreationInfo {
-    pub fn new(path: &Path) -> Self {
-        Self(path.to_path_buf())
+    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        Self(path.as_ref().to_path_buf())
     }
 }
 
