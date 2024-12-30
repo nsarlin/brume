@@ -277,7 +277,7 @@ impl SynchroList {
     pub fn insert(
         &mut self,
         sync_info: AnySynchroCreationInfo,
-    ) -> Result<(), SynchroCreationError> {
+    ) -> Result<SynchroId, SynchroCreationError> {
         let local_desc = sync_info.local().clone().into();
         let remote_desc = sync_info.remote().clone().into();
 
@@ -307,7 +307,7 @@ impl SynchroList {
 
         self.synchros.insert(id, synchro);
 
-        Ok(())
+        Ok(id)
     }
 
     /// Deletes a synchronization from the list
@@ -443,7 +443,7 @@ impl ReadWriteSynchroList {
     pub async fn insert(
         &self,
         sync_info: AnySynchroCreationInfo,
-    ) -> Result<(), SynchroCreationError> {
+    ) -> Result<SynchroId, SynchroCreationError> {
         self.maps.write().await.insert(sync_info)
     }
 
@@ -471,5 +471,53 @@ impl ReadWriteSynchroList {
         Self {
             maps: Arc::new(RwLock::new(SynchroList::new())),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
+
+    use crate::protocol::{AnyFsCreationInfo, AnySynchroCreationInfo};
+
+    use super::*;
+
+    #[test]
+    fn test_insert_remove() {
+        let mut list = SynchroList::new();
+
+        let loc_a = LocalDirCreationInfo::new("/a");
+        let loc_b = LocalDirCreationInfo::new("/b");
+        let sync1 = AnySynchroCreationInfo::new(
+            AnyFsCreationInfo::LocalDir(loc_a),
+            AnyFsCreationInfo::LocalDir(loc_b),
+            None,
+        );
+
+        let id1 = list.insert(sync1).unwrap();
+
+        assert_eq!(list.synchros.len(), 1);
+        assert_eq!(list.local_dir_list.len(), 2);
+        assert_eq!(list.nextcloud_list.len(), 0);
+
+        let nx_a = NextcloudFsCreationInfo::new("https://cloud.com", "user", "user");
+        let loc_b = LocalDirCreationInfo::new("/b");
+        let sync2 = AnySynchroCreationInfo::new(
+            AnyFsCreationInfo::LocalDir(loc_b),
+            AnyFsCreationInfo::Nextcloud(nx_a),
+            None,
+        );
+
+        list.insert(sync2).unwrap();
+
+        assert_eq!(list.synchros.len(), 2);
+        assert_eq!(list.local_dir_list.len(), 3);
+        assert_eq!(list.nextcloud_list.len(), 1);
+
+        list.remove(id1).unwrap();
+
+        assert_eq!(list.synchros.len(), 1);
+        assert_eq!(list.local_dir_list.len(), 1);
+        assert_eq!(list.nextcloud_list.len(), 1);
     }
 }
