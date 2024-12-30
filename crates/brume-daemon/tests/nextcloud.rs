@@ -114,10 +114,9 @@ async fn main() {
         "admin",
     ));
 
-    connect_to_daemon()
-        .await
-        .unwrap()
-        .new_synchro(context::current(), local_a, remote.clone(), None)
+    let rpc = connect_to_daemon().await.unwrap();
+
+    rpc.new_synchro(context::current(), local_a, remote.clone(), None)
         .await
         .unwrap()
         .unwrap();
@@ -128,14 +127,14 @@ async fn main() {
         stop_nextcloud(container).await;
         exit(1)
     }
+
+    let list = rpc.list_synchros(context::current()).await.unwrap();
+    assert_eq!(list.len(), 1);
 
     // Initiate the second synchro
     let local_b = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new(dir_b.path()));
 
-    connect_to_daemon()
-        .await
-        .unwrap()
-        .new_synchro(context::current(), local_b, remote, None)
+    rpc.new_synchro(context::current(), local_b, remote, None)
         .await
         .unwrap()
         .unwrap();
@@ -146,6 +145,9 @@ async fn main() {
         stop_nextcloud(container).await;
         exit(1)
     }
+
+    let list = rpc.list_synchros(context::current()).await.unwrap();
+    assert_eq!(list.len(), 2);
 
     // Check filesystem content
     let concrete_a: LocalDir = LocalDirCreationInfo::new(dir_a.path()).try_into().unwrap();
@@ -240,6 +242,22 @@ async fn main() {
     fs_a.update_vfs().await.unwrap();
     fs_b.update_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
+
+    // Test deletion
+    let first_sync = list.keys().collect::<Vec<_>>()[0];
+    rpc.delete_synchro(context::current(), *first_sync)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Wait for deletion
+    sleep(Duration::from_secs(5)).await;
+    if !daemon.is_running() {
+        stop_nextcloud(container).await;
+        exit(1)
+    }
+    let list = rpc.list_synchros(context::current()).await.unwrap();
+    assert_eq!(list.len(), 1);
 
     daemon_task.abort();
     daemon_task.await.unwrap_err();
