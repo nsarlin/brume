@@ -1,6 +1,6 @@
 //! Definition of the protocol needed to communicate with the daemon
 
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
 
 use brume::concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, FsInstanceDescription};
 
@@ -131,12 +131,16 @@ impl From<AnyFsCreationInfo> for AnyFsDescription {
 
 #[tarpc::service]
 pub trait BrumeService {
-    /// Create a new synchronization between a "remote" and a "local" fs
+    /// Creates a new synchronization between a "remote" and a "local" fs
     async fn new_synchro(
         local: AnyFsCreationInfo,
         remote: AnyFsCreationInfo,
         name: Option<String>,
     ) -> Result<(), String>;
 
-    async fn list_synchros() -> Vec<AnySynchroRef>;
+    /// Lists all the existing synchronizations registered in the daemon
+    async fn list_synchros() -> HashMap<SynchroId, AnySynchroRef>;
+
+    /// Deletes a synchronization
+    async fn delete_synchro(id: SynchroId) -> Result<(), String>;
 }

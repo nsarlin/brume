@@ -1,9 +1,10 @@
 use std::fs;
 
-use brume_cli::connect_to_daemon;
+use brume_cli::{connect_to_daemon, get_synchro};
 use comfy_table::Table;
 use tarpc::context;
 
+use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use url::Url;
 
@@ -40,8 +41,12 @@ enum Commands {
     },
 
     /// List all synchronizations
-    #[command(visible_alias = "ls")]
-    List {},
+    #[command(visible_alias = "list")]
+    Ls {},
+
+    /// Remove a synchronization
+    #[command(visible_aliases = ["remove", "delete"])]
+    Rm { synchro: String },
 }
 
 #[tokio::main]
@@ -51,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let daemon = connect_to_daemon()
         .await
         .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?;
+    let context = context::current();
 
     match cli.command {
         Commands::New {
@@ -61,19 +67,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let local_desc = AnyFsDescription::from(local.clone());
             let remote_desc = AnyFsDescription::from(remote.clone());
             println!("Creating synchro between {local_desc} and {remote_desc}");
-            daemon
-                .new_synchro(context::current(), local, remote, name)
-                .await??;
+            daemon.new_synchro(context, local, remote, name).await??;
             println!("Done");
         }
-        Commands::List {} => {
-            let synchros = daemon.list_synchros(context::current()).await?;
+        Commands::Ls {} => {
+            let synchros = daemon.list_synchros(context).await?;
             let mut table = Table::new();
             table.set_header(vec!["ID", "Local", "Remote", "Name"]);
 
-            for synchro in synchros {
+            for (id, synchro) in synchros {
                 table.add_row(vec![
-                    format!("{:08x}", synchro.id().short()),
+                    format!("{:08x}", id.short()),
                     synchro.local().to_string(),
                     synchro.remote().to_string(),
                     synchro.name().to_string(),
@@ -81,6 +85,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             println!("{table}");
+        }
+        Commands::Rm { synchro } => {
+            println!("Removing synchro: {synchro}");
+            let list = daemon.list_synchros(context).await?;
+
+            let id = get_synchro(list, &synchro)
+                .await
+                .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+
+            daemon.delete_synchro(context, id).await??;
+            println!("Done");
         }
     }
 

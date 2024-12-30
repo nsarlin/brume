@@ -252,6 +252,7 @@ dependencies = [
 name = "brume-cli"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "brume-daemon",
  "clap",
  "comfy-table",

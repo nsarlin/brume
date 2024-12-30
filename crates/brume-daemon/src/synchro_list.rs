@@ -6,6 +6,7 @@ use brume::{
     synchro::Synchro,
 };
 use futures::future::join_all;
+use log::info;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
@@ -46,6 +47,14 @@ pub enum SynchroCreationError {
     AlreadyPresent,
     #[error("Failed to instantiate filesystem object")]
     FileSystemCreationError(#[from] ConcreteFsError),
+}
+
+#[derive(Error, Debug)]
+pub enum SynchroDeletionError {
+    #[error("Invalid synchro")]
+    InvalidSynchroState(#[from] InvalidSynchro),
+    #[error("Synchro not found: {0:?}")]
+    SynchroNotFound(SynchroId),
 }
 
 /// A reference to a filesystem in the [`SynchroList`]
@@ -89,7 +98,6 @@ impl AnyFsRef {
 pub struct AnySynchroRef {
     local: AnyFsRef,
     remote: AnyFsRef,
-    id: SynchroId,
     name: String,
 }
 
@@ -108,13 +116,6 @@ impl AnySynchroRef {
     /// Returns the remote counterpart of the synchro
     pub fn remote(&self) -> &AnyFsRef {
         &self.remote
-    }
-
-    /// Returns the unique id of the synchro.
-    ///
-    /// This id is "universally unique", meaning that they are never reused
-    pub fn id(&self) -> SynchroId {
-        self.id
     }
 
     /// Returns the name of the synchro
@@ -173,7 +174,7 @@ impl<T: ConcreteFS + 'static> DynTyped for Mutex<FileSystem<T>> {
 /// [`supported types`]: crate::protocol::AnyFsCreationInfo
 #[derive(Default)]
 pub struct SynchroList {
-    synchros: Vec<AnySynchroRef>,
+    synchros: HashMap<SynchroId, AnySynchroRef>,
     nextcloud_list: HashMap<Uuid, Mutex<FileSystem<NextcloudFs>>>,
     local_dir_list: HashMap<Uuid, Mutex<FileSystem<LocalDir>>>,
 }
@@ -184,7 +185,7 @@ impl SynchroList {
         Self::default()
     }
 
-    pub fn synchro_ref_list(&self) -> &[AnySynchroRef] {
+    pub fn synchro_ref_list(&self) -> &HashMap<SynchroId, AnySynchroRef> {
         &self.synchros
     }
 
@@ -215,7 +216,7 @@ impl SynchroList {
         local_desc: &AnyFsDescription,
         remote_desc: &AnyFsDescription,
     ) -> bool {
-        for sync in &self.synchros {
+        for sync in self.synchros.values() {
             if (sync.local.description() == local_desc || sync.local.description() == remote_desc)
                 && (sync.remote.description() == local_desc
                     || sync.remote.description() == remote_desc)
@@ -228,7 +229,7 @@ impl SynchroList {
     }
 
     fn name_is_unique(&self, name: &str) -> bool {
-        !self.synchros.iter().any(|sync| sync.name == name)
+        !self.synchros.values().any(|sync| sync.name == name)
     }
 
     fn make_unique_name(&self, name: &str) -> String {
@@ -251,7 +252,7 @@ impl SynchroList {
     fn unique_synchro_name(&self, local_name: &str, remote_name: &str) -> String {
         let same_remote: Vec<_> = self
             .synchros
-            .iter()
+            .values()
             .filter(|sync| sync.remote.description.name() == remote_name)
             .collect();
 
@@ -297,16 +298,39 @@ impl SynchroList {
                 )
             });
 
+        info!("Synchro created: name: {name}, id: {id:?}");
         let synchro = AnySynchroRef {
             local: local_ref,
             remote: remote_ref,
-            id,
             name,
         };
 
-        self.synchros.push(synchro);
+        self.synchros.insert(id, synchro);
 
         Ok(())
+    }
+
+    /// Deletes a synchronization from the list
+    pub fn remove(&mut self, id: SynchroId) -> Result<(), SynchroDeletionError> {
+        if let Some(sync) = self.synchros.remove(&id) {
+            let mut res = Ok(());
+
+            if !self.remove_fs(&sync.local) {
+                res = Err(SynchroDeletionError::InvalidSynchroState(
+                    sync.clone().into(),
+                ));
+            }
+            if !self.remove_fs(&sync.remote) {
+                res = Err(SynchroDeletionError::InvalidSynchroState(
+                    sync.clone().into(),
+                ));
+            }
+
+            info!("Synchro deleted: {id:?}");
+            res
+        } else {
+            Err(SynchroDeletionError::SynchroNotFound(id))
+        }
     }
 
     fn get_fs<Concrete: ConcreteFS + 'static>(
@@ -322,6 +346,13 @@ impl SynchroList {
                 .nextcloud_list
                 .get(&fs.id)
                 .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Concrete>>>()),
+        }
+    }
+
+    fn remove_fs(&mut self, fs: &AnyFsRef) -> bool {
+        match fs.description() {
+            AnyFsDescription::LocalDir(_) => self.local_dir_list.remove(&fs.id).is_some(),
+            AnyFsDescription::Nextcloud(_) => self.nextcloud_list.remove(&fs.id).is_some(),
         }
     }
 
@@ -367,7 +398,7 @@ impl SynchroList {
     pub async fn sync_all(&self) -> Vec<Result<(), SyncError>> {
         let futures: Vec<_> = self
             .synchros
-            .iter()
+            .values()
             .map(|synchro| async {
                 match (synchro.local.description(), synchro.remote.description()) {
                     (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
@@ -414,6 +445,11 @@ impl ReadWriteSynchroList {
         sync_info: AnySynchroCreationInfo,
     ) -> Result<(), SynchroCreationError> {
         self.maps.write().await.insert(sync_info)
+    }
+
+    /// Deletes a synchronization from the list
+    pub async fn remove(&self, id: SynchroId) -> Result<(), SynchroDeletionError> {
+        self.maps.write().await.remove(id)
     }
 
     /// Forces a synchro of all the filesystems in the list
