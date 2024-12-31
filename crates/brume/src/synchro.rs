@@ -14,11 +14,17 @@ use crate::{
     Error,
 };
 
-/// State in which the [`Synchro`] can be after a call to [`Synchro::full_sync`]
+/// State in which the [`Synchro`] can be after a call to [`full_sync`]
 ///
-/// This is based on the [`NodeState`] found in both [`FileSystem`]
+/// In case of successful sync, this is returned by `full_sync`. In that case, "Error" means
+/// that some individual nodes failed to synchronize but the VFS was successfully updated.
+/// This status can also be created from an [`Error`] returned by `full_sync`. In that case, nothing
+/// was synchronized at all. "Error" status means that the Concrete backend is likely down,
+/// and "Desync" means that a logic error has been encountered during the diff.
 ///
+/// [`full_sync`]: Synchro::full_sync
 /// [`NodeState`]: crate::vfs::dir_tree::NodeState
+/// [`Error`]: enum@crate::Error
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub enum SynchroStatus {
     /// No node in any FS is in Conflict or Error state
@@ -28,8 +34,19 @@ pub enum SynchroStatus {
     Conflict,
     /// At least one node is in Error state
     Error,
-    // TODO: also store errors from full_sync in the status. Have a distinction between
-    // "backend error" (store in Self::Error ?) and "desync", coming from a bug in Brume
+    /// There is some inconsistency in one of the Vfs, likely coming from a bug in brume.
+    /// User should re-sync the faulty vfs from scratch
+    Desync,
+}
+
+impl From<&Error> for SynchroStatus {
+    fn from(value: &Error) -> Self {
+        if value.is_concrete() {
+            Self::Error
+        } else {
+            Self::Desync
+        }
+    }
 }
 
 impl Display for SynchroStatus {

@@ -80,11 +80,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Ls {} => {
             let synchros = daemon.list_synchros(context::current()).await?;
             let mut table = Table::new();
-            table.set_header(vec!["ID", "Local", "Remote", "Name"]);
+            table.set_header(vec!["ID", "Status", "Local", "Remote", "Name"]);
 
             for (id, synchro) in synchros {
                 table.add_row(vec![
                     format!("{:08x}", id.short()),
+                    synchro.status().to_string(),
                     synchro.local().to_string(),
                     synchro.remote().to_string(),
                     synchro.name().to_string(),
@@ -123,6 +124,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ] {
                 println!("{:>15}: {}", key, value);
             }
+
+            //TODO: display more information in case of error/desync
         }
     }
 

@@ -63,6 +63,19 @@ impl Error {
             source: source.into(),
         }
     }
+
+    /// Returns true if the error is caused by the concrete backend (eg: network down, no space
+    /// left,...)
+    pub fn is_concrete(&self) -> bool {
+        match self {
+            Error::VfsReloadError { source, .. } => match source {
+                VfsReloadError::ConcreteFsError(_) => true,
+                VfsReloadError::DiffError(_) => false,
+            },
+            Error::ReconciliationFailed(ReconciliationError::ConcreteFsError { .. }) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Error, Debug)]
