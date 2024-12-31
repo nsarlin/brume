@@ -26,14 +26,14 @@ pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
 }
 
 pub async fn get_synchro(
-    synchro_list: HashMap<SynchroId, AnySynchroRef>,
+    synchro_list: &HashMap<SynchroId, AnySynchroRef>,
     synchro_id: &str,
 ) -> Option<SynchroId> {
     for (id, sync) in synchro_list {
         if (synchro_id.len() > 3 && id.id().to_string().starts_with(synchro_id))
             || sync.name() == synchro_id
         {
-            return Some(id);
+            return Some(*id);
         }
     }
     None

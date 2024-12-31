@@ -14,8 +14,8 @@ pub use virtual_path::*;
 
 use crate::{
     update::{
-        AppliedUpdate, DiffError, IsModified, VfsNodeUpdate, VfsUpdateApplicationError,
-        VfsUpdateList,
+        AppliedUpdate, DiffError, FailedUpdateApplication, IsModified, VfsNodeUpdate,
+        VfsUpdateApplicationError, VfsUpdateList,
     },
     NameMismatchError,
 };
@@ -35,7 +35,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
         &self.root
     }
 
-    /// Return a mutable access to the root node of the VFS
+    /// Returns a mutable access to the root node of the VFS
     pub fn root_mut(&mut self) -> &mut VfsNode<SyncInfo> {
         &mut self.root
     }
@@ -46,7 +46,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
         self.root.structural_eq(other.root())
     }
 
-    /// Apply a list of updates to the VFS, by calling [`Self::apply_update`] on each of them.
+    /// Applies a list of updates to the VFS, by calling [`Self::apply_update`] on each of them.
     pub fn apply_updates_list(
         &mut self,
         updates: Vec<AppliedUpdate<SyncInfo>>,
@@ -57,7 +57,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
         Ok(())
     }
 
-    /// Apply an update to the Vfs, by adding or removing nodes.
+    /// Applies an update to the Vfs, by adding or removing nodes.
     ///
     /// The created or modified nodes use the SyncInfo from the [`AppliedUpdate`].
     pub fn apply_update(
@@ -175,6 +175,16 @@ impl<SyncInfo> Vfs<SyncInfo> {
         Self {
             root: VfsNode::Dir(DirTree::new_without_syncinfo("")),
         }
+    }
+
+    /// Returns the list of nodes with error from the concrete FS
+    pub fn get_errors(&self) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
+        self.root().get_errors(VirtualPath::root())
+    }
+
+    /// Returns the list of nodes with a conflict that should be manually resolved
+    pub fn get_conflicts(&self) -> Vec<VirtualPathBuf> {
+        self.root().get_conflicts(VirtualPath::root())
     }
 }
 

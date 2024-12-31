@@ -66,7 +66,7 @@ impl BrumeService for Server {
         {
             let list = self.synchro_list.read().await;
 
-            if list.is_synchronized(&local_desc, &remote_desc) {
+            if list.is_synchronized(&local_desc, &remote_desc).await {
                 warn!("Duplicate sync request, skipping");
                 return Err("Filesystems are already in sync".to_string());
             }
@@ -84,7 +84,12 @@ impl BrumeService for Server {
     async fn list_synchros(self, _context: Context) -> HashMap<SynchroId, AnySynchroRef> {
         let list = self.synchro_list.read().await;
 
-        list.synchro_ref_list().to_owned()
+        let mut ret = HashMap::new();
+        for (key, val) in list.synchro_ref_list() {
+            ret.insert(*key, val.read().await.clone());
+        }
+
+        ret
     }
 
     async fn delete_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {

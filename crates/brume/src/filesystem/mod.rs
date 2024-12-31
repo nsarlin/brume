@@ -3,7 +3,7 @@
 mod byte_counter;
 
 use byte_counter::ByteCounterExt;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use std::sync::{atomic::AtomicU64, Arc};
 
@@ -96,13 +96,13 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
 
     /// Query the concrete FS to update the in memory virtual representation
     pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, VfsReloadError> {
-        info!("Updating VFS from {}", Concrete::TYPE_NAME);
+        debug!("Updating VFS from {}", Concrete::TYPE_NAME);
         let new_vfs = self.concrete.load_virtual().await.map_err(|e| e.into())?;
 
         let updates = self.vfs.diff(&new_vfs)?;
 
         self.vfs = new_vfs;
-        info!("VFS from {} updated", Concrete::TYPE_NAME);
+        debug!("VFS from {} updated", Concrete::TYPE_NAME);
         Ok(updates)
     }
 

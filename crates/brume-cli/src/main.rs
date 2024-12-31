@@ -22,10 +22,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Create a new synchronization
-    #[command(after_help = "FILESYSTEM can be any of:
+    #[command(
+        after_help = "FILESYSTEM can be any of:
 \t- The path to a valid folder on the local machine
 \t- An URL to a Nextcloud server, structured as `http://user:password@domain.tld/endpoint`
-")]
+",
+        visible_alias = "add"
+    )]
     New {
         /// The local filesystem for the synchronization
         #[arg(short, long, value_name = "FILESYSTEM", value_parser = parse_fs_argument)]
@@ -47,6 +50,9 @@ enum Commands {
     /// Remove a synchronization
     #[command(visible_aliases = ["remove", "delete"])]
     Rm { synchro: String },
+
+    /// Get the status of a synchronization
+    Status { synchro: String },
 }
 
 #[tokio::main]
@@ -56,7 +62,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let daemon = connect_to_daemon()
         .await
         .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?;
-    let context = context::current();
 
     match cli.command {
         Commands::New {
@@ -67,11 +72,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let local_desc = AnyFsDescription::from(local.clone());
             let remote_desc = AnyFsDescription::from(remote.clone());
             println!("Creating synchro between {local_desc} and {remote_desc}");
-            daemon.new_synchro(context, local, remote, name).await??;
+            daemon
+                .new_synchro(context::current(), local, remote, name)
+                .await??;
             println!("Done");
         }
         Commands::Ls {} => {
-            let synchros = daemon.list_synchros(context).await?;
+            let synchros = daemon.list_synchros(context::current()).await?;
             let mut table = Table::new();
             table.set_header(vec!["ID", "Local", "Remote", "Name"]);
 
@@ -88,14 +95,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Rm { synchro } => {
             println!("Removing synchro: {synchro}");
-            let list = daemon.list_synchros(context).await?;
+            let list = daemon.list_synchros(context::current()).await?;
 
-            let id = get_synchro(list, &synchro)
+            let id = get_synchro(&list, &synchro)
                 .await
                 .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
 
-            daemon.delete_synchro(context, id).await??;
+            daemon.delete_synchro(context::current(), id).await??;
             println!("Done");
+        }
+        Commands::Status { synchro } => {
+            let list = daemon.list_synchros(context::current()).await?;
+
+            let id = get_synchro(&list, &synchro)
+                .await
+                .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+
+            let synchro = list.get(&id).unwrap(); // Ok to unwrap because we got the id from the list
+            println!("○ Synchro: {} - {}", synchro.name(), id.id());
+            for (key, value) in [
+                ("Status", synchro.status().to_string().as_str()),
+                ("State", "Running"), // TODO: Running/Paused state
+                ("Local type", synchro.local().description().type_name()),
+                ("Local", &synchro.local().description().to_string()),
+                ("Remote type", synchro.remote().description().type_name()),
+                ("Remote", &synchro.remote().description().to_string()),
+            ] {
+                println!("{:>15}: {}", key, value);
+            }
         }
     }
 

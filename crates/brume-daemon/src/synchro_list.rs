@@ -3,9 +3,9 @@ use std::{any::Any, collections::HashMap, fmt::Display, sync::Arc};
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, ConcreteFsError},
     filesystem::FileSystem,
-    synchro::Synchro,
+    synchro::{Synchro, SynchroStatus},
 };
-use futures::future::join_all;
+use futures::{future::join_all, stream, StreamExt};
 use log::info;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -98,6 +98,7 @@ impl AnyFsRef {
 pub struct AnySynchroRef {
     local: AnyFsRef,
     remote: AnyFsRef,
+    status: SynchroStatus,
     name: String,
 }
 
@@ -124,6 +125,11 @@ impl AnySynchroRef {
     /// specific point in time and for a specific [`SynchroList`], there should be no collision.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the status of this synchro
+    pub fn status(&self) -> SynchroStatus {
+        self.status
     }
 }
 
@@ -174,7 +180,7 @@ impl<T: ConcreteFS + 'static> DynTyped for Mutex<FileSystem<T>> {
 /// [`supported types`]: crate::protocol::AnyFsCreationInfo
 #[derive(Default)]
 pub struct SynchroList {
-    synchros: HashMap<SynchroId, AnySynchroRef>,
+    synchros: HashMap<SynchroId, RwLock<AnySynchroRef>>,
     nextcloud_list: HashMap<Uuid, Mutex<FileSystem<NextcloudFs>>>,
     local_dir_list: HashMap<Uuid, Mutex<FileSystem<LocalDir>>>,
 }
@@ -185,7 +191,7 @@ impl SynchroList {
         Self::default()
     }
 
-    pub fn synchro_ref_list(&self) -> &HashMap<SynchroId, AnySynchroRef> {
+    pub fn synchro_ref_list(&self) -> &HashMap<SynchroId, RwLock<AnySynchroRef>> {
         &self.synchros
     }
 
@@ -211,12 +217,13 @@ impl SynchroList {
     }
 
     /// Checks if the two Filesystems in the pair are already synchronized together.
-    pub fn is_synchronized(
+    pub async fn is_synchronized(
         &self,
         local_desc: &AnyFsDescription,
         remote_desc: &AnyFsDescription,
     ) -> bool {
         for sync in self.synchros.values() {
+            let sync = sync.read().await;
             if (sync.local.description() == local_desc || sync.local.description() == remote_desc)
                 && (sync.remote.description() == local_desc
                     || sync.remote.description() == remote_desc)
@@ -228,19 +235,24 @@ impl SynchroList {
         false
     }
 
-    fn name_is_unique(&self, name: &str) -> bool {
-        !self.synchros.values().any(|sync| sync.name == name)
+    async fn name_is_unique(&self, name: &str) -> bool {
+        for sync in self.synchros.values() {
+            if sync.read().await.name == name {
+                return false;
+            }
+        }
+        true
     }
 
-    fn make_unique_name(&self, name: &str) -> String {
-        if self.name_is_unique(name) {
+    async fn make_unique_name(&self, name: &str) -> String {
+        if self.name_is_unique(name).await {
             return name.to_string();
         }
 
         let mut counter = 1;
         loop {
             let new_name = format!("{}{}", name, counter);
-            if self.name_is_unique(name) {
+            if self.name_is_unique(name).await {
                 return new_name;
             }
             counter += 1;
@@ -249,63 +261,60 @@ impl SynchroList {
 
     /// Generates a unique and simple name for a synchro, based on the name of the remote and local
     /// fs
-    fn unique_synchro_name(&self, local_name: &str, remote_name: &str) -> String {
-        let same_remote: Vec<_> = self
-            .synchros
-            .values()
-            .filter(|sync| sync.remote.description.name() == remote_name)
-            .collect();
+    async fn unique_synchro_name(&self, local_name: &str, remote_name: &str) -> String {
+        let same_remote: Vec<_> = stream::iter(self.synchros.values())
+            .filter(|sync| async { sync.read().await.remote.description.name() == remote_name })
+            .collect()
+            .await;
 
-        if same_remote.is_empty() && self.name_is_unique(remote_name) {
+        if same_remote.is_empty() && self.name_is_unique(remote_name).await {
             return remote_name.to_string();
         }
 
-        let same_local: Vec<_> = same_remote
-            .iter()
-            .filter(|sync| sync.remote.description.name() == remote_name)
-            .collect();
+        let same_local: Vec<_> = stream::iter(same_remote)
+            .filter(|sync| async { sync.read().await.local.description.name() == local_name })
+            .collect()
+            .await;
 
         let name = format!("{local_name}-{remote_name}");
-        if same_local.is_empty() && self.name_is_unique(&name) {
+        if same_local.is_empty() && self.name_is_unique(&name).await {
             return name;
         }
 
-        self.make_unique_name(&name)
+        self.make_unique_name(&name).await
     }
 
     /// Creates and inserts a new filesystem Synchro in the list
-    pub fn insert(
+    pub async fn insert(
         &mut self,
         sync_info: AnySynchroCreationInfo,
     ) -> Result<SynchroId, SynchroCreationError> {
         let local_desc = sync_info.local().clone().into();
         let remote_desc = sync_info.remote().clone().into();
 
-        if self.is_synchronized(&local_desc, &remote_desc) {
+        if self.is_synchronized(&local_desc, &remote_desc).await {
             return Err(SynchroCreationError::AlreadyPresent);
         }
         let id = SynchroId::new();
 
         let local_ref = self.create_and_insert_fs(sync_info.local().clone())?;
         let remote_ref = self.create_and_insert_fs(sync_info.remote().clone())?;
-        let name = sync_info
-            .name()
-            .map(|n| self.make_unique_name(n))
-            .unwrap_or_else(|| {
-                self.unique_synchro_name(
-                    local_ref.description.name(),
-                    remote_ref.description.name(),
-                )
-            });
+        let name = if let Some(name) = sync_info.name() {
+            self.make_unique_name(name).await
+        } else {
+            self.unique_synchro_name(local_ref.description.name(), remote_ref.description.name())
+                .await
+        };
 
         info!("Synchro created: name: {name}, id: {id:?}");
         let synchro = AnySynchroRef {
             local: local_ref,
             remote: remote_ref,
+            status: SynchroStatus::default(),
             name,
         };
 
-        self.synchros.insert(id, synchro);
+        self.synchros.insert(id, RwLock::new(synchro));
 
         Ok(id)
     }
@@ -314,6 +323,7 @@ impl SynchroList {
     pub fn remove(&mut self, id: SynchroId) -> Result<(), SynchroDeletionError> {
         if let Some(sync) = self.synchros.remove(&id) {
             let mut res = Ok(());
+            let sync = sync.into_inner();
 
             if !self.remove_fs(&sync.local) {
                 res = Err(SynchroDeletionError::InvalidSynchroState(
@@ -374,22 +384,34 @@ impl SynchroList {
         RemoteConcrete: ConcreteFS + 'static,
     >(
         &self,
-        synchro: &AnySynchroRef,
+        synchro_lock: &RwLock<AnySynchroRef>,
     ) -> Result<(), SyncError> {
-        let synchro_mutex = self
-            .get_sync::<LocalConcrete, RemoteConcrete>(synchro)
-            .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?;
+        let res = {
+            let synchro = synchro_lock.read().await;
+            let synchro_mutex = self
+                .get_sync::<LocalConcrete, RemoteConcrete>(&synchro)
+                .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?;
 
-        let mut local_fs = synchro_mutex.local.lock().await;
-        let mut remote_fs = synchro_mutex.remote.lock().await;
-        let mut sync = Synchro::new(&mut local_fs, &mut remote_fs);
-        sync.full_sync().await.map_err(|e| {
-            SynchroFailed {
-                synchro: synchro.to_owned(),
-                source: e,
+            let mut local_fs = synchro_mutex.local.lock().await;
+            let mut remote_fs = synchro_mutex.remote.lock().await;
+            let mut sync = Synchro::new(&mut local_fs, &mut remote_fs);
+            sync.full_sync().await.map_err(|e| {
+                SynchroFailed {
+                    synchro: synchro.to_owned(),
+                    source: e,
+                }
+                .into()
+            })
+        };
+
+        match res {
+            Ok(status) => {
+                let mut synchro = synchro_lock.write().await;
+                synchro.status = status;
+                Ok(())
             }
-            .into()
-        })
+            Err(err) => Err(err),
+        }
     }
 
     /// Perfoms a [`full_sync`] on all the synchro in the list
@@ -399,8 +421,10 @@ impl SynchroList {
         let futures: Vec<_> = self
             .synchros
             .values()
-            .map(|synchro| async {
-                match (synchro.local.description(), synchro.remote.description()) {
+            .map(|synchro| async move {
+                let local_desc = synchro.read().await.local.description().clone();
+                let remote_desc = synchro.read().await.remote.description().clone();
+                match (local_desc, remote_desc) {
                     (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
                         self.sync_one::<LocalDir, LocalDir>(synchro).await
                     }
@@ -444,7 +468,7 @@ impl ReadWriteSynchroList {
         &self,
         sync_info: AnySynchroCreationInfo,
     ) -> Result<SynchroId, SynchroCreationError> {
-        self.maps.write().await.insert(sync_info)
+        self.maps.write().await.insert(sync_info).await
     }
 
     /// Deletes a synchronization from the list
@@ -482,8 +506,8 @@ mod test {
 
     use super::*;
 
-    #[test]
-    fn test_insert_remove() {
+    #[tokio::test]
+    async fn test_insert_remove() {
         let mut list = SynchroList::new();
 
         let loc_a = LocalDirCreationInfo::new("/a");
@@ -494,7 +518,7 @@ mod test {
             None,
         );
 
-        let id1 = list.insert(sync1).unwrap();
+        let id1 = list.insert(sync1).await.unwrap();
 
         assert_eq!(list.synchros.len(), 1);
         assert_eq!(list.local_dir_list.len(), 2);
@@ -508,7 +532,7 @@ mod test {
             None,
         );
 
-        list.insert(sync2).unwrap();
+        list.insert(sync2).await.unwrap();
 
         assert_eq!(list.synchros.len(), 2);
         assert_eq!(list.local_dir_list.len(), 3);
