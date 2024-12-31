@@ -34,8 +34,11 @@ pub enum VfsReloadError {
 
 /// Main representation of any kind of filesystem, remote or local.
 ///
-/// It is composed of a generic Concrete FS backend that used for file operations, and a Virtual FS
-/// that is its in-memory representation, using a tree-structure.
+/// It is composed of a generic [`Concrete FS`] backend that used for file operations, and a
+/// [`Virtual FS`] that is its in-memory representation, using a tree-structure.
+///
+/// [`Concrete FS`]: ConcreteFS
+/// [`Virtual FS`]: Vfs
 #[derive(Debug)]
 pub struct FileSystem<Concrete: ConcreteFS> {
     concrete: Concrete,
