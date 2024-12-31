@@ -62,7 +62,7 @@ pub struct DirTree<SyncInfo> {
 }
 
 impl<SyncInfo> DirTree<SyncInfo> {
-    /// Create a new directory with no child and the provided name
+    /// Creates a new directory with no child and the provided name
     pub fn new(name: &str, sync: SyncInfo) -> Self {
         Self {
             metadata: DirMeta::new(name, sync),
@@ -70,7 +70,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Create a new directory without syncinfo.
+    /// Creates a new directory without syncinfo.
     ///
     /// This mean that the synchronization process will force a resync with the concrete Fs
     pub fn new_without_syncinfo(name: &str) -> Self {
@@ -80,7 +80,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Create a new directory in the error [`state`]
+    /// Creates a new directory in the error [`state`]
     ///
     /// [`state`]: NodeState
     pub fn new_error(name: &str, error: FailedUpdateApplication) -> Self {
@@ -90,7 +90,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Create a new directory with the provided name and child nodes
+    /// Creates a new directory with the provided name and child nodes
     pub fn new_with_children(name: &str, sync: SyncInfo, children: Vec<VfsNode<SyncInfo>>) -> Self {
         Self {
             metadata: DirMeta::new(name, sync),
@@ -98,7 +98,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Insert a new child for this directory. If there is already a child with the same name,
+    /// Inserts a new child for this directory. If there is already a child with the same name,
     /// returns false.
     pub fn insert_child(&mut self, child: VfsNode<SyncInfo>) -> bool {
         self.children.insert(child)
@@ -116,7 +116,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         self.metadata.state_mut()
     }
 
-    /// Invalidate the sync info to make them trigger a ConcreteFS sync on next run
+    /// Invalidates the sync info to make them trigger a ConcreteFS sync on next run
     pub fn force_resync(&mut self) {
         self.metadata.force_resync()
     }
@@ -125,8 +125,9 @@ impl<SyncInfo> DirTree<SyncInfo> {
         &self.children
     }
 
-    /// Return a reference to the dir at the given path. Return an error if the path does
-    /// not point to a valid directory node.
+    /// Returns a reference to the dir at the given path.
+    ///
+    /// Returns an error if the path does not point to a valid directory node.
     pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
         if path.is_root() {
             Ok(self)
@@ -137,16 +138,18 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Return a reference to the file at the given path. Return an error if the path does
-    /// not point to a valid file.
+    /// Returns a reference to the file at the given path.
+    ///
+    /// Returns an error if the path does not point to a valid file.
     pub fn find_file(&self, path: &VirtualPath) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
         self.find_node(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| node.as_file())
     }
 
-    /// Return a reference to the node at the given path. Return an error if the path does
-    /// not point to a valid node.
+    /// Returns a reference to the node at the given path.
+    ///
+    /// Returns an error if the path does not point to a valid node.
     pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<SyncInfo>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
@@ -164,8 +167,9 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Return a mutable reference to the dir at the given path. Return an error if the path does
-    /// not point to a valid directory node.
+    /// Returns a mutable reference to the dir at the given path.
+    ///
+    /// Returns an error if the path does not point to a valid directory node.
     pub fn find_dir_mut(
         &mut self,
         path: &VirtualPath,
@@ -179,8 +183,9 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Return a mutable reference to the file at the given path. Return an error if the path does
-    /// not point to a valid file.
+    /// Returns a mutable reference to the file at the given path.
+    ///
+    /// Returns an error if the path does not point to a valid file.
     pub fn find_file_mut(
         &mut self,
         path: &VirtualPath,
@@ -190,8 +195,9 @@ impl<SyncInfo> DirTree<SyncInfo> {
             .and_then(|node| node.as_file_mut())
     }
 
-    /// Return a mutable reference to the node at the given path. Return None if the path does
-    /// not point to a valid node.
+    /// Returns a mutable reference to the node at the given path.
+    ///
+    /// Returns None if the path does not point to a valid node.
     fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<SyncInfo>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
@@ -209,50 +215,53 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Remove a child from this directory. If there were no child with this name, return false.
+    /// Removes a child from this directory. If there were no child with this name, returns false.
     pub fn remove_child(&mut self, child_name: &str) -> bool {
         self.children.remove(child_name)
     }
 
-    /// Remove a child with the given kind from this directory.
+    /// Removes a child with the given kind from this directory.
     ///
-    /// If there were no child with this name return None. If a child exists but is of the wrong
-    /// kind, return Some(false).
+    /// If there were no child with this name returns None. If a child exists but is of the wrong
+    /// kind, returns Some(false).
     fn remove_child_kind(&mut self, child_name: &str, node_kind: NodeKind) -> Option<bool> {
         self.children
             .remove_if(child_name, |child| child.kind() == node_kind)
     }
 
-    /// Remove a child dir from this directory.
+    /// Removes a child dir from this directory.
     ///
-    /// If there were no child node with this name, return None. If the node was not a directory,
-    /// return Some(false).
+    /// If there were no child node with this name, returns None. If the node was not a directory,
+    /// returns Some(false).
     pub fn remove_child_dir(&mut self, child_name: &str) -> Option<bool> {
         self.remove_child_kind(child_name, NodeKind::Dir)
     }
 
-    /// Remove a child file from this directory.
+    /// Removes a child file from this directory.
     ///
-    /// If there were no child node with this name, return None. If the node was not a file,
-    /// return Some(false).
+    /// If there were no child node with this name, returns None. If the node was not a file,
+    /// returns Some(false).
     pub fn remove_child_file(&mut self, child_name: &str) -> Option<bool> {
         self.remove_child_kind(child_name, NodeKind::File)
     }
 
-    /// Delete the node with the current path in the tree. Return an error if the path is not a
-    /// valid node.
+    /// Deletes the node with the current path in the tree.
+    ///
+    /// Return an error if the path is not a valid node.
     pub fn delete_node(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
         self.delete_node_kind(path, None)
     }
 
-    /// Delete the dir with the current path in the tree. Return an error if the path is not a
-    /// valid directory.
+    /// Deletes the dir with the current path in the tree.
+    ///
+    /// Returns an error if the path is not a valid directory.
     pub fn delete_dir(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
         self.delete_node_kind(path, Some(NodeKind::Dir))
     }
 
-    /// Delete the file with the current path in the tree. Return an error if the path is not a
-    /// valid file.
+    /// Deletes the file with the current path in the tree.
+    ///
+    /// Returns an error if the path is not a valid file.
     pub fn delete_file(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
         self.delete_node_kind(path, Some(NodeKind::File))
     }
@@ -288,8 +297,9 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Check if the two directories are structurally equals (their trees are composed of nodes of
-    /// the same kind and the same name).
+    /// Checks if the two directories are structurally equals.
+    ///
+    /// This means that their trees are composed of nodes with the same kind and the same name.
     pub fn structural_eq<OtherSyncInfo>(&self, other: &DirTree<OtherSyncInfo>) -> bool {
         self.name() == other.name()
             && self.children.len() == other.children.len()
@@ -300,7 +310,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
                 .all(|(child_self, child_other)| child_self.structural_eq(child_other))
     }
 
-    /// Get the differences between [`DirTree`], and eventually request file content checks with
+    /// Gets the differences between [`DirTree`], and eventually requests file content checks with
     /// their concrete backends.
     ///
     /// This will perform a structural diff between both trees, and return a
@@ -338,12 +348,51 @@ impl<SyncInfo> DirTree<SyncInfo> {
 
         Ok(diffs)
     }
+
+    /// Returns the list of errors for this dir and its children
+    pub fn get_errors(
+        &self,
+        parent_path: &VirtualPath,
+    ) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
+        let mut dir_path = parent_path.to_owned();
+        dir_path.push(self.name());
+
+        let mut ret = if let NodeState::Error(err) = self.state() {
+            vec![(dir_path.clone(), err.to_owned())]
+        } else {
+            Vec::new()
+        };
+
+        for child in self.children().iter() {
+            ret.extend(child.get_errors(&dir_path));
+        }
+
+        ret
+    }
+
+    /// Returns the list of conflicts for this dir and its children
+    pub fn get_conflicts(&self, parent_path: &VirtualPath) -> Vec<VirtualPathBuf> {
+        let mut dir_path = parent_path.to_owned();
+        dir_path.push(self.name());
+
+        let mut ret = if self.state().is_conflict() {
+            vec![dir_path.clone()]
+        } else {
+            Vec::new()
+        };
+
+        for child in self.children().iter() {
+            ret.extend(child.get_conflicts(&dir_path));
+        }
+
+        ret
+    }
 }
 
 impl<SyncInfo: Clone> DirTree<SyncInfo> {
-    /// Replace an existing existing child based on its name, or insert a new one.
+    /// Replaces an existing existing child based on its name, or insert a new one.
     ///
-    /// Return the replaced child if any, or None if there was no child with this name.
+    /// Returns the replaced child if any, or None if there was no child with this name.
     pub fn replace_child(&mut self, child: VfsNode<SyncInfo>) -> Option<VfsNode<SyncInfo>> {
         self.children.replace(child)
     }
@@ -447,7 +496,7 @@ impl<SyncInfo> Sortable for VfsNode<SyncInfo> {
 }
 
 impl<SyncInfo> VfsNode<SyncInfo> {
-    /// Return the name of the file or directory represented by this node
+    /// Returns the name of the file or directory represented by this node
     pub fn name(&self) -> &str {
         match self {
             VfsNode::File(file) => file.name(),
@@ -582,8 +631,10 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
     }
 
-    /// Compare the structure of trees. Two trees are structurally equals if they have the same
-    /// shape and are composed of nodes with the same names.
+    /// Compares the structure of trees.
+    ///
+    /// Two trees are structurally equals if they have the same shape and are composed of nodes with
+    /// the same names.
     pub fn structural_eq<OtherSyncInfo>(&self, other: &VfsNode<OtherSyncInfo>) -> bool {
         match (self, other) {
             (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.structural_eq(dother),
@@ -592,8 +643,10 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
     }
 
-    /// Virtual diff performed during the reconciliation. Structurally compare both FS, and return a
-    /// `NeedConcreteCheck` when two files have the same name.
+    /// Virtual diff performed during the reconciliation.
+    ///
+    /// Structurally compare both FS, and return a `NeedConcreteCheck` when two files have the same
+    /// name.
     fn reconciliation_diff<OtherSyncInfo>(
         &self,
         other: &VfsNode<OtherSyncInfo>,
@@ -634,7 +687,44 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         path
     }
 
-    /// Return true if a node removal can be skipped because the node creation has not been applied
+    /// Returns the list of errors for this node and its children
+    pub fn get_errors(
+        &self,
+        parent_path: &VirtualPath,
+    ) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
+        let mut path = self.path(parent_path);
+
+        match self {
+            VfsNode::Dir(dir) => dir.get_errors(&path),
+            VfsNode::File(file) => {
+                if let NodeState::Error(err) = file.state() {
+                    path.push(file.name());
+                    vec![(path, err.to_owned())]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    /// Returns the list of conflicts for this node and its children
+    pub fn get_conflicts(&self, parent_path: &VirtualPath) -> Vec<VirtualPathBuf> {
+        let mut path = self.path(parent_path);
+
+        match self {
+            VfsNode::Dir(dir) => dir.get_conflicts(&path),
+            VfsNode::File(file) => {
+                if file.state().is_conflict() {
+                    path.push(file.name());
+                    vec![path]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    /// Returns true if a node removal can be skipped because the node creation has not been applied
     /// on the other FS
     pub fn can_skip_removal(&self) -> bool {
         if let NodeState::Error(failed_update) = self.state() {
@@ -643,7 +733,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         false
     }
 
-    /// Create a diff where this node has been removed from the VFS
+    /// Creates a diff where this node has been removed from the VFS
     pub fn to_removed_diff(&self, parent_path: &VirtualPath) -> VfsNodeUpdate {
         match self {
             VfsNode::Dir(_) => VfsNodeUpdate::dir_removed(self.path(parent_path)),
@@ -651,7 +741,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
     }
 
-    /// Create a diff where this node has been inserted into the VFS
+    /// Creates a diff where this node has been inserted into the VFS
     pub fn to_created_diff(&self, parent_path: &VirtualPath) -> VfsNodeUpdate {
         match self {
             VfsNode::Dir(_) => VfsNodeUpdate::dir_created(self.path(parent_path)),

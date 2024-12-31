@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, fmt::Display};
 
-use brume::concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, FsInstanceDescription};
+use brume::concrete::{
+    local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, FsInstanceDescription, Named,
+};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -107,6 +109,13 @@ impl AnyFsDescription {
         match self {
             AnyFsDescription::LocalDir(desc) => desc.name(),
             AnyFsDescription::Nextcloud(desc) => desc.name(),
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        match self {
+            AnyFsDescription::LocalDir(_) => LocalDir::TYPE_NAME,
+            AnyFsDescription::Nextcloud(_) => NextcloudFs::TYPE_NAME,
         }
     }
 }
