@@ -388,6 +388,12 @@ impl SynchroList {
     ) -> Result<(), SyncError> {
         let res = {
             let synchro = synchro_lock.read().await;
+
+            // Skip synchro that are already identified as desynchronized until the user fixes it
+            if synchro.status == SynchroStatus::Desync {
+                return Ok(());
+            }
+
             let synchro_mutex = self
                 .get_sync::<LocalConcrete, RemoteConcrete>(&synchro)
                 .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?;
@@ -395,13 +401,7 @@ impl SynchroList {
             let mut local_fs = synchro_mutex.local.lock().await;
             let mut remote_fs = synchro_mutex.remote.lock().await;
             let mut sync = Synchro::new(&mut local_fs, &mut remote_fs);
-            sync.full_sync().await.map_err(|e| {
-                SynchroFailed {
-                    synchro: synchro.to_owned(),
-                    source: e,
-                }
-                .into()
-            })
+            sync.full_sync().await
         };
 
         match res {
@@ -410,7 +410,15 @@ impl SynchroList {
                 synchro.status = status;
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                let mut synchro = synchro_lock.write().await;
+                synchro.status = SynchroStatus::from(&err);
+                Err(SynchroFailed {
+                    synchro: synchro.to_owned(),
+                    source: err,
+                }
+                .into())
+            }
         }
     }
 
