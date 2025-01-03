@@ -3,22 +3,17 @@
 mod byte_counter;
 
 use byte_counter::ByteCounterExt;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 
 use std::sync::{atomic::AtomicU64, Arc};
 
-use futures::{
-    future::{join_all, try_join_all},
-    TryFutureExt,
-};
-use tokio::try_join;
+use futures::future::join_all;
 
 use crate::{
     concrete::{ConcreteFS, ConcreteFsError, ConcreteUpdateApplicationError},
-    sorted_vec::SortedVec,
     update::{
         AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, FailedUpdateApplication,
-        ReconciledUpdate, UpdateKind, UpdateTarget, VfsNodeUpdate, VfsUpdateList,
+        UpdateKind, VfsNodeUpdate, VfsUpdateList,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
     Error,
@@ -135,125 +130,14 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
         })
     }
 
-    /// Apply a list of updates on the two provided concrete FS.
-    ///
-    /// The target of the update will be chosen based on the value of the [`UpdateTarget`] of the
-    /// [`ApplicableUpdate`]. Conflict files will always be created on the FileSystem in `self`.
-    ///
-    /// In case of error, return the underlying error and the name of the filesystem where this
-    /// error occurred.
-    ///
-    /// [`ApplicableUpdate`]: crate::update::ApplicableUpdate
-    pub async fn apply_updates_list_concrete<OtherConcrete: ConcreteFS>(
-        &self,
-        other_fs: &FileSystem<OtherConcrete>,
-        updates: SortedVec<ReconciledUpdate>,
-    ) -> Result<
-        (
-            Vec<AppliedUpdate<Concrete::SyncInfo>>,
-            Vec<AppliedUpdate<OtherConcrete::SyncInfo>>,
-        ),
-        (ConcreteUpdateApplicationError, &'static str),
-    > {
-        let mut applicables = Vec::new();
-        let mut conflicts = Vec::new();
-        for update in updates {
-            match update {
-                ReconciledUpdate::Applicable(applicable) => applicables.push(applicable),
-                ReconciledUpdate::Conflict(update) => {
-                    warn!("conflict on {update:?}");
-                    // Don't push removal updates since the node will not exist anymore in the
-                    // source Vfs
-                    if !update.is_removal() {
-                        conflicts.push(update)
-                    }
-                }
-            }
-        }
-
-        let (self_updates, other_updates): (Vec<_>, Vec<_>) =
-            applicables
-                .into_iter()
-                .partition(|update| match update.target() {
-                    UpdateTarget::SelfFs => true,
-                    UpdateTarget::OtherFs => false,
-                });
-
-        let (self_conflicts, other_conflicts): (Vec<_>, Vec<_>) =
-            conflicts
-                .into_iter()
-                .partition(|update| match update.target() {
-                    UpdateTarget::SelfFs => true,
-                    UpdateTarget::OtherFs => false,
-                });
-
-        let self_futures = try_join_all(
-            self_updates
-                .into_iter()
-                .map(|update| self.apply_update_concrete(other_fs, update.clone().into())),
-        );
-
-        let other_futures = try_join_all(
-            other_updates
-                .into_iter()
-                .map(|update| other_fs.apply_update_concrete(self, update.clone().into())),
-        );
-
-        let (self_applied, other_applied) = try_join!(
-            self_futures.map_err(|e| (e, Concrete::TYPE_NAME)),
-            other_futures.map_err(|e| (e, OtherConcrete::TYPE_NAME))
-        )?;
-
-        // Errors are applied on the source Vfs, to make them trigger a resync, so we need to move
-        // them from one to the other
-        let mut self_res = Vec::new();
-        let mut self_failed = Vec::new();
-        for applied in self_applied.into_iter().flatten() {
-            match applied {
-                AppliedUpdate::FailedApplication(failed_update) => {
-                    self_failed.push(AppliedUpdate::FailedApplication(failed_update))
-                }
-                _ => self_res.push(applied),
-            }
-        }
-
-        let mut other_res = Vec::new();
-        let mut other_failed = Vec::new();
-        for applied in other_applied.into_iter().flatten() {
-            match applied {
-                AppliedUpdate::FailedApplication(failed_update) => {
-                    other_failed.push(AppliedUpdate::FailedApplication(failed_update))
-                }
-                _ => other_res.push(applied),
-            }
-        }
-
-        self_res.extend(other_failed);
-        self_res.extend(
-            self_conflicts
-                .clone()
-                .into_iter()
-                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
-        );
-        other_res.extend(self_failed);
-        other_res.extend(
-            other_conflicts
-                .clone()
-                .into_iter()
-                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
-        );
-
-        Ok((self_res, other_res))
-    }
-
     /// Apply an update on the concrete fs.
     ///
     /// The file contents will be taken from `ref_fs`
     // TODO: handle if ref_fs is not sync ?
     // TODO: check for "last minute" changes in target fs
-    pub async fn apply_update_concrete<OtherConcrete: ConcreteFS>(
+    pub async fn apply_update_concrete<RefConcrete: ConcreteFS>(
         &self,
-        ref_fs: &FileSystem<OtherConcrete>,
+        ref_fs: &FileSystem<RefConcrete>,
         update: VfsNodeUpdate,
     ) -> Result<Vec<AppliedUpdate<Concrete::SyncInfo>>, ConcreteUpdateApplicationError> {
         if update.path().is_root() {
