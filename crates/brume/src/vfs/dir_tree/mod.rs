@@ -327,7 +327,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
             &other.children,
             |self_child| -> Result<_, DiffError> {
                 let mut res = SortedVec::new();
-                res.insert(VirtualReconciledUpdate::applicable_other(
+                res.insert(VirtualReconciledUpdate::applicable_remote(
                     &self_child.to_created_diff(&dir_path),
                 ));
                 Ok(res)
@@ -335,7 +335,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
             |self_child, other_child| self_child.reconciliation_diff(other_child, &dir_path),
             |other_child| {
                 let mut res = SortedVec::new();
-                res.insert(VirtualReconciledUpdate::applicable_self(
+                res.insert(VirtualReconciledUpdate::applicable_local(
                     &other_child.to_created_diff(&dir_path),
                 ));
                 Ok(res)

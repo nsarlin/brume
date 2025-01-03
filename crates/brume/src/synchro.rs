@@ -2,7 +2,8 @@
 
 use std::fmt::Display;
 
-use futures::TryFutureExt;
+use futures::{future::try_join_all, TryFutureExt};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use tokio::try_join;
 
@@ -52,6 +53,29 @@ impl From<&Error> for SynchroStatus {
 impl Display for SynchroStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+/// A side of the synchro, remote or local
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum SynchroSide {
+    Local,
+    Remote,
+}
+
+impl SynchroSide {
+    pub fn invert(self) -> Self {
+        match self {
+            SynchroSide::Local => SynchroSide::Remote,
+            SynchroSide::Remote => SynchroSide::Local,
+        }
+    }
+
+    pub fn is_local(self) -> bool {
+        match self {
+            SynchroSide::Local => true,
+            SynchroSide::Remote => false,
+        }
     }
 }
 
@@ -146,8 +170,8 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
 
     /// Apply a list of updates on the two FS on both ends of the synchro
     ///
-    /// The target of the update will be chosen based on the value of the [`UpdateTarget`] of the
-    /// [`ApplicableUpdate`]. Conflict files will always be created on the FileSystem in `self`.
+    /// The target of the update will be chosen based on the value of the [`SynchroSide`] of the
+    /// [`ApplicableUpdate`].
     ///
     /// [`ApplicableUpdate`]: crate::update::ApplicableUpdate
     /// [`UpdateTarget`]: crate::update::UpdateTarget
@@ -161,9 +185,86 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         ),
         (ConcreteUpdateApplicationError, &'static str),
     > {
-        self.local
-            .apply_updates_list_concrete(self.remote, updates)
-            .await
+        let mut applicables = Vec::new();
+        let mut conflicts = Vec::new();
+        for update in updates {
+            match update {
+                ReconciledUpdate::Applicable(applicable) => applicables.push(applicable),
+                ReconciledUpdate::Conflict(update) => {
+                    warn!("conflict on {update:?}");
+                    // Don't push removal updates since the node will not exist anymore in the
+                    // source Vfs
+                    if !update.is_removal() {
+                        conflicts.push(update)
+                    }
+                }
+            }
+        }
+
+        let (local_updates, remote_updates): (Vec<_>, Vec<_>) = applicables
+            .into_iter()
+            .partition(|update| update.target().is_local());
+
+        let (local_conflicts, remote_conflicts): (Vec<_>, Vec<_>) = conflicts
+            .into_iter()
+            .partition(|update| update.target().is_local());
+
+        // Apply the updates
+        let local_futures = try_join_all(local_updates.into_iter().map(|update| {
+            self.local
+                .apply_update_concrete(self.remote, update.clone().into())
+        }));
+
+        let remote_futures = try_join_all(remote_updates.into_iter().map(|update| {
+            self.remote
+                .apply_update_concrete(self.local, update.clone().into())
+        }));
+
+        let (local_applied, remote_applied) = try_join!(
+            local_futures.map_err(|e| (e, LocalConcrete::TYPE_NAME)),
+            remote_futures.map_err(|e| (e, RemoteConcrete::TYPE_NAME))
+        )?;
+
+        // Errors are applied on the source Vfs to make them trigger a resync, but they are detected
+        // on the target side. So we need to move them from one fs to the other.
+        let mut local_res = Vec::new();
+        let mut local_failed = Vec::new();
+        for applied in local_applied.into_iter().flatten() {
+            match applied {
+                AppliedUpdate::FailedApplication(failed_update) => {
+                    local_failed.push(AppliedUpdate::FailedApplication(failed_update))
+                }
+                _ => local_res.push(applied),
+            }
+        }
+
+        let mut remote_res = Vec::new();
+        let mut remote_failed = Vec::new();
+        for applied in remote_applied.into_iter().flatten() {
+            match applied {
+                AppliedUpdate::FailedApplication(failed_update) => {
+                    remote_failed.push(AppliedUpdate::FailedApplication(failed_update))
+                }
+                _ => remote_res.push(applied),
+            }
+        }
+
+        local_res.extend(remote_failed);
+        local_res.extend(
+            local_conflicts
+                .clone()
+                .into_iter()
+                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
+        );
+        remote_res.extend(local_failed);
+        remote_res.extend(
+            remote_conflicts
+                .clone()
+                .into_iter()
+                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
+        );
+
+        Ok((local_res, remote_res))
     }
 
     /// Update both [`Vfs`] by querying and parsing their respective concrete FS.
@@ -273,13 +374,13 @@ mod test {
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
         let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::applicable_other(&VfsNodeUpdate::file_modified(
+            ReconciledUpdate::applicable_remote(&VfsNodeUpdate::file_modified(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             )),
-            ReconciledUpdate::applicable_self(&VfsNodeUpdate::dir_removed(
+            ReconciledUpdate::applicable_local(&VfsNodeUpdate::dir_removed(
                 VirtualPathBuf::new("/a/b").unwrap(),
             )),
-            ReconciledUpdate::applicable_other(&VfsNodeUpdate::dir_created(
+            ReconciledUpdate::applicable_remote(&VfsNodeUpdate::dir_created(
                 VirtualPathBuf::new("/e").unwrap(),
             )),
         ]);
@@ -331,12 +432,12 @@ mod test {
         let modif_update = VfsNodeUpdate::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap());
 
         let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::conflict_self(&modif_update),
-            ReconciledUpdate::conflict_other(&modif_update),
-            ReconciledUpdate::conflict_self(&VfsNodeUpdate::dir_removed(
+            ReconciledUpdate::conflict_local(&modif_update),
+            ReconciledUpdate::conflict_remote(&modif_update),
+            ReconciledUpdate::conflict_local(&VfsNodeUpdate::dir_removed(
                 VirtualPathBuf::new("/a/b").unwrap(),
             )),
-            ReconciledUpdate::conflict_other(&VfsNodeUpdate::file_created(
+            ReconciledUpdate::conflict_remote(&VfsNodeUpdate::file_created(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),
         ]);
@@ -382,17 +483,17 @@ mod test {
 
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
-        let (conflict_self, conflict_other) = ReconciledUpdate::conflict_both(
+        let (conflict_local, conflict_remote) = ReconciledUpdate::conflict_both(
             &VfsNodeUpdate::file_created(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
         );
 
         let reconciled_ref = SortedVec::from([
-            conflict_self,
-            conflict_other,
-            ReconciledUpdate::applicable_self(&VfsNodeUpdate::file_created(
+            conflict_local,
+            conflict_remote,
+            ReconciledUpdate::applicable_local(&VfsNodeUpdate::file_created(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),
-            ReconciledUpdate::applicable_other(&VfsNodeUpdate::dir_created(
+            ReconciledUpdate::applicable_remote(&VfsNodeUpdate::dir_created(
                 VirtualPathBuf::new("/e/g").unwrap(),
             )),
         ]);

@@ -135,17 +135,17 @@ async fn concrete_hash_file<Concrete: ConcreteFS>(
 ///
 /// In case of error, return the underlying error and the name of the filesystem where this
 /// error occurred.
-pub async fn concrete_eq_file<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
-    concrete_self: &Concrete,
-    concrete_other: &OtherConcrete,
+pub async fn concrete_eq_file<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>(
+    local_concrete: &LocalConcrete,
+    remote_concrete: &RemoteConcrete,
     path: &VirtualPath,
 ) -> Result<bool, (ConcreteFsError, &'static str)> {
     // TODO: cache files when possible
-    let (self_hash, other_hash) = tokio::join!(
-        concrete_hash_file(concrete_self, path),
-        concrete_hash_file(concrete_other, path)
+    let (local_hash, remote_hash) = tokio::join!(
+        concrete_hash_file(local_concrete, path),
+        concrete_hash_file(remote_concrete, path)
     );
 
-    Ok(self_hash.map_err(|e| (e, Concrete::TYPE_NAME))?
-        == other_hash.map_err(|e| (e, Concrete::TYPE_NAME))?)
+    Ok(local_hash.map_err(|e| (e, LocalConcrete::TYPE_NAME))?
+        == remote_hash.map_err(|e| (e, RemoteConcrete::TYPE_NAME))?)
 }

@@ -28,6 +28,7 @@ use futures::future::try_join_all;
 use crate::{
     concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, Named},
     sorted_vec::{Sortable, SortedVec},
+    synchro::SynchroSide,
     vfs::{
         DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
     },
@@ -39,7 +40,7 @@ use crate::{
 pub enum DiffError {
     #[error("the sync info for the path {0:?} are not valid")]
     InvalidSyncInfo(VirtualPathBuf),
-    #[error("the nodes in 'self' and 'other' do not point to the same node and can't be diff")]
+    #[error("the path in 'local' and 'remote' FS do not point to the same node and can't be diff")]
     NodeMismatch(#[from] NameMismatchError),
 }
 
@@ -68,7 +69,7 @@ pub enum ReconciliationError {
         source: ConcreteFsError,
     },
     #[error(
-        "the nodes in 'self' and 'other' do not point to the same node and can't be reconciled"
+        "the nodes in 'local' and 'remote' FS do not point to the same node and can't be reconciled"
     )]
     NodeMismatch(#[from] NameMismatchError),
     #[error("invalid path on {fs_name} provided for reconciliation")]
@@ -224,38 +225,38 @@ impl VfsNodeUpdate {
     /// This step is performed without access to the concrete filesystems. This means that only
     /// obvious conflicts are detected. Files that are modified on both fs will be flagged as
     /// `NeedConcreteCheck` so they can be resolved later with concrete fs access.
-    fn reconcile<SyncInfo: Named, OtherSyncInfo: Named>(
+    fn reconcile<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
-        other: &VfsNodeUpdate,
-        vfs_self: &Vfs<SyncInfo>,
-        vfs_other: &Vfs<OtherSyncInfo>,
+        remote_update: &VfsNodeUpdate,
+        vfs_local: &Vfs<LocalSyncInfo>,
+        vfs_remote: &Vfs<RemoteSyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
-        if self.path() != other.path() {
+        if self.path() != remote_update.path() {
             return Err(NameMismatchError {
                 found: self.path().name().to_string(),
-                expected: other.path().name().to_string(),
+                expected: remote_update.path().name().to_string(),
             }
             .into());
         }
 
         let mut reconciled = SortedVec::new();
 
-        match (self.kind, other.kind) {
+        match (self.kind, remote_update.kind) {
             (UpdateKind::DirCreated, UpdateKind::DirCreated) => {
                 // If the same dir has been created on both sides, we need to check if they are
                 // equivalent. If they are not, we generate updates that are only allowed to create
                 // nodes.
-                let dir_self = vfs_self
+                let dir_local = vfs_local
                     .root()
                     .find_dir(&self.path)
-                    .map_err(|e| ReconciliationError::invalid_path(SyncInfo::TYPE_NAME, e))?;
-                let dir_other = vfs_other
+                    .map_err(|e| ReconciliationError::invalid_path(LocalSyncInfo::TYPE_NAME, e))?;
+                let dir_remote = vfs_remote
                     .root()
-                    .find_dir(&other.path)
-                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
+                    .find_dir(&remote_update.path)
+                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
-                let reconciled = dir_self.reconciliation_diff(
-                    dir_other,
+                let reconciled = dir_local.reconciliation_diff(
+                    dir_remote,
                     self.path().parent().unwrap_or(VirtualPath::root()),
                 )?;
                 // Since we iterate on sorted updates, the result will be sorted too
@@ -264,30 +265,30 @@ impl VfsNodeUpdate {
             (UpdateKind::DirRemoved, UpdateKind::DirRemoved) => Ok(reconciled),
             (UpdateKind::FileModified, UpdateKind::FileModified)
             | (UpdateKind::FileCreated, UpdateKind::FileCreated) => {
-                let file_self = vfs_self
+                let file_local = vfs_local
                     .root()
                     .find_file(&self.path)
-                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
-                let file_other = vfs_other
+                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
+                let file_remote = vfs_remote
                     .root()
-                    .find_file(&other.path)
-                    .map_err(|e| ReconciliationError::invalid_path(OtherSyncInfo::TYPE_NAME, e))?;
+                    .find_file(&remote_update.path)
+                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
-                let (self_update, other_update) = if file_self.size() == file_other.size() {
+                let (local_update, remote_update) = if file_local.size() == file_remote.size() {
                     VirtualReconciledUpdate::concrete_check_both(self)
                 } else {
                     VirtualReconciledUpdate::conflict_both(self)
                 };
 
-                reconciled.insert(self_update);
-                reconciled.insert(other_update);
+                reconciled.insert(local_update);
+                reconciled.insert(remote_update);
 
                 Ok(reconciled)
             }
             (UpdateKind::FileRemoved, UpdateKind::FileRemoved) => Ok(reconciled),
             (_, _) => {
-                reconciled.insert(VirtualReconciledUpdate::conflict_self(self));
-                reconciled.insert(VirtualReconciledUpdate::conflict_other(other));
+                reconciled.insert(VirtualReconciledUpdate::conflict_local(self));
+                reconciled.insert(VirtualReconciledUpdate::conflict_remote(remote_update));
                 Ok(reconciled)
             }
         }
@@ -318,53 +319,53 @@ pub type VfsUpdateList = SortedVec<VfsNodeUpdate>;
 impl VfsUpdateList {
     /// Merge two update lists by calling [`VfsNodeUpdate::reconcile`] on their elements one by
     /// one
-    pub(crate) fn merge<SyncInfo: Named, OtherSyncInfo: Named>(
+    pub(crate) fn merge<SyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
-        other: VfsUpdateList,
-        vfs_self: &Vfs<SyncInfo>,
-        vfs_other: &Vfs<OtherSyncInfo>,
+        remote_updates: VfsUpdateList,
+        local_vfs: &Vfs<SyncInfo>,
+        remote_vfs: &Vfs<RemoteSyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
         // Here we cannot use `iter_zip_map` or an async variant of it because it does not seem
         // possible to express the lifetimes required by the async closures
 
         let mut ret = Vec::new();
-        let mut self_iter = self.iter();
-        let mut other_iter = other.iter();
+        let mut local_iter = self.iter();
+        let mut remote_iter = remote_updates.iter();
 
-        let mut self_item_opt = self_iter.next();
-        let mut other_item_opt = other_iter.next();
+        let mut local_item_opt = local_iter.next();
+        let mut remote_item_opt = remote_iter.next();
 
-        while let (Some(self_item), Some(other_item)) = (self_item_opt, other_item_opt) {
-            match self_item.key().cmp(other_item.key()) {
+        while let (Some(local_item), Some(remote_item)) = (local_item_opt, remote_item_opt) {
+            match local_item.key().cmp(remote_item.key()) {
                 Ordering::Less => {
-                    // Propagate the update from self to other
-                    ret.push(VirtualReconciledUpdate::applicable_other(self_item));
-                    self_item_opt = self_iter.next()
+                    // Propagate the update from local to remote
+                    ret.push(VirtualReconciledUpdate::applicable_remote(local_item));
+                    local_item_opt = local_iter.next()
                 }
 
                 Ordering::Equal => {
-                    ret.extend(self_item.reconcile(other_item, vfs_self, vfs_other)?);
-                    self_item_opt = self_iter.next();
-                    other_item_opt = other_iter.next();
+                    ret.extend(local_item.reconcile(remote_item, local_vfs, remote_vfs)?);
+                    local_item_opt = local_iter.next();
+                    remote_item_opt = remote_iter.next();
                 }
                 Ordering::Greater => {
-                    // Propagate the update from other to self
-                    ret.push(VirtualReconciledUpdate::applicable_self(other_item));
-                    other_item_opt = other_iter.next();
+                    // Propagate the update from remote to local
+                    ret.push(VirtualReconciledUpdate::applicable_local(remote_item));
+                    remote_item_opt = remote_iter.next();
                 }
             }
         }
 
         // Handle the remaining items that are present in an iterator and not the
         // other one
-        while let Some(self_item) = self_item_opt {
-            ret.push(VirtualReconciledUpdate::applicable_other(self_item));
-            self_item_opt = self_iter.next();
+        while let Some(local_item) = local_item_opt {
+            ret.push(VirtualReconciledUpdate::applicable_remote(local_item));
+            local_item_opt = local_iter.next();
         }
 
-        while let Some(other_item) = other_item_opt {
-            ret.push(VirtualReconciledUpdate::applicable_self(other_item));
-            other_item_opt = other_iter.next();
+        while let Some(remote_item) = remote_item_opt {
+            ret.push(VirtualReconciledUpdate::applicable_local(remote_item));
+            remote_item_opt = remote_iter.next();
         }
 
         // Ok to use unchecked since we iterate on ordered updates
@@ -372,32 +373,23 @@ impl VfsUpdateList {
     }
 }
 
-/// The target of the update, from the point of view of the FileSystem on which `reconcile` has been
-/// called
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum UpdateTarget {
-    SelfFs,
-    OtherFs,
-}
-
 /// An update that is ready to be applied
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ApplicableUpdate {
     update: VfsNodeUpdate, // Fields order is important for the ord implementation
-    target: UpdateTarget,
+    target: SynchroSide,
 }
 
 impl ApplicableUpdate {
-    pub fn new(target: UpdateTarget, update: &VfsNodeUpdate) -> Self {
+    pub fn new(target: SynchroSide, update: &VfsNodeUpdate) -> Self {
         Self {
             target,
             update: update.clone(),
         }
     }
 
-    /// The Filesystem targeted by the update "self" or "other based on the Filesystem where the
-    /// diff has been performed
-    pub fn target(&self) -> UpdateTarget {
+    /// The Filesystem targeted by the update, local or remote
+    pub fn target(&self) -> SynchroSide {
         self.target
     }
 
@@ -413,14 +405,11 @@ impl ApplicableUpdate {
         self.update.is_removal()
     }
 
-    /// Return a new update with inverted [`UpdateTarget`]
+    /// Return a new update with inverted [`SynchroSide`]
     pub fn inverse_target(&self) -> Self {
         Self {
             update: self.update.clone(),
-            target: match self.target {
-                UpdateTarget::SelfFs => UpdateTarget::OtherFs,
-                UpdateTarget::OtherFs => UpdateTarget::SelfFs,
-            },
+            target: self.target.invert(),
         }
     }
 }
@@ -453,63 +442,63 @@ impl VirtualReconciledUpdate {
     }
 
     /// Create a new `Applicable` update with [`UpdateTarget::SelfFs`]
-    pub(crate) fn applicable_self(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    pub(crate) fn applicable_local(update: &VfsNodeUpdate) -> Self {
+        Self::Applicable(ApplicableUpdate::new(SynchroSide::Local, update))
     }
 
-    /// Create a new `Applicable` update with [`UpdateTarget::OtherFs`]
-    pub(crate) fn applicable_other(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    /// Create a new `Applicable` update with [`SynchroSide::Remote`]
+    pub(crate) fn applicable_remote(update: &VfsNodeUpdate) -> Self {
+        Self::Applicable(ApplicableUpdate::new(SynchroSide::Remote, update))
     }
 
-    /// Create a new `Conflict` update with [`UpdateTarget::SelfFs`]
-    pub(crate) fn conflict_self(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    /// Create a new `Conflict` update with [`SynchroSide::Local`]
+    pub(crate) fn conflict_local(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(SynchroSide::Local, update))
     }
 
-    /// Create a new `Conflict` update with [`UpdateTarget::OtherFs`]
-    pub(crate) fn conflict_other(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    /// Create a new `Conflict` update with [`SynchroSide::Remote`]
+    pub(crate) fn conflict_remote(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(SynchroSide::Remote, update))
     }
 
-    /// Create two new `Conflict` updates with [`UpdateTarget::SelfFs`] and
-    /// [`UpdateTarget::OtherFs`]
+    /// Create two new `Conflict` updates with [`SynchroSide::Local`] and
+    /// [`SynchroSide::Remote`]
     pub(crate) fn conflict_both(update: &VfsNodeUpdate) -> (Self, Self) {
-        (Self::conflict_self(update), Self::conflict_other(update))
+        (Self::conflict_local(update), Self::conflict_remote(update))
     }
 
-    /// Create a new `NeedConcreteCheck` update with [`UpdateTarget::SelfFs`]
-    pub(crate) fn concrete_check_self(update: &VfsNodeUpdate) -> Self {
-        Self::NeedConcreteCheck(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    /// Create a new `NeedConcreteCheck` update with [`SynchroSide::Local`]
+    pub(crate) fn concrete_check_local(update: &VfsNodeUpdate) -> Self {
+        Self::NeedConcreteCheck(ApplicableUpdate::new(SynchroSide::Local, update))
     }
 
-    /// Create a new `NeedConcreteCheck` update with [`UpdateTarget::OtherFs`]
-    pub(crate) fn concrete_check_other(update: &VfsNodeUpdate) -> Self {
-        Self::NeedConcreteCheck(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    /// Create a new `NeedConcreteCheck` update with [`SynchroSide::Remote`]
+    pub(crate) fn concrete_check_remote(update: &VfsNodeUpdate) -> Self {
+        Self::NeedConcreteCheck(ApplicableUpdate::new(SynchroSide::Remote, update))
     }
 
-    /// Create two new `NeedConcreteCheck` updates with [`UpdateTarget::SelfFs`] and
-    /// [`UpdateTarget::OtherFs`]
+    /// Create two new `NeedConcreteCheck` updates with [`SynchroSide::Local`] and
+    /// [`SynchroSide::Remote`]
     pub(crate) fn concrete_check_both(update: &VfsNodeUpdate) -> (Self, Self) {
         (
-            Self::concrete_check_self(update),
-            Self::concrete_check_other(update),
+            Self::concrete_check_local(update),
+            Self::concrete_check_remote(update),
         )
     }
 
     /// Resolve an update with `NeedConcreteCheck` by comparing hashes of the file on both concrete
     /// FS
-    async fn resolve_concrete<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
+    async fn resolve_concrete<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>(
         self,
-        concrete_self: &Concrete,
-        concrete_other: &OtherConcrete,
+        local_concrete: &LocalConcrete,
+        remote_concrete: &RemoteConcrete,
     ) -> Result<Option<ReconciledUpdate>, ReconciliationError> {
         match self {
             VirtualReconciledUpdate::Applicable(update) => {
                 Ok(Some(ReconciledUpdate::Applicable(update)))
             }
             VirtualReconciledUpdate::NeedConcreteCheck(update) => {
-                if concrete_eq_file(concrete_self, concrete_other, update.path())
+                if concrete_eq_file(local_concrete, remote_concrete, update.path())
                     .await
                     .map_err(|(e, name)| ReconciliationError::concrete(name, e))?
                 {
@@ -579,30 +568,30 @@ impl ReconciledUpdate {
         }
     }
 
-    /// Create a new `Applicable` update with [`UpdateTarget::SelfFs`]
-    pub fn applicable_self(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    /// Create a new `Applicable` update with [`SynchroSide::Local`]
+    pub fn applicable_local(update: &VfsNodeUpdate) -> Self {
+        Self::Applicable(ApplicableUpdate::new(SynchroSide::Local, update))
     }
 
-    /// Create a new `Applicable` update with [`UpdateTarget::OtherFs`]
-    pub fn applicable_other(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    /// Create a new `Applicable` update with [`SynchroSide::Remote`]
+    pub fn applicable_remote(update: &VfsNodeUpdate) -> Self {
+        Self::Applicable(ApplicableUpdate::new(SynchroSide::Remote, update))
     }
 
-    /// Create a new `Conflict` update with [`UpdateTarget::SelfFs`]
-    pub fn conflict_self(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(UpdateTarget::SelfFs, update))
+    /// Create a new `Conflict` update with [`SynchroSide::Local`]
+    pub fn conflict_local(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(SynchroSide::Local, update))
     }
 
-    /// Create a new `Conflict` update with [`UpdateTarget::OtherFs`]
-    pub fn conflict_other(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(UpdateTarget::OtherFs, update))
+    /// Create a new `Conflict` update with [`SynchroSide::Remote`]
+    pub fn conflict_remote(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(SynchroSide::Remote, update))
     }
 
-    /// Create two new `Conflict` updates with [`UpdateTarget::SelfFs`] and
-    /// [`UpdateTarget::OtherFs`]
+    /// Create two new `Conflict` updates with [`SynchroSide::Local`] and
+    /// [`SynchroSide::Remote`]
     pub fn conflict_both(update: &VfsNodeUpdate) -> (Self, Self) {
-        (Self::conflict_self(update), Self::conflict_other(update))
+        (Self::conflict_local(update), Self::conflict_remote(update))
     }
 }
 
