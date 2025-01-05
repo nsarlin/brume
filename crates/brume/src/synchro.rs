@@ -56,29 +56,6 @@ impl Display for SynchroStatus {
     }
 }
 
-/// A side of the synchro, remote or local
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum SynchroSide {
-    Local,
-    Remote,
-}
-
-impl SynchroSide {
-    pub fn invert(self) -> Self {
-        match self {
-            SynchroSide::Local => SynchroSide::Remote,
-            SynchroSide::Remote => SynchroSide::Local,
-        }
-    }
-
-    pub fn is_local(self) -> bool {
-        match self {
-            SynchroSide::Local => true,
-            SynchroSide::Remote => false,
-        }
-    }
-}
-
 /// A link between 2 [`FileSystem`] that are synchronized.
 ///
 /// Since synchronization is bidirectional, there is almost no difference between how the `local`
@@ -170,7 +147,7 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
 
     /// Apply a list of updates on the two FS on both ends of the synchro
     ///
-    /// The target of the update will be chosen based on the value of the [`SynchroSide`] of the
+    /// The target of the update will be chosen based on the value of the [`UpdateTarget`] of the
     /// [`ApplicableUpdate`].
     ///
     /// [`ApplicableUpdate`]: crate::update::ApplicableUpdate
@@ -185,29 +162,26 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         ),
         (ConcreteUpdateApplicationError, &'static str),
     > {
-        let mut applicables = Vec::new();
-        let mut conflicts = Vec::new();
+        let mut applicables = SortedVec::new();
+        let mut conflicts = SortedVec::new();
         for update in updates {
             match update {
-                ReconciledUpdate::Applicable(applicable) => applicables.push(applicable),
+                ReconciledUpdate::Applicable(applicable) => {
+                    applicables.insert(applicable);
+                }
                 ReconciledUpdate::Conflict(update) => {
                     warn!("conflict on {update:?}");
                     // Don't push removal updates since the node will not exist anymore in the
                     // source Vfs
                     if !update.is_removal() {
-                        conflicts.push(update)
+                        conflicts.insert(update);
                     }
                 }
             }
         }
 
-        let (local_updates, remote_updates): (Vec<_>, Vec<_>) = applicables
-            .into_iter()
-            .partition(|update| update.target().is_local());
-
-        let (local_conflicts, remote_conflicts): (Vec<_>, Vec<_>) = conflicts
-            .into_iter()
-            .partition(|update| update.target().is_local());
+        let (local_updates, remote_updates) = applicables.split_local_remote();
+        let (local_conflicts, remote_conflicts) = conflicts.split_local_remote();
 
         // Apply the updates
         let local_futures = try_join_all(local_updates.into_iter().map(|update| {
@@ -432,8 +406,7 @@ mod test {
         let modif_update = VfsNodeUpdate::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap());
 
         let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::conflict_local(&modif_update),
-            ReconciledUpdate::conflict_remote(&modif_update),
+            ReconciledUpdate::conflict_both(&modif_update),
             ReconciledUpdate::conflict_local(&VfsNodeUpdate::dir_removed(
                 VirtualPathBuf::new("/a/b").unwrap(),
             )),
@@ -483,13 +456,10 @@ mod test {
 
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
-        let (conflict_local, conflict_remote) = ReconciledUpdate::conflict_both(
-            &VfsNodeUpdate::file_created(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-        );
-
         let reconciled_ref = SortedVec::from([
-            conflict_local,
-            conflict_remote,
+            ReconciledUpdate::conflict_both(&VfsNodeUpdate::file_created(
+                VirtualPathBuf::new("/Doc/f1.md").unwrap(),
+            )),
             ReconciledUpdate::applicable_local(&VfsNodeUpdate::file_created(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),

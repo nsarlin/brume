@@ -28,7 +28,6 @@ use futures::future::try_join_all;
 use crate::{
     concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, Named},
     sorted_vec::{Sortable, SortedVec},
-    synchro::SynchroSide,
     vfs::{
         DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
     },
@@ -169,6 +168,24 @@ impl UpdateKind {
     }
 }
 
+/// The target filesystem of an update, as defined in the synchro
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum UpdateTarget {
+    Local,
+    Remote,
+    Both,
+}
+
+impl UpdateTarget {
+    pub fn invert(self) -> Self {
+        match self {
+            UpdateTarget::Local => UpdateTarget::Remote,
+            UpdateTarget::Remote => UpdateTarget::Local,
+            UpdateTarget::Both => UpdateTarget::Both,
+        }
+    }
+}
+
 /// A single node update
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct VfsNodeUpdate {
@@ -274,14 +291,13 @@ impl VfsNodeUpdate {
                     .find_file(&remote_update.path)
                     .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
-                let (local_update, remote_update) = if file_local.size() == file_remote.size() {
+                let update = if file_local.size() == file_remote.size() {
                     VirtualReconciledUpdate::concrete_check_both(self)
                 } else {
                     VirtualReconciledUpdate::conflict_both(self)
                 };
 
-                reconciled.insert(local_update);
-                reconciled.insert(remote_update);
+                reconciled.insert(update);
 
                 Ok(reconciled)
             }
@@ -377,11 +393,11 @@ impl VfsUpdateList {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ApplicableUpdate {
     update: VfsNodeUpdate, // Fields order is important for the ord implementation
-    target: SynchroSide,
+    target: UpdateTarget,
 }
 
 impl ApplicableUpdate {
-    pub fn new(target: SynchroSide, update: &VfsNodeUpdate) -> Self {
+    pub fn new(target: UpdateTarget, update: &VfsNodeUpdate) -> Self {
         Self {
             target,
             update: update.clone(),
@@ -389,7 +405,7 @@ impl ApplicableUpdate {
     }
 
     /// The Filesystem targeted by the update, local or remote
-    pub fn target(&self) -> SynchroSide {
+    pub fn target(&self) -> UpdateTarget {
         self.target
     }
 
@@ -420,6 +436,34 @@ impl From<ApplicableUpdate> for VfsNodeUpdate {
     }
 }
 
+impl Sortable for ApplicableUpdate {
+    type Key = Self;
+
+    fn key(&self) -> &Self::Key {
+        self
+    }
+}
+
+impl SortedVec<ApplicableUpdate> {
+    pub fn split_local_remote(self) -> (Vec<ApplicableUpdate>, Vec<ApplicableUpdate>) {
+        let mut local = Vec::new();
+        let mut remote = Vec::new();
+
+        for update in self.into_iter() {
+            match update.target() {
+                UpdateTarget::Local => local.push(update),
+                UpdateTarget::Remote => remote.push(update),
+                UpdateTarget::Both => {
+                    local.push(update.clone());
+                    remote.push(update)
+                }
+            }
+        }
+
+        (local, remote)
+    }
+}
+
 /// An update that has been reconciled based on VFS diff but needs a check against the concrete FS
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum VirtualReconciledUpdate {
@@ -443,47 +487,32 @@ impl VirtualReconciledUpdate {
 
     /// Create a new `Applicable` update with [`UpdateTarget::SelfFs`]
     pub(crate) fn applicable_local(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(SynchroSide::Local, update))
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
-    /// Create a new `Applicable` update with [`SynchroSide::Remote`]
+    /// Create a new `Applicable` update with [`UpdateTarget::Remote`]
     pub(crate) fn applicable_remote(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(SynchroSide::Remote, update))
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
-    /// Create a new `Conflict` update with [`SynchroSide::Local`]
+    /// Create a new `Conflict` update with [`UpdateTarget::Local`]
     pub(crate) fn conflict_local(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(SynchroSide::Local, update))
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
-    /// Create a new `Conflict` update with [`SynchroSide::Remote`]
+    /// Create a new `Conflict` update with [`UpdateTarget::Remote`]
     pub(crate) fn conflict_remote(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(SynchroSide::Remote, update))
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
-    /// Create two new `Conflict` updates with [`SynchroSide::Local`] and
-    /// [`SynchroSide::Remote`]
-    pub(crate) fn conflict_both(update: &VfsNodeUpdate) -> (Self, Self) {
-        (Self::conflict_local(update), Self::conflict_remote(update))
+    /// Create a new `Conflict` updates with [`UpdateTarget::Both`]
+    pub(crate) fn conflict_both(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 
-    /// Create a new `NeedConcreteCheck` update with [`SynchroSide::Local`]
-    pub(crate) fn concrete_check_local(update: &VfsNodeUpdate) -> Self {
-        Self::NeedConcreteCheck(ApplicableUpdate::new(SynchroSide::Local, update))
-    }
-
-    /// Create a new `NeedConcreteCheck` update with [`SynchroSide::Remote`]
-    pub(crate) fn concrete_check_remote(update: &VfsNodeUpdate) -> Self {
-        Self::NeedConcreteCheck(ApplicableUpdate::new(SynchroSide::Remote, update))
-    }
-
-    /// Create two new `NeedConcreteCheck` updates with [`SynchroSide::Local`] and
-    /// [`SynchroSide::Remote`]
-    pub(crate) fn concrete_check_both(update: &VfsNodeUpdate) -> (Self, Self) {
-        (
-            Self::concrete_check_local(update),
-            Self::concrete_check_remote(update),
-        )
+    /// Create a new `NeedConcreteCheck` updates with [`UpdateTarget::Both`]
+    pub(crate) fn concrete_check_both(update: &VfsNodeUpdate) -> Self {
+        Self::NeedConcreteCheck(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 
     /// Resolve an update with `NeedConcreteCheck` by comparing hashes of the file on both concrete
@@ -568,30 +597,30 @@ impl ReconciledUpdate {
         }
     }
 
-    /// Create a new `Applicable` update with [`SynchroSide::Local`]
+    /// Create a new `Applicable` update with [`UpdateTarget::Local`]
     pub fn applicable_local(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(SynchroSide::Local, update))
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
-    /// Create a new `Applicable` update with [`SynchroSide::Remote`]
+    /// Create a new `Applicable` update with [`UpdateTarget::Remote`]
     pub fn applicable_remote(update: &VfsNodeUpdate) -> Self {
-        Self::Applicable(ApplicableUpdate::new(SynchroSide::Remote, update))
+        Self::Applicable(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
-    /// Create a new `Conflict` update with [`SynchroSide::Local`]
+    /// Create a new `Conflict` update with [`UpdateTarget::Local`]
     pub fn conflict_local(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(SynchroSide::Local, update))
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
-    /// Create a new `Conflict` update with [`SynchroSide::Remote`]
+    /// Create a new `Conflict` update with [`UpdateTarget::Remote`]
     pub fn conflict_remote(update: &VfsNodeUpdate) -> Self {
-        Self::Conflict(ApplicableUpdate::new(SynchroSide::Remote, update))
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
-    /// Create two new `Conflict` updates with [`SynchroSide::Local`] and
-    /// [`SynchroSide::Remote`]
-    pub fn conflict_both(update: &VfsNodeUpdate) -> (Self, Self) {
-        (Self::conflict_local(update), Self::conflict_remote(update))
+    /// Create two new `Conflict` updates with [`UpdateTarget::Local`] and
+    /// [`UpdateTarget::Remote`]
+    pub fn conflict_both(update: &VfsNodeUpdate) -> Self {
+        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 }
 
