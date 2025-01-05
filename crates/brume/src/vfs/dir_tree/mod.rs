@@ -314,7 +314,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// their concrete backends.
     ///
     /// This will perform a structural diff between both trees, and return a
-    /// [`VirtualReconciledUpdate::NeedCocnreteCheck`] when two files with the same name are found.
+    /// [`VirtualReconciledUpdate::NeedConcreteCheck`] when two files with the same name are found.
     pub(crate) fn reconciliation_diff<OtherSyncInfo>(
         &self,
         other: &DirTree<OtherSyncInfo>,
@@ -661,22 +661,22 @@ impl<SyncInfo> VfsNode<SyncInfo> {
                 file_path.push(fself.name());
                 let update = VfsNodeUpdate::file_created(file_path);
 
-                let (other_udate, self_update) = if fself.size() == fother.size() {
+                let update = if fself.size() == fother.size() {
                     VirtualReconciledUpdate::concrete_check_both(&update)
                 } else {
                     VirtualReconciledUpdate::conflict_both(&update)
                 };
 
-                Ok(SortedVec::from_vec(vec![other_udate, self_update]))
+                Ok(SortedVec::from_vec(vec![update]))
             }
             (nself, _) => {
                 let mut file_path = parent_path.to_owned();
                 file_path.push(nself.name());
                 let update = VfsNodeUpdate::file_modified(file_path);
 
-                let (other_udate, self_update) = VirtualReconciledUpdate::conflict_both(&update);
+                let update = VirtualReconciledUpdate::conflict_both(&update);
 
-                Ok(SortedVec::from_vec(vec![other_udate, self_update]))
+                Ok(SortedVec::from_vec(vec![update]))
             }
         }
     }
