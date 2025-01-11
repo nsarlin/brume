@@ -69,16 +69,22 @@ pub trait ConcreteFS:
     /// For example, it may imply checking that a login/password is valid or that a path exists
     fn validate(info: &Self::CreationInfo) -> impl Future<Output = Result<(), Self::IoError>>;
 
-    /// Return a description of this filesystem instance.
+    /// Returns a description of this filesystem instance.
     ///
     /// This description should uniquely identify the Filesystem but also have a human readable
     /// form.
     fn description(&self) -> Self::Description;
 
-    /// Load a virtual FS from the concrete one, by parsing its structure
+    /// Returns updated `SyncInfo` for a specific node
+    fn get_sync_info(
+        &self,
+        path: &VirtualPath,
+    ) -> impl Future<Output = Result<Self::SyncInfo, Self::IoError>>;
+
+    /// Loads a virtual FS from the concrete one, by parsing its structure
     fn load_virtual(&self) -> impl Future<Output = Result<Vfs<Self::SyncInfo>, Self::IoError>>;
 
-    /// Open and read a file on the concrete filesystem
+    /// Opens and read a file on the concrete filesystem
     fn read_file(
         &self,
         path: &VirtualPath,
@@ -89,7 +95,7 @@ pub trait ConcreteFS:
         >,
     >;
     // TODO: write and write_new for file modif or create
-    /// Write a file on the concrete filesystem
+    /// Writes a file on the concrete filesystem
     fn write_file<Data: TryStream + Send + 'static + Unpin>(
         &self,
         path: &VirtualPath,
@@ -99,16 +105,16 @@ pub trait ConcreteFS:
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>;
 
-    /// Remove a file on the concrete filesystem
+    /// Removes a file on the concrete filesystem
     fn rm(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::IoError>>;
 
-    /// Create a directory on the concrete filesystem
+    /// Creates a directory on the concrete filesystem
     fn mkdir(
         &self,
         path: &VirtualPath,
     ) -> impl Future<Output = Result<Self::SyncInfo, Self::IoError>>;
 
-    /// Remove a directory on the concrete filesystem
+    /// Removes a directory on the concrete filesystem
     fn rmdir(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::IoError>>;
 }
 
@@ -116,7 +122,7 @@ impl<T: ConcreteFS> Named for T {
     const TYPE_NAME: &'static str = T::SyncInfo::TYPE_NAME;
 }
 
-/// Compute a hash of the content of the file, for cross-FS comparison
+/// Computes a hash of the content of the file, for cross-FS comparison
 async fn concrete_hash_file<Concrete: ConcreteFS>(
     concrete: &Concrete,
     path: &VirtualPath,
@@ -130,7 +136,7 @@ async fn concrete_hash_file<Concrete: ConcreteFS>(
     Ok(xxh3_64(&data))
 }
 
-/// Check if two files on different filesystems are identical by reading them and computing a hash
+/// Checks if two files on different filesystems are identical by reading them and computing a hash
 /// of their content
 ///
 /// In case of error, return the underlying error and the name of the filesystem where this

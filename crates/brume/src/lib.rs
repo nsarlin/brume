@@ -4,6 +4,7 @@ use concrete::ConcreteUpdateApplicationError;
 use filesystem::VfsReloadError;
 use thiserror::Error;
 use update::{ReconciliationError, VfsUpdateApplicationError};
+use vfs::InvalidPathError;
 
 pub mod concrete;
 pub mod filesystem;
@@ -34,6 +35,8 @@ pub enum Error {
     },
     #[error("failed to reconcile updates from both filesystems")]
     ReconciliationFailed(#[from] ReconciliationError),
+    #[error("Provided path is incorrect")]
+    InvalidPath(#[from] InvalidPathError),
 }
 
 impl Error {

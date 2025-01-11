@@ -137,6 +137,17 @@ impl ConcreteFS for LocalDir {
         LocalDirDescription::new(&self.path)
     }
 
+    async fn get_sync_info(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
+        let full_path = self.full_path(path);
+
+        Ok(LocalSyncInfo::new(
+            full_path
+                .modification_time()
+                .map_err(|e| LocalDirError::io(&self.path, e))?
+                .into(),
+        ))
+    }
+
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
         let sync = LocalSyncInfo::new(
             self.path
