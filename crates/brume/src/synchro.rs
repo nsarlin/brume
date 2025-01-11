@@ -171,14 +171,19 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
                 }
                 ReconciledUpdate::Conflict(update) => {
                     warn!("conflict on {update:?}");
-                    // Don't push removal updates since the node will not exist anymore in the
-                    // source Vfs
-                    if !update.is_removal() {
+                    if update.is_removal() {
+                        // Don't push removal updates since the node will not exist anymore in the
+                        // source Vfs. Instead, store a "reverse" update in the destination
+                        // directory. For example, if the update was a removed dir in src, instead
+                        // we store a created dir in dest.
+                        conflicts.insert(update.invert());
+                    } else {
                         conflicts.insert(update);
                     }
                 }
             }
         }
+        let conflicts = conflicts.remove_duplicates();
 
         let (local_updates, remote_updates) = applicables.split_local_remote();
         let (local_conflicts, remote_conflicts) = conflicts.split_local_remote();
@@ -228,14 +233,14 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
             local_conflicts
                 .clone()
                 .into_iter()
-                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
+                .map(|update| AppliedUpdate::Conflict(update.clone())),
         );
         remote_res.extend(local_failed);
         remote_res.extend(
             remote_conflicts
                 .clone()
                 .into_iter()
-                .map(|update| AppliedUpdate::Conflict(update.update().clone())),
+                .map(|update| AppliedUpdate::Conflict(update.clone())),
         );
 
         Ok((local_res, remote_res))

@@ -32,9 +32,9 @@ impl<T: Sortable> SortedVec<T> {
         Self(vec)
     }
 
-    /// Insert a new element inside an existing vec, without overwriting existing ones.
+    /// Inserts a new element inside an existing vec, without overwriting existing ones.
     ///
-    /// Return false if there is already an element with this key and the provided element was not
+    /// Returns false if there is already an element with this key and the provided element was not
     /// inserted. Return true otherwise.
     pub fn insert(&mut self, value: T) -> bool {
         match self
@@ -49,9 +49,9 @@ impl<T: Sortable> SortedVec<T> {
         }
     }
 
-    /// Remove the element with the given key from the vec.
+    /// Removes the element with the given key from the vec.
     ///
-    /// Return false if the element was not present in the vec, or true otherwise.
+    /// Returns false if the element was not present in the vec, or true otherwise.
     pub fn remove(&mut self, key: &T::Key) -> bool {
         match self
             .0
@@ -65,9 +65,9 @@ impl<T: Sortable> SortedVec<T> {
         }
     }
 
-    /// Remove the element with the given name if the condition returns true.
+    /// Removes the element with the given name if the condition returns true.
     ///
-    /// Return None if the element was not present in the vec, Some(false) is the element was found
+    /// Returns None if the element was not present in the vec, Some(false) is the element was found
     /// but the condition returned false, or Some(true) if the condition returned true and the
     /// element was deleted.
     pub fn remove_if<F: FnOnce(&T) -> bool>(&mut self, key: &T::Key, condition: F) -> Option<bool> {
@@ -87,7 +87,7 @@ impl<T: Sortable> SortedVec<T> {
         }
     }
 
-    /// Find the element with the provided key in the vec.
+    /// Finds the element with the provided key in the vec.
     pub fn find(&self, key: &T::Key) -> Option<&T> {
         match self
             .0
@@ -98,7 +98,7 @@ impl<T: Sortable> SortedVec<T> {
         }
     }
 
-    /// Find the element with the provided key in the vec, return a mutable reference.
+    /// Finds the element with the provided key in the vec, return a mutable reference.
     pub fn find_mut(&mut self, key: &T::Key) -> Option<&mut T> {
         match self
             .0
@@ -109,22 +109,27 @@ impl<T: Sortable> SortedVec<T> {
         }
     }
 
-    /// Return the length of the vec
+    /// Returns the length of the vec
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Return true if the vec contains no element
+    /// Returns true if the vec contains no element
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Return an iterator over T, by reference.
+    /// Returns an iterator over T, by reference.
     pub fn iter(&self) -> std::slice::Iter<T> {
         self.0.iter()
     }
 
-    /// Iterate on two sorted vecs with the same key types and apply functions on their items:
+    /// Removes the last element in the vec and returns it
+    pub fn pop(&mut self) -> Option<T> {
+        self.0.pop()
+    }
+
+    /// Iterates on two sorted vecs with the same key types and apply functions on their items:
     ///
     /// - `fself` is applied to items that are only present in "self"
     /// - `fboth` is applied to items that present in both vecs
@@ -185,21 +190,21 @@ impl<T: Sortable> SortedVec<T> {
         Ok(ret)
     }
 
-    /// Create a new [`SortedVec`] from a vector that is already sorted
+    /// Creates a new [`SortedVec`] from a vector that is already sorted
     ///
     /// If the vec is not sorted, this may result in undefined behavior
     pub fn unchecked_from_vec(vec: Vec<T>) -> Self {
         Self(vec)
     }
 
-    /// Extend a vec with the elements of another one, the vecs are both relatively sorted.
+    /// Extends a vec with the elements of another one, the vecs are both relatively sorted.
     ///
     /// This means that the last element of self is smaller that the first element of other.
     pub fn unchecked_extend(&mut self, other: Self) {
         self.0.extend(other);
     }
 
-    /// Convert a `Vec<SortedVec>` into a `SortedVec`, assuming that the vecs inside the vec are
+    /// Converts a `Vec<SortedVec>` into a `SortedVec`, assuming that the vecs inside the vec are
     /// already relatively sorted.
     ///
     /// This means that the last element of the vec at index n is always smaller than the
@@ -413,5 +418,20 @@ mod test {
             .iter()
             .zip(reference.iter())
             .all(|(a, b)| a.structural_eq(b)))
+    }
+
+    #[test]
+    fn test_pop() {
+        let test_nodes = vec![D("a", vec![]), D("b", vec![]), D("c", vec![])]
+            .into_iter()
+            .map(|val| val.into_node())
+            .collect();
+
+        let mut vec = SortedVec::from_vec(test_nodes);
+
+        assert_eq!(vec.pop().unwrap().name(), "c");
+        assert_eq!(vec.pop().unwrap().name(), "b");
+        assert_eq!(vec.pop().unwrap().name(), "a");
+        assert!(vec.pop().is_none());
     }
 }

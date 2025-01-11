@@ -84,7 +84,7 @@ impl TestNode<'_> {
                                 NodeState::Error(failed_update) => {
                                     xxh3_64(failed_update.error().to_string().as_bytes())
                                 }
-                                NodeState::Conflict => xxh3_64(b"Conflict"),
+                                NodeState::Conflict(_) => xxh3_64(b"Conflict"),
                             }
                             .to_le_bytes()
                         })

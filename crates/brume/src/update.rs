@@ -136,7 +136,7 @@ impl<SyncInfo: IsModified> IsModified for NodeState<SyncInfo> {
                 self_sync.modification_state(other_sync)
             }
             // Skip nodes in conflict until the conflicts are resolved
-            (NodeState::Conflict, _) | (_, NodeState::Conflict) => {
+            (NodeState::Conflict(_), _) | (_, NodeState::Conflict(_)) => {
                 ModificationState::ShallowUnmodified
             }
             // If at least one node is in error or wants a resync, we return modified
@@ -151,8 +151,8 @@ pub enum UpdateKind {
     DirCreated,
     DirRemoved,
     FileCreated,
-    FileModified,
     FileRemoved,
+    FileModified,
     //TODO: detect moves
 }
 
@@ -165,6 +165,17 @@ impl UpdateKind {
     /// The update creates a node (dir or file)
     pub fn is_creation(self) -> bool {
         matches!(self, Self::DirCreated | Self::FileCreated)
+    }
+
+    /// Return the "opposite" operation. For example, the inverse of a creation is a removal.
+    pub fn inverse(self) -> Self {
+        match self {
+            UpdateKind::DirCreated => UpdateKind::DirRemoved,
+            UpdateKind::DirRemoved => UpdateKind::DirCreated,
+            UpdateKind::FileCreated => UpdateKind::FileRemoved,
+            UpdateKind::FileModified => UpdateKind::FileModified,
+            UpdateKind::FileRemoved => UpdateKind::FileCreated,
+        }
     }
 }
 
@@ -189,7 +200,7 @@ impl UpdateTarget {
 /// A single node update
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct VfsNodeUpdate {
-    path: VirtualPathBuf,
+    path: VirtualPathBuf, // Field order is important for the "Ord" impl
     kind: UpdateKind,
 }
 
@@ -319,6 +330,15 @@ impl VfsNodeUpdate {
     pub fn is_creation(&self) -> bool {
         self.kind.is_creation()
     }
+
+    pub fn invert(self) -> Self {
+        let kind = self.kind.inverse();
+
+        Self {
+            path: self.path,
+            kind,
+        }
+    }
 }
 
 impl Sortable for VfsNodeUpdate {
@@ -421,10 +441,32 @@ impl ApplicableUpdate {
         self.update.is_removal()
     }
 
-    /// Return a new update with inverted [`SynchroSide`]
-    pub fn inverse_target(&self) -> Self {
+    /// Return a new update with inverted [`UpdateTarget`]
+    pub fn invert_target(&self) -> Self {
         Self {
             update: self.update.clone(),
+            target: self.target.invert(),
+        }
+    }
+
+    /// Return a new update that is the opposite of the current one.
+    ///
+    /// # Example
+    /// ```
+    /// use brume::update::*;
+    /// use brume::vfs::VirtualPathBuf;
+    ///
+    /// let update = VfsNodeUpdate::dir_removed(VirtualPathBuf::new("/a/b").unwrap());
+    /// let applicable = ApplicableUpdate::new(UpdateTarget::Local, &update);
+    ///
+    /// let inverse_up = VfsNodeUpdate::dir_created(VirtualPathBuf::new("/a/b").unwrap());
+    /// let inverse_app = ApplicableUpdate::new(UpdateTarget::Remote, &inverse_up);
+    ///
+    /// assert_eq!(applicable.invert(), inverse_app);
+    /// ```
+    pub fn invert(self) -> Self {
+        Self {
+            update: self.update.invert(),
             target: self.target.invert(),
         }
     }
@@ -445,6 +487,35 @@ impl Sortable for ApplicableUpdate {
 }
 
 impl SortedVec<ApplicableUpdate> {
+    /// Split the list in two, with the updates for the local FS on one side and the updates for the
+    /// remote FS on the other side.
+    ///
+    /// Updates with [`UpdateTarget::Both`] are duplicated in both lists.
+    ///
+    /// # Example
+    /// ```
+    /// use brume::sorted_vec::SortedVec;
+    /// use brume::update::*;
+    /// use brume::vfs::VirtualPathBuf;
+    ///
+    /// let mut list = SortedVec::new();
+    ///
+    /// let update_a = VfsNodeUpdate::dir_removed(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let applicable_a = ApplicableUpdate::new(UpdateTarget::Local, &update_a);
+    /// list.insert(applicable_a);
+    ///
+    /// let update_b = VfsNodeUpdate::file_created(VirtualPathBuf::new("/dir/b").unwrap());
+    /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Remote, &update_b);
+    /// list.insert(applicable_b);
+    ///
+    /// let update_c = VfsNodeUpdate::file_modified(VirtualPathBuf::new("/dir/c").unwrap());
+    /// let applicable_c = ApplicableUpdate::new(UpdateTarget::Both, &update_c);
+    /// list.insert(applicable_c);
+    ///
+    /// let (local, remote) = list.split_local_remote();
+    /// assert_eq!(local.len(), 2);
+    /// assert_eq!(remote.len(), 2);
+    /// ```
     pub fn split_local_remote(self) -> (Vec<ApplicableUpdate>, Vec<ApplicableUpdate>) {
         let mut local = Vec::new();
         let mut remote = Vec::new();
@@ -461,6 +532,48 @@ impl SortedVec<ApplicableUpdate> {
         }
 
         (local, remote)
+    }
+
+    /// Remove duplicate updates that target the same nodes.
+    ///
+    /// Only the first update will be kept for a given path. This means that the priority will be
+    /// based on the order of the [`UpdateKind`] enum. In practice, file creation will be favored
+    /// over file modifications.
+    ///
+    /// # Example
+    /// ```
+    /// use brume::sorted_vec::SortedVec;
+    /// use brume::update::*;
+    /// use brume::vfs::VirtualPathBuf;
+    ///
+    /// let mut list = SortedVec::new();
+    ///
+    /// let update_a = VfsNodeUpdate::file_modified(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let applicable_a = ApplicableUpdate::new(UpdateTarget::Local, &update_a);
+    /// list.insert(applicable_a);
+    ///
+    /// let update_b = VfsNodeUpdate::file_created(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Remote, &update_b);
+    /// list.insert(applicable_b.clone());
+    ///
+    /// let mut simplified = list.remove_duplicates();
+    /// assert_eq!(simplified.len(), 1);
+    /// let first = simplified.pop().unwrap();
+    /// assert_eq!(first, applicable_b);
+    /// ```
+    pub fn remove_duplicates(self) -> Self {
+        let mut path = VirtualPathBuf::root();
+        let mut result = Vec::new();
+
+        for update in self.into_iter() {
+            if update.path() != path {
+                path = update.path().to_owned();
+                result.push(update);
+            }
+        }
+
+        // Ok because if the input is sorted, the output will be too
+        SortedVec::unchecked_from_vec(result)
     }
 }
 
@@ -642,28 +755,37 @@ impl SortedVec<ReconciledUpdate> {
         let mut iter = self.into_iter().peekable();
 
         while let Some(mut parent_update) = iter.next() {
-            // Skip if the path is already a conflict
-            if matches!(parent_update, ReconciledUpdate::Conflict(_)) {
-                resolved.push(parent_update);
-                continue;
-            }
-            let mut conflict = false;
-            let mut updates = Vec::new();
-            while let Some(mut next_update) =
-                iter.next_if(|next_update| next_update.path().is_inside(parent_update.path()))
-            {
-                conflict = true;
-                // Swap the targets because we store the conflicts in the source filesystem
-                next_update = ReconciledUpdate::Conflict(next_update.update().inverse_target());
-                updates.push(next_update);
-            }
+            match &parent_update {
+                // If the update is a dir removal, check if one of its children is modified too
+                ReconciledUpdate::Applicable(update) if update.is_removal() => {
+                    let mut conflict = false;
+                    let mut updates = Vec::new();
 
-            if conflict {
-                parent_update = ReconciledUpdate::Conflict(parent_update.update().inverse_target())
-            }
+                    while let Some(mut next_update) = iter
+                        .next_if(|next_update| next_update.path().is_inside(parent_update.path()))
+                    {
+                        conflict = true;
+                        // Swap the targets because we store the conflicts in the source filesystem
+                        next_update =
+                            ReconciledUpdate::Conflict(next_update.update().invert_target());
+                        updates.push(next_update);
+                    }
 
-            resolved.push(parent_update);
-            resolved.extend(updates);
+                    if conflict {
+                        parent_update =
+                            ReconciledUpdate::Conflict(parent_update.update().invert_target())
+                    }
+
+                    resolved.push(parent_update);
+                    resolved.extend(updates);
+                }
+                _ =>
+                // Skip if the path is already a conflict or not a removal
+                {
+                    resolved.push(parent_update);
+                    continue;
+                }
+            }
         }
 
         SortedVec::unchecked_from_vec(resolved)
@@ -747,7 +869,7 @@ pub enum AppliedUpdate<SyncInfo> {
     FileModified(AppliedFileUpdate<SyncInfo>),
     FileRemoved(VirtualPathBuf),
     FailedApplication(FailedUpdateApplication),
-    Conflict(VfsNodeUpdate),
+    Conflict(ApplicableUpdate),
     //TODO: detect moves
 }
 
