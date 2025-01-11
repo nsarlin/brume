@@ -270,9 +270,9 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     }
 
     /// Clone a directory from `ref_concrete` into the concrete fs of self.
-    pub async fn clone_dir_concrete<'otherfs, OtherConcrete: ConcreteFS>(
+    pub async fn clone_dir_concrete<OtherConcrete: ConcreteFS>(
         &self,
-        ref_fs: FileSystemDir<'otherfs, OtherConcrete>,
+        ref_fs: FileSystemDir<'_, OtherConcrete>,
         path: &VirtualPath,
     ) -> ConcreteDirCloneResult<Concrete::SyncInfo> {
         let sync_info = match self.concrete.mkdir(path).await {
