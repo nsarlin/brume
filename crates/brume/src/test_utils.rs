@@ -8,7 +8,7 @@ use tokio_util::io::StreamReader;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    concrete::{local::path::LocalPath, ConcreteFS, ConcreteFsError, FsInstanceDescription, Named},
+    concrete::{local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription, Named},
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsNodeUpdate},
     vfs::{DirTree, FileMeta, NodeState, Vfs, VfsNode, VirtualPath, VirtualPathBuf},
@@ -128,7 +128,7 @@ impl TestNode<'_> {
 
                 let failed_update = FailedUpdateApplication::new(
                     VfsNodeUpdate::file_created(path),
-                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                    FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 VfsNode::File(FileMeta::new_error(name, 0, failed_update))
             }
@@ -138,7 +138,7 @@ impl TestNode<'_> {
 
                 let failed_update = FailedUpdateApplication::new(
                     VfsNodeUpdate::dir_created(path),
-                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                    FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
 
                 VfsNode::Dir(DirTree::new_error(name, failed_update))
@@ -220,7 +220,7 @@ impl TestNode<'_> {
 
                 let failed_update = FailedUpdateApplication::new(
                     VfsNodeUpdate::file_created(path),
-                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                    FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 VfsNode::File(FileMeta::new_error(name, 0, failed_update))
             }
@@ -230,7 +230,7 @@ impl TestNode<'_> {
 
                 let failed_update = FailedUpdateApplication::new(
                     VfsNodeUpdate::dir_created(path),
-                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                    FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 VfsNode::Dir(DirTree::new_error(name, failed_update))
             }
@@ -289,7 +289,7 @@ impl TestNode<'_> {
             Self::DE(name, error) => {
                 let failed_update = FailedUpdateApplication::new(
                     VfsNodeUpdate::file_created(VirtualPathBuf::root()),
-                    ConcreteFsError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
+                    FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 DirTree::new_error(name, failed_update)
             }
@@ -564,7 +564,7 @@ impl From<TestNode<'_>> for ConcreteTestNode {
 }
 
 impl TryFrom<InnerConcreteTestNode> for ConcreteTestNode {
-    type Error = <ConcreteTestNode as ConcreteFS>::IoError;
+    type Error = <ConcreteTestNode as FSBackend>::IoError;
 
     fn try_from(value: InnerConcreteTestNode) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -597,7 +597,7 @@ impl From<InnerConcreteTestNode> for String {
     }
 }
 
-impl ConcreteFS for ConcreteTestNode {
+impl FSBackend for ConcreteTestNode {
     type SyncInfo = ShallowTestSyncInfo;
 
     type IoError = TestError;
@@ -639,7 +639,7 @@ impl ConcreteFS for ConcreteTestNode {
         let node = inner.get_node(path);
 
         if let InnerConcreteTestNode::FE(_, err) = node {
-            return Err(ConcreteFsError::from(io::Error::new(
+            return Err(FsBackendError::from(io::Error::new(
                 io::ErrorKind::NotFound,
                 err.as_str(),
             )));
@@ -675,7 +675,7 @@ impl ConcreteFS for ConcreteTestNode {
         // Write into the node
         let mut inner = self.inner.borrow_mut();
         if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(ConcreteFsError::from(io::Error::new(
+            return Err(FsBackendError::from(io::Error::new(
                 io::ErrorKind::ReadOnlyFilesystem,
                 err.as_str(),
             )));
@@ -706,7 +706,7 @@ impl ConcreteFS for ConcreteTestNode {
     async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let mut inner = self.inner.borrow_mut();
         if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(ConcreteFsError::from(io::Error::new(
+            return Err(FsBackendError::from(io::Error::new(
                 io::ErrorKind::ReadOnlyFilesystem,
                 err.as_str(),
             )));
@@ -734,7 +734,7 @@ impl ConcreteFS for ConcreteTestNode {
     async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
         let mut inner = self.inner.borrow_mut();
         if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(ConcreteFsError::from(io::Error::new(
+            return Err(FsBackendError::from(io::Error::new(
                 io::ErrorKind::ReadOnlyFilesystem,
                 err.as_str(),
             )));
@@ -765,7 +765,7 @@ impl ConcreteFS for ConcreteTestNode {
     async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
         let mut inner = self.inner.borrow_mut();
         if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(ConcreteFsError::from(io::Error::new(
+            return Err(FsBackendError::from(io::Error::new(
                 io::ErrorKind::ReadOnlyFilesystem,
                 err.as_str(),
             )));
@@ -792,7 +792,7 @@ impl ConcreteFS for ConcreteTestNode {
     }
 }
 
-pub type TestError = ConcreteFsError;
+pub type TestError = FsBackendError;
 
 impl FsInstanceDescription for String {
     fn name(&self) -> &str {

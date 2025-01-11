@@ -43,7 +43,7 @@ impl<SyncInfo> DirMeta<SyncInfo> {
         &mut self.state
     }
 
-    /// Invalidate the sync info to make them trigger a ConcreteFS sync on next run
+    /// Invalidate the sync info to make them trigger a FSBackend sync on next run
     pub fn force_resync(&mut self) {
         self.state = NodeState::NeedResync;
     }

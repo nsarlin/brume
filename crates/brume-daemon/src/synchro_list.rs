@@ -1,7 +1,7 @@
 use std::{any::Any, collections::HashMap, fmt::Display, sync::Arc};
 
 use brume::{
-    concrete::{local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, ConcreteFsError},
+    concrete::{local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsBackendError},
     filesystem::FileSystem,
     synchro::{Synchro, SynchroStatus},
 };
@@ -46,7 +46,7 @@ pub enum SynchroCreationError {
     #[error("The filesystems are already synchronized")]
     AlreadyPresent,
     #[error("Failed to instantiate filesystem object")]
-    FileSystemCreationError(#[from] ConcreteFsError),
+    FileSystemCreationError(#[from] FsBackendError),
 }
 
 #[derive(Error, Debug)]
@@ -88,12 +88,12 @@ impl AnyFsRef {
     }
 }
 
-/// A [`Synchro`] where the [`Concrete`] filesystems are only known at runtime.
+/// A [`Synchro`] where the [`Backend`] filesystems are only known at runtime.
 ///
 /// This type represents only an index and needs a valid [`SynchroList`], to actually be used. It
 /// must not be used after the Synchro it points to has been removed from the SynchroList.
 ///
-/// [`Concrete`]: ConcreteFS
+/// [`Backend`]: FSBackend
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnySynchroRef {
     local: AnyFsRef,
@@ -154,11 +154,11 @@ impl ReadOnlySynchroList {
 struct SynchroMutex<
     'local,
     'remote,
-    LocalConcrete: ConcreteFS + 'static,
-    RemoteConcrete: ConcreteFS + 'static,
+    LocalBackend: FSBackend + 'static,
+    RemoteBackend: FSBackend + 'static,
 > {
-    local: &'local Mutex<FileSystem<LocalConcrete>>,
-    remote: &'remote Mutex<FileSystem<RemoteConcrete>>,
+    local: &'local Mutex<FileSystem<LocalBackend>>,
+    remote: &'remote Mutex<FileSystem<RemoteBackend>>,
 }
 
 /// Allow to easily convert the given type into [`Any`] for runtime downcast
@@ -166,7 +166,7 @@ trait DynTyped {
     fn as_any(&self) -> &dyn Any;
 }
 
-impl<T: ConcreteFS + 'static> DynTyped for Mutex<FileSystem<T>> {
+impl<T: FSBackend + 'static> DynTyped for Mutex<FileSystem<T>> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -198,7 +198,7 @@ impl SynchroList {
     fn create_and_insert_fs(
         &mut self,
         fs_info: AnyFsCreationInfo,
-    ) -> Result<AnyFsRef, ConcreteFsError> {
+    ) -> Result<AnyFsRef, FsBackendError> {
         let fs_ref: AnyFsRef = fs_info.clone().into();
         match fs_info {
             AnyFsCreationInfo::LocalDir(info) => {
@@ -343,19 +343,19 @@ impl SynchroList {
         }
     }
 
-    fn get_fs<Concrete: ConcreteFS + 'static>(
+    fn get_fs<Backend: FSBackend + 'static>(
         &self,
         fs: &AnyFsRef,
-    ) -> Option<&Mutex<FileSystem<Concrete>>> {
+    ) -> Option<&Mutex<FileSystem<Backend>>> {
         match fs.description() {
             AnyFsDescription::LocalDir(_) => self
                 .local_dir_list
                 .get(&fs.id)
-                .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Concrete>>>()),
+                .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Backend>>>()),
             AnyFsDescription::Nextcloud(_) => self
                 .nextcloud_list
                 .get(&fs.id)
-                .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Concrete>>>()),
+                .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Backend>>>()),
         }
     }
 
@@ -366,12 +366,12 @@ impl SynchroList {
         }
     }
 
-    fn get_sync<LocalConcrete: ConcreteFS + 'static, RemoteConcrete: ConcreteFS + 'static>(
+    fn get_sync<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>(
         &self,
         synchro: &AnySynchroRef,
-    ) -> Option<SynchroMutex<LocalConcrete, RemoteConcrete>> {
-        let local = self.get_fs::<LocalConcrete>(&synchro.local)?;
-        let remote = self.get_fs::<RemoteConcrete>(&synchro.remote)?;
+    ) -> Option<SynchroMutex<LocalBackend, RemoteBackend>> {
+        let local = self.get_fs::<LocalBackend>(&synchro.local)?;
+        let remote = self.get_fs::<RemoteBackend>(&synchro.remote)?;
 
         Some(SynchroMutex { local, remote })
     }
@@ -379,10 +379,7 @@ impl SynchroList {
     /// Perfoms a [`full_sync`] on the provided synchro, that should be in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
-    pub async fn sync_one<
-        LocalConcrete: ConcreteFS + 'static,
-        RemoteConcrete: ConcreteFS + 'static,
-    >(
+    pub async fn sync_one<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>(
         &self,
         synchro_lock: &RwLock<AnySynchroRef>,
     ) -> Result<(), SyncError> {
@@ -395,7 +392,7 @@ impl SynchroList {
             }
 
             let synchro_mutex = self
-                .get_sync::<LocalConcrete, RemoteConcrete>(&synchro)
+                .get_sync::<LocalBackend, RemoteBackend>(&synchro)
                 .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?;
 
             let mut local_fs = synchro_mutex.local.lock().await;

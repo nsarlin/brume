@@ -24,7 +24,7 @@ use crate::{
 
 use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
 
-use super::{ConcreteFS, ConcreteFsError, FsInstanceDescription, Named};
+use super::{FSBackend, FsBackendError, FsInstanceDescription, Named};
 
 const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
@@ -71,7 +71,7 @@ impl From<reqwest::Error> for NextcloudFsError {
     }
 }
 
-impl From<NextcloudFsError> for ConcreteFsError {
+impl From<NextcloudFsError> for FsBackendError {
     fn from(value: NextcloudFsError) -> Self {
         Self(Arc::new(value))
     }
@@ -100,7 +100,7 @@ impl NextcloudFs {
     }
 }
 
-impl ConcreteFS for NextcloudFs {
+impl FSBackend for NextcloudFs {
     type SyncInfo = NextcloudSyncInfo;
 
     type IoError = NextcloudFsError;
@@ -290,7 +290,7 @@ impl From<NextcloudFsCreationInfo> for NextcloudFsDescription {
 }
 
 impl TryFrom<NextcloudFsCreationInfo> for NextcloudFs {
-    type Error = <NextcloudFs as ConcreteFS>::IoError;
+    type Error = <NextcloudFs as FSBackend>::IoError;
 
     fn try_from(value: NextcloudFsCreationInfo) -> Result<Self, Self::Error> {
         Self::new(&value.server_url, &value.login, &value.password)
