@@ -126,7 +126,7 @@ impl<Concrete: ConcreteFS> FileSystem<Concrete> {
     ) -> Result<FileSystemDir<'_, Concrete>, InvalidPathError> {
         Ok(FileSystemDir {
             concrete: &self.concrete,
-            dir: self.vfs.root().find_dir(path)?,
+            dir: self.vfs.find_dir(path)?,
         })
     }
 

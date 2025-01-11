@@ -275,11 +275,9 @@ impl VfsNodeUpdate {
                 // equivalent. If they are not, we generate updates that are only allowed to create
                 // nodes.
                 let dir_local = vfs_local
-                    .root()
                     .find_dir(&self.path)
                     .map_err(|e| ReconciliationError::invalid_path(LocalSyncInfo::TYPE_NAME, e))?;
                 let dir_remote = vfs_remote
-                    .root()
                     .find_dir(&remote_update.path)
                     .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
@@ -294,11 +292,9 @@ impl VfsNodeUpdate {
             (UpdateKind::FileModified, UpdateKind::FileModified)
             | (UpdateKind::FileCreated, UpdateKind::FileCreated) => {
                 let file_local = vfs_local
-                    .root()
                     .find_file(&self.path)
                     .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
                 let file_remote = vfs_remote
-                    .root()
                     .find_file(&remote_update.path)
                     .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 

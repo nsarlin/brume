@@ -46,6 +46,42 @@ impl<SyncInfo> Vfs<SyncInfo> {
         self.root.structural_eq(other.root())
     }
 
+    /// Returns the dir at `path` in the VFS
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
+        self.root.find_dir(path)
+    }
+
+    /// Returns the file at `path` in the VFS
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
+        self.root.find_file(path)
+    }
+
+    /// Returns the node at `path` in the VFS
+    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<SyncInfo>> {
+        self.root.find_node(path)
+    }
+
+    /// Returns the dir at `path` in the VFS, as mutable
+    pub fn find_dir_mut(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+        self.root.find_dir_mut(path)
+    }
+
+    /// Returns the file at `path` in the VFS, as mutable
+    pub fn find_file_mut(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
+        self.root.find_file_mut(path)
+    }
+
+    /// Returns the node at `path` in the VFS, as mutable
+    pub fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<SyncInfo>> {
+        self.root.find_node_mut(path)
+    }
+
     /// Applies a list of updates to the VFS, by calling [`Self::apply_update`] on each of them.
     pub fn apply_updates_list(
         &mut self,
@@ -179,12 +215,12 @@ impl<SyncInfo> Vfs<SyncInfo> {
 
     /// Returns the list of nodes with error from the concrete FS
     pub fn get_errors(&self) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
-        self.root().get_errors(VirtualPath::root())
+        self.root().get_errors_list(VirtualPath::root())
     }
 
     /// Returns the list of nodes with a conflict that should be manually resolved
     pub fn get_conflicts(&self) -> Vec<VirtualPathBuf> {
-        self.root().get_conflicts(VirtualPath::root())
+        self.root().get_conflicts_list(VirtualPath::root())
     }
 }
 
