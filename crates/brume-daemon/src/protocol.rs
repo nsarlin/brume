@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fmt::Display};
 
 use brume::concrete::{
-    local::LocalDir, nextcloud::NextcloudFs, ConcreteFS, FsInstanceDescription, Named,
+    local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsInstanceDescription, Named,
 };
 
 use serde::{Deserialize, Serialize};
@@ -44,8 +44,8 @@ impl SynchroId {
 /// The information needed to create a FS that can be synchronized.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnyFsCreationInfo {
-    LocalDir(<LocalDir as ConcreteFS>::CreationInfo),
-    Nextcloud(<NextcloudFs as ConcreteFS>::CreationInfo),
+    LocalDir(<LocalDir as FSBackend>::CreationInfo),
+    Nextcloud(<NextcloudFs as FSBackend>::CreationInfo),
 }
 
 impl AnyFsCreationInfo {
@@ -100,8 +100,8 @@ impl AnySynchroCreationInfo {
 /// This is used for display and to avoid duplicate synchros.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AnyFsDescription {
-    LocalDir(<LocalDir as ConcreteFS>::Description),
-    Nextcloud(<NextcloudFs as ConcreteFS>::Description),
+    LocalDir(<LocalDir as FSBackend>::Description),
+    Nextcloud(<NextcloudFs as FSBackend>::Description),
 }
 
 impl AnyFsDescription {

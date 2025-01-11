@@ -72,10 +72,10 @@ impl Error {
     pub fn is_concrete(&self) -> bool {
         match self {
             Error::VfsReloadError { source, .. } => match source {
-                VfsReloadError::ConcreteFsError(_) => true,
+                VfsReloadError::FsBackendError(_) => true,
                 VfsReloadError::DiffError(_) => false,
             },
-            Error::ReconciliationFailed(ReconciliationError::ConcreteFsError { .. }) => true,
+            Error::ReconciliationFailed(ReconciliationError::FsBackendError { .. }) => true,
             _ => false,
         }
     }

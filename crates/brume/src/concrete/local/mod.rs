@@ -28,7 +28,7 @@ use crate::{
     Error,
 };
 
-use super::{ConcreteFS, ConcreteFsError, FsInstanceDescription, Named};
+use super::{FSBackend, FsBackendError, FsInstanceDescription, Named};
 
 #[derive(Error, Debug)]
 pub enum LocalDirError {
@@ -55,7 +55,7 @@ impl LocalDirError {
     }
 }
 
-impl From<LocalDirError> for ConcreteFsError {
+impl From<LocalDirError> for FsBackendError {
     fn from(value: LocalDirError) -> Self {
         Self(Arc::new(value))
     }
@@ -116,7 +116,7 @@ impl LocalDir {
     }
 }
 
-impl ConcreteFS for LocalDir {
+impl FSBackend for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
     type IoError = LocalDirError;
@@ -249,7 +249,7 @@ impl ConcreteFS for LocalDir {
     }
 }
 
-impl From<io::Error> for ConcreteFsError {
+impl From<io::Error> for FsBackendError {
     fn from(value: io::Error) -> Self {
         Self(Arc::new(value))
     }
@@ -341,7 +341,7 @@ impl LocalDirCreationInfo {
 }
 
 impl TryFrom<LocalDirCreationInfo> for LocalDir {
-    type Error = <Self as ConcreteFS>::IoError;
+    type Error = <Self as FSBackend>::IoError;
 
     fn try_from(value: LocalDirCreationInfo) -> Result<Self, Self::Error> {
         Self::new(value.0)

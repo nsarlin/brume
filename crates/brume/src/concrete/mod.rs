@@ -1,5 +1,6 @@
 //! Definition of the file operations on real local or remote file systems
 
+mod byte_counter;
 pub mod local;
 pub mod nextcloud;
 
@@ -8,10 +9,13 @@ use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::hash::Hash;
 use std::io::{self, ErrorKind};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
+use byte_counter::ByteCounterExt;
 use bytes::Bytes;
 use futures::{Stream, TryStream, TryStreamExt};
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
@@ -23,9 +27,9 @@ use crate::vfs::{InvalidPathError, Vfs, VirtualPath};
 
 #[derive(Error, Debug, Clone)]
 #[error(transparent)]
-pub struct ConcreteFsError(Arc<dyn std::error::Error + Send + Sync>);
+pub struct FsBackendError(Arc<dyn std::error::Error + Send + Sync>);
 
-/// Error encountered while applying an update to a ConcreteFS
+/// Error encountered while applying an update to a FSBackend
 #[derive(Error, Debug)]
 pub enum ConcreteUpdateApplicationError {
     #[error("invalid path provided for update")]
@@ -43,14 +47,14 @@ pub trait Named {
     const TYPE_NAME: &'static str;
 }
 
-/// Definition of the operations needed for a concrete FS backend
-pub trait ConcreteFS:
-    Named + Sized + TryFrom<Self::CreationInfo, Error = <Self as ConcreteFS>::IoError>
+/// A backend is used by the [`ConcreteFS`] to perfom io operations
+pub trait FSBackend:
+    Named + Sized + TryFrom<Self::CreationInfo, Error = <Self as FSBackend>::IoError>
 {
     /// Type used to detect updates on nodes of this filesystem. See [`IsModified`].
     type SyncInfo: IsModified + Debug + Named + Clone;
     /// Errors returned by this FileSystem type
-    type IoError: Error + Send + Sync + 'static + Into<ConcreteFsError>;
+    type IoError: Error + Send + Sync + 'static + Into<FsBackendError>;
     /// Info needed to create a new filesystem of this type (url, login,...)
     type CreationInfo: Debug + Clone + Serialize + for<'a> Deserialize<'a>;
     /// A unique description of a particular filesystem instance
@@ -118,40 +122,92 @@ pub trait ConcreteFS:
     fn rmdir(&self, path: &VirtualPath) -> impl Future<Output = Result<(), Self::IoError>>;
 }
 
-impl<T: ConcreteFS> Named for T {
+impl<T: FSBackend> Named for T {
     const TYPE_NAME: &'static str = T::SyncInfo::TYPE_NAME;
 }
 
-/// Computes a hash of the content of the file, for cross-FS comparison
-async fn concrete_hash_file<Concrete: ConcreteFS>(
-    concrete: &Concrete,
-    path: &VirtualPath,
-) -> Result<u64, ConcreteFsError> {
-    let stream = concrete.read_file(path).await.map_err(|e| e.into())?;
-    let mut reader = StreamReader::new(stream.map_err(|e| io::Error::new(ErrorKind::Other, e)));
-
-    let mut data = Vec::new();
-    reader.read_to_end(&mut data).await?;
-
-    Ok(xxh3_64(&data))
+/// Represents a concrete underlying filesystem.
+///
+/// It holds a [`FSBackend`] object, which provides the actual implementation for filesystem
+/// operations.
+#[derive(Debug)]
+pub struct ConcreteFS<Backend: FSBackend> {
+    backend: Backend,
 }
 
-/// Checks if two files on different filesystems are identical by reading them and computing a hash
-/// of their content
-///
-/// In case of error, return the underlying error and the name of the filesystem where this
-/// error occurred.
-pub async fn concrete_eq_file<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>(
-    local_concrete: &LocalConcrete,
-    remote_concrete: &RemoteConcrete,
-    path: &VirtualPath,
-) -> Result<bool, (ConcreteFsError, &'static str)> {
-    // TODO: cache files when possible
-    let (local_hash, remote_hash) = tokio::join!(
-        concrete_hash_file(local_concrete, path),
-        concrete_hash_file(remote_concrete, path)
-    );
+impl<Backend: FSBackend> ConcreteFS<Backend> {
+    pub fn new(backend: Backend) -> Self {
+        Self { backend }
+    }
 
-    Ok(local_hash.map_err(|e| (e, LocalConcrete::TYPE_NAME))?
-        == remote_hash.map_err(|e| (e, RemoteConcrete::TYPE_NAME))?)
+    pub fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
+    /// Computes a hash of the content of the file, for cross-FS comparison
+    async fn hash_file(&self, path: &VirtualPath) -> Result<u64, FsBackendError> {
+        let stream = self.backend.read_file(path).await.map_err(|e| e.into())?;
+        let mut reader = StreamReader::new(stream.map_err(|e| io::Error::new(ErrorKind::Other, e)));
+
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).await?;
+
+        Ok(xxh3_64(&data))
+    }
+
+    /// Checks if two files on different filesystems are identical by reading them and computing a
+    /// hash of their content
+    ///
+    /// In case of error, return the underlying error and the name of the filesystem where this
+    /// error occurred.
+    pub async fn eq_file<OtherBackend: FSBackend>(
+        &self,
+        other: &ConcreteFS<OtherBackend>,
+        path: &VirtualPath,
+    ) -> Result<bool, (FsBackendError, &'static str)> {
+        // TODO: cache files when possible
+        let (local_hash, remote_hash) = tokio::join!(self.hash_file(path), other.hash_file(path));
+
+        Ok(local_hash.map_err(|e| (e, Backend::TYPE_NAME))?
+            == remote_hash.map_err(|e| (e, OtherBackend::TYPE_NAME))?)
+    }
+
+    /// Clone a file from `ref_concrete` into the concrete fs of self.
+    ///
+    /// Return the syncinfo associated with the created file and the number of bytes written.
+    pub async fn clone_file<OtherBackend: FSBackend>(
+        &self,
+        ref_concrete: &ConcreteFS<OtherBackend>,
+        path: &VirtualPath,
+    ) -> Result<(Backend::SyncInfo, u64), FsBackendError> {
+        info!(
+            "Cloning file {:?} from {} to {}",
+            path,
+            OtherBackend::TYPE_NAME,
+            Backend::TYPE_NAME
+        );
+        let counter = Arc::new(AtomicU64::new(0));
+        let stream = ref_concrete
+            .backend
+            .read_file(path)
+            .await
+            .map_err(|e| {
+                error!("Failed to read file {path:?}: {e:?}");
+                e.into()
+            })?
+            .count_bytes(counter.clone());
+        let res = self
+            .backend()
+            .write_file(path, stream)
+            .await
+            .map_err(|e| {
+                error!("Failed to clone file {path:?}: {e:?}");
+                e.into()
+            })
+            .map(|info| (info, counter.load(std::sync::atomic::Ordering::SeqCst)))?;
+
+        info!("File {path:?} successfully cloned");
+
+        Ok(res)
+    }
 }

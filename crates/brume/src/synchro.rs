@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::try_join;
 
 use crate::{
-    concrete::{ConcreteFS, ConcreteUpdateApplicationError},
+    concrete::{ConcreteUpdateApplicationError, FSBackend},
     filesystem::FileSystem,
     sorted_vec::SortedVec,
     update::{AppliedUpdate, ReconciledUpdate, VfsNodeUpdate, VfsUpdateList},
@@ -77,26 +77,26 @@ impl SynchroSide {
 /// Since synchronization is bidirectional, there is almost no difference between how the `local`
 /// and `remote` filesystems are handled. The only difference is that conflict files will only be
 /// created on the local side.
-pub struct Synchro<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS> {
-    local: &'local mut FileSystem<LocalConcrete>,
-    remote: &'remote mut FileSystem<RemoteConcrete>,
+pub struct Synchro<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend> {
+    local: &'local mut FileSystem<LocalBackend>,
+    remote: &'remote mut FileSystem<RemoteBackend>,
 }
 
-impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
-    Synchro<'local, 'remote, LocalConcrete, RemoteConcrete>
+impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
+    Synchro<'local, 'remote, LocalBackend, RemoteBackend>
 {
     pub fn new(
-        local: &'local mut FileSystem<LocalConcrete>,
-        remote: &'remote mut FileSystem<RemoteConcrete>,
+        local: &'local mut FileSystem<LocalBackend>,
+        remote: &'remote mut FileSystem<RemoteBackend>,
     ) -> Self {
         Self { local, remote }
     }
 
-    pub fn local(&self) -> &FileSystem<LocalConcrete> {
+    pub fn local(&self) -> &FileSystem<LocalBackend> {
         self.local
     }
 
-    pub fn remote(&self) -> &FileSystem<RemoteConcrete> {
+    pub fn remote(&self) -> &FileSystem<RemoteBackend> {
         self.remote
     }
 
@@ -124,11 +124,11 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         self.local
             .vfs_mut()
             .apply_updates_list(local_applied)
-            .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))?;
+            .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))?;
         self.remote
             .vfs_mut()
             .apply_updates_list(remote_applied)
-            .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
+            .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
 
         Ok(self.get_status())
     }
@@ -177,8 +177,8 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         updates: SortedVec<ReconciledUpdate>,
     ) -> Result<
         (
-            Vec<AppliedUpdate<LocalConcrete::SyncInfo>>,
-            Vec<AppliedUpdate<RemoteConcrete::SyncInfo>>,
+            Vec<AppliedUpdate<LocalBackend::SyncInfo>>,
+            Vec<AppliedUpdate<RemoteBackend::SyncInfo>>,
         ),
         (ConcreteUpdateApplicationError, &'static str),
     > {
@@ -222,8 +222,8 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         );
 
         let (local_applied, remote_applied) = try_join!(
-            local_futures.map_err(|e| (e, LocalConcrete::TYPE_NAME)),
-            remote_futures.map_err(|e| (e, RemoteConcrete::TYPE_NAME))
+            local_futures.map_err(|e| (e, LocalBackend::TYPE_NAME)),
+            remote_futures.map_err(|e| (e, RemoteBackend::TYPE_NAME))
         )?;
 
         // Errors are applied on the source Vfs to make them trigger a resync, but they are detected
@@ -280,7 +280,7 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
                     .local
                     .apply_update_concrete(self.remote, update)
                     .await
-                    .map_err(|e| Error::concrete_application(LocalConcrete::TYPE_NAME, e))?;
+                    .map_err(|e| Error::concrete_application(LocalBackend::TYPE_NAME, e))?;
 
                 for update in applied {
                     // Errors are applied on the source Vfs to make them trigger a resync, but they
@@ -293,7 +293,7 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
                     } else {
                         self.local.vfs_mut().apply_update(update)
                     }
-                    .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
+                    .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
                 }
                 Ok(())
             }
@@ -315,7 +315,7 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
                     } else {
                         self.remote.vfs_mut().apply_update(update)
                     }
-                    .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
+                    .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
                 }
 
                 Ok(())
@@ -332,10 +332,10 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         try_join!(
             self.local
                 .update_vfs()
-                .map_err(|e| Error::vfs_reload(LocalConcrete::TYPE_NAME, e)),
+                .map_err(|e| Error::vfs_reload(LocalBackend::TYPE_NAME, e)),
             self.remote
                 .update_vfs()
-                .map_err(|e| Error::vfs_reload(RemoteConcrete::TYPE_NAME, e))
+                .map_err(|e| Error::vfs_reload(RemoteBackend::TYPE_NAME, e))
         )
     }
 
@@ -388,7 +388,7 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
             SynchroSide::Local => {
                 // Skip if the node does not exist, meaning it was a removal
                 if self.local.vfs().find_node(path).is_some() {
-                    let state = match self.local.concrete().get_sync_info(path).await {
+                    let state = match self.local.concrete().backend().get_sync_info(path).await {
                         Ok(info) => NodeState::Ok(info),
                         // If we can reach the concrete FS, we delay until the next full_sync
                         Err(_) => NodeState::NeedResync,
@@ -396,21 +396,21 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
                     self.local
                         .vfs_mut()
                         .update_node_state(path, state)
-                        .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))
+                        .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))
                 } else {
                     Ok(())
                 }
             }
             SynchroSide::Remote => {
                 if self.remote.vfs().find_node(path).is_some() {
-                    let state = match self.remote.concrete().get_sync_info(path).await {
+                    let state = match self.remote.concrete().backend().get_sync_info(path).await {
                         Ok(info) => NodeState::Ok(info),
                         Err(_) => NodeState::NeedResync,
                     };
                     self.remote
                         .vfs_mut()
                         .update_node_state(path, state)
-                        .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))
+                        .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))
                 } else {
                     Ok(())
                 }
@@ -694,7 +694,7 @@ mod test {
 
         synchro
             .local
-            .set_concrete(ConcreteTestNode::from(local_modif));
+            .set_backend(ConcreteTestNode::from(local_modif));
 
         let remote_modif = D(
             "",
@@ -709,7 +709,7 @@ mod test {
 
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_modif));
+            .set_backend(ConcreteTestNode::from(remote_modif));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Conflict);
 
@@ -781,7 +781,7 @@ mod test {
 
         synchro
             .local
-            .set_concrete(ConcreteTestNode::from(local_modif));
+            .set_backend(ConcreteTestNode::from(local_modif));
 
         let remote_modif = D(
             "",
@@ -793,7 +793,7 @@ mod test {
 
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_modif));
+            .set_backend(ConcreteTestNode::from(remote_modif));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Conflict);
 
@@ -883,7 +883,7 @@ mod test {
 
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
 
@@ -928,7 +928,7 @@ mod test {
         );
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_error.clone()));
+            .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
 
@@ -969,7 +969,7 @@ mod test {
 
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
 
@@ -1036,7 +1036,7 @@ mod test {
 
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
@@ -1078,7 +1078,7 @@ mod test {
         );
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_error.clone()));
+            .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
 
@@ -1116,7 +1116,7 @@ mod test {
 
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
 
@@ -1161,7 +1161,7 @@ mod test {
         );
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_error.clone()));
+            .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
 
@@ -1214,11 +1214,11 @@ mod test {
 
         synchro
             .local
-            .set_concrete(ConcreteTestNode::from(modified_local.clone()));
+            .set_backend(ConcreteTestNode::from(modified_local.clone()));
 
         synchro
             .remote
-            .set_concrete(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Conflict);
 

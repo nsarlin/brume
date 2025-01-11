@@ -1,12 +1,12 @@
 //! An update represents a difference between two file system nodes.
 //!
 //! For 2 filesystems A and B that are kept in sync, the lifecycle of an update comes in 3 steps:
-//! 1. **VFS diff**: The [`VFS`] of each filesystem is loaded from the [`ConcreteFS`] and compared
+//! 1. **VFS diff**: The [`VFS`] of each filesystem is loaded from the [`FSBackend`] and compared
 //!    with its previous version. This will create two separated [`VfsUpdateList`], one for A and
 //!    one for B. The comparison does not access the concrete filesystems, only the metadata of the
 //!    files are used.
 //! 2. **Reconciliation**: The two [`VfsUpdateList`] are compared and merged, using the
-//!    [`ConcreteFS`] of A and B when needed. This step will classify the updates in 3 categories:
+//!    [`FSBackend`] of A and B when needed. This step will classify the updates in 3 categories:
 //!      - Updates that should be applied (on A if they come from B and vice-versa):
 //!        [`ApplicableUpdate`]
 //!      - Updates that should be ignored, when the exact same modification has been performed on
@@ -16,8 +16,8 @@
 //!        associated updates do not match. The simplest conflict example is when files are modified
 //!        differently on both sides. Another example is a directory that is removed on A, whereas a
 //!        file inside this directory has been modified on B.
-//! 3. **Application**: Updates are applied to both the [`ConcreteFS`] and the [`VFS`]. Applying the
-//!    update to the `ConcreteFS` creates an [`AppliedUpdate`] that can be propagated to the `VFS`.
+//! 3. **Application**: Updates are applied to both the [`FSBackend`] and the [`VFS`]. Applying the
+//!    update to the `FSBackend` creates an [`AppliedUpdate`] that can be propagated to the `VFS`.
 //!
 //! [`VFS`]: crate::vfs::Vfs
 
@@ -26,7 +26,7 @@ use std::cmp::Ordering;
 use futures::future::try_join_all;
 
 use crate::{
-    concrete::{concrete_eq_file, ConcreteFS, ConcreteFsError, Named},
+    concrete::{ConcreteFS, FSBackend, FsBackendError, Named},
     sorted_vec::{Sortable, SortedVec},
     vfs::{
         DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
@@ -63,9 +63,9 @@ pub enum VfsUpdateApplicationError {
 #[derive(Error, Debug)]
 pub enum ReconciliationError {
     #[error("error from {fs_name} during reconciliation")]
-    ConcreteFsError {
+    FsBackendError {
         fs_name: String,
-        source: ConcreteFsError,
+        source: FsBackendError,
     },
     #[error(
         "the nodes in 'local' and 'remote' FS do not point to the same node and can't be reconciled"
@@ -81,8 +81,8 @@ pub enum ReconciliationError {
 }
 
 impl ReconciliationError {
-    pub fn concrete<E: Into<ConcreteFsError>>(fs_name: &str, source: E) -> Self {
-        Self::ConcreteFsError {
+    pub fn concrete<E: Into<FsBackendError>>(fs_name: &str, source: E) -> Self {
+        Self::FsBackendError {
             fs_name: fs_name.to_string(),
             source: source.into(),
         }
@@ -252,7 +252,7 @@ impl VfsNodeUpdate {
     ///
     /// This step is performed without access to the concrete filesystems. This means that only
     /// obvious conflicts are detected. Files that are modified on both fs will be flagged as
-    /// `NeedConcreteCheck` so they can be resolved later with concrete fs access.
+    /// `NeedBackendCheck` so they can be resolved later with concrete fs access.
     fn reconcile<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
         remote_update: &VfsNodeUpdate,
@@ -299,7 +299,7 @@ impl VfsNodeUpdate {
                     .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
                 let update = if file_local.size() == file_remote.size() {
-                    VirtualReconciledUpdate::concrete_check_both(self)
+                    VirtualReconciledUpdate::backend_check_both(self)
                 } else {
                     VirtualReconciledUpdate::conflict_both(self)
                 };
@@ -581,7 +581,7 @@ pub(crate) enum VirtualReconciledUpdate {
     /// access. The outcome of the check can be:
     /// - Remove the update if both files are identical
     /// - Mark the update as a conflict if they are different
-    NeedConcreteCheck(ApplicableUpdate),
+    NeedBackendCheck(ApplicableUpdate),
     Conflict(ApplicableUpdate),
 }
 
@@ -589,7 +589,7 @@ impl VirtualReconciledUpdate {
     fn update(&self) -> &ApplicableUpdate {
         match self {
             VirtualReconciledUpdate::Applicable(update) => update,
-            VirtualReconciledUpdate::NeedConcreteCheck(update) => update,
+            VirtualReconciledUpdate::NeedBackendCheck(update) => update,
             VirtualReconciledUpdate::Conflict(update) => update,
         }
     }
@@ -619,24 +619,25 @@ impl VirtualReconciledUpdate {
         Self::Conflict(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 
-    /// Create a new `NeedConcreteCheck` updates with [`UpdateTarget::Both`]
-    pub(crate) fn concrete_check_both(update: &VfsNodeUpdate) -> Self {
-        Self::NeedConcreteCheck(ApplicableUpdate::new(UpdateTarget::Both, update))
+    /// Create a new `NeedBackendCheck` updates with [`UpdateTarget::Both`]
+    pub(crate) fn backend_check_both(update: &VfsNodeUpdate) -> Self {
+        Self::NeedBackendCheck(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 
-    /// Resolve an update with `NeedConcreteCheck` by comparing hashes of the file on both concrete
+    /// Resolve an update with `NeedBackendCheck` by comparing hashes of the file on both concrete
     /// FS
-    async fn resolve_concrete<LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>(
+    async fn resolve_concrete<LocalBackend: FSBackend, RemoteBackend: FSBackend>(
         self,
-        local_concrete: &LocalConcrete,
-        remote_concrete: &RemoteConcrete,
+        local_concrete: &ConcreteFS<LocalBackend>,
+        remote_concrete: &ConcreteFS<RemoteBackend>,
     ) -> Result<Option<ReconciledUpdate>, ReconciliationError> {
         match self {
             VirtualReconciledUpdate::Applicable(update) => {
                 Ok(Some(ReconciledUpdate::Applicable(update)))
             }
-            VirtualReconciledUpdate::NeedConcreteCheck(update) => {
-                if concrete_eq_file(local_concrete, remote_concrete, update.path())
+            VirtualReconciledUpdate::NeedBackendCheck(update) => {
+                if local_concrete
+                    .eq_file(remote_concrete, update.path())
                     .await
                     .map_err(|(e, name)| ReconciliationError::concrete(name, e))?
                 {
@@ -662,11 +663,11 @@ impl Sortable for VirtualReconciledUpdate {
 
 impl SortedVec<VirtualReconciledUpdate> {
     /// Convert a list of [`VirtualReconciledUpdate`] into a list of [`ReconciledUpdate`] by using
-    /// the concrete FS to resolve all the `NeedConcreteCheck`
-    pub(crate) async fn resolve_concrete<Concrete: ConcreteFS, OtherConcrete: ConcreteFS>(
+    /// the concrete FS to resolve all the `NeedBackendCheck`
+    pub(crate) async fn resolve_concrete<Backend: FSBackend, OtherBackend: FSBackend>(
         self,
-        concrete_self: &Concrete,
-        concrete_other: &OtherConcrete,
+        concrete_self: &ConcreteFS<Backend>,
+        concrete_other: &ConcreteFS<OtherBackend>,
     ) -> Result<SortedVec<ReconciledUpdate>, ReconciliationError> {
         let updates = try_join_all(
             self.into_iter()
@@ -788,7 +789,7 @@ impl SortedVec<ReconciledUpdate> {
     }
 }
 
-/// Represent a DirCreation update that has been successfully applied on the [`ConcreteFS`].
+/// Represent a DirCreation update that has been successfully applied on the [`FSBackend`].
 #[derive(Clone, Debug)]
 pub struct AppliedDirCreation<SyncInfo> {
     path: VirtualPathBuf,
@@ -820,7 +821,7 @@ impl<SyncInfo> From<AppliedDirCreation<SyncInfo>> for DirTree<SyncInfo> {
 }
 
 /// Represent a File creation or modification update that has been successfully applied on the
-/// [`ConcreteFS`].
+/// [`FSBackend`].
 #[derive(Clone, Debug)]
 pub struct AppliedFileUpdate<SyncInfo> {
     path: VirtualPathBuf,
@@ -850,10 +851,10 @@ impl<SyncInfo> AppliedFileUpdate<SyncInfo> {
     }
 }
 
-/// An update that has been applied on a [`ConcreteFS`], and will be propagated to the [`Vfs`].
+/// An update that has been applied on a [`FSBackend`], and will be propagated to the [`Vfs`].
 ///
 /// For node creation or modification, this types holds the SyncInfo needed to apply the update on
-/// the `Vfs`. These SyncInfo must be fetched from the `ConcreteFS` immediatly after the update
+/// the `Vfs`. These SyncInfo must be fetched from the `FSBackend` immediatly after the update
 /// application for correctness.
 ///
 /// [`Vfs`]: crate::vfs::Vfs
@@ -890,12 +891,12 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
 /// An update that failed because an error occured on one of the concrete fs
 #[derive(Clone, Debug)]
 pub struct FailedUpdateApplication {
-    error: ConcreteFsError,
+    error: FsBackendError,
     update: VfsNodeUpdate,
 }
 
 impl FailedUpdateApplication {
-    pub fn new(update: VfsNodeUpdate, error: ConcreteFsError) -> Self {
+    pub fn new(update: VfsNodeUpdate, error: FsBackendError) -> Self {
         Self { update, error }
     }
 
@@ -907,7 +908,7 @@ impl FailedUpdateApplication {
         &self.update
     }
 
-    pub fn error(&self) -> &ConcreteFsError {
+    pub fn error(&self) -> &FsBackendError {
         &self.error
     }
 }

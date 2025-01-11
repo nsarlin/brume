@@ -72,7 +72,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
 
     /// Creates a new directory without syncinfo.
     ///
-    /// This mean that the synchronization process will force a resync with the concrete Fs
+    /// This mean that the synchronization process will force a resync with the backend Fs
     pub fn new_without_syncinfo(name: &str) -> Self {
         Self {
             metadata: DirMeta::new_without_syncinfo(name),
@@ -116,7 +116,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         self.metadata.state_mut()
     }
 
-    /// Invalidates the sync info to make them trigger a ConcreteFS sync on next run
+    /// Invalidates the sync info to make them trigger a FSBackend sync on next run
     pub fn force_resync(&mut self) {
         self.metadata.force_resync()
     }
@@ -314,7 +314,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// their concrete backends.
     ///
     /// This will perform a structural diff between both trees, and return a
-    /// [`VirtualReconciledUpdate::NeedConcreteCheck`] when two files with the same name are found.
+    /// [`VirtualReconciledUpdate::NeedBackendCheck`] when two files with the same name are found.
     pub(crate) fn reconciliation_diff<OtherSyncInfo>(
         &self,
         other: &DirTree<OtherSyncInfo>,
@@ -645,7 +645,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
 
     /// Virtual diff performed during the reconciliation.
     ///
-    /// Structurally compare both FS, and return a `NeedConcreteCheck` when two files have the same
+    /// Structurally compare both FS, and return a `NeedBackendCheck` when two files have the same
     /// name.
     fn reconciliation_diff<OtherSyncInfo>(
         &self,
@@ -662,7 +662,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
                 let update = VfsNodeUpdate::file_created(file_path);
 
                 let update = if fself.size() == fother.size() {
-                    VirtualReconciledUpdate::concrete_check_both(&update)
+                    VirtualReconciledUpdate::backend_check_both(&update)
                 } else {
                     VirtualReconciledUpdate::conflict_both(&update)
                 };
