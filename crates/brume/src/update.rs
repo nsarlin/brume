@@ -512,17 +512,17 @@ impl SortedVec<ApplicableUpdate> {
     /// assert_eq!(local.len(), 2);
     /// assert_eq!(remote.len(), 2);
     /// ```
-    pub fn split_local_remote(self) -> (Vec<ApplicableUpdate>, Vec<ApplicableUpdate>) {
+    pub fn split_local_remote(self) -> (Vec<VfsNodeUpdate>, Vec<VfsNodeUpdate>) {
         let mut local = Vec::new();
         let mut remote = Vec::new();
 
         for update in self.into_iter() {
             match update.target() {
-                UpdateTarget::Local => local.push(update),
-                UpdateTarget::Remote => remote.push(update),
+                UpdateTarget::Local => local.push(update.update),
+                UpdateTarget::Remote => remote.push(update.update),
                 UpdateTarget::Both => {
-                    local.push(update.clone());
-                    remote.push(update)
+                    local.push(update.update.clone());
+                    remote.push(update.update)
                 }
             }
         }
@@ -865,7 +865,7 @@ pub enum AppliedUpdate<SyncInfo> {
     FileModified(AppliedFileUpdate<SyncInfo>),
     FileRemoved(VirtualPathBuf),
     FailedApplication(FailedUpdateApplication),
-    Conflict(ApplicableUpdate),
+    Conflict(VfsNodeUpdate),
     //TODO: detect moves
 }
 

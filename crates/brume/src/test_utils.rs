@@ -614,6 +614,16 @@ impl ConcreteFS for ConcreteTestNode {
         self.inner.borrow().name().to_string()
     }
 
+    async fn get_sync_info(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
+        let inner: VfsNode<_> = self.into();
+
+        let node = inner.find_node(path).unwrap();
+        match node.state() {
+            NodeState::Ok(sync) => Ok(sync.clone()),
+            _ => panic!(),
+        }
+    }
+
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
         let root = self.into();
 

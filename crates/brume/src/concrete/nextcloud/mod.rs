@@ -133,6 +133,14 @@ impl ConcreteFS for NextcloudFs {
         }
     }
 
+    async fn get_sync_info(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
+        let elements = self.client.list(path.into(), Depth::Number(0)).await?;
+
+        let elem = elements.first().ok_or(NextcloudFsError::BadStructure)?;
+
+        dav_parse_entity_tag(elem.clone())
+    }
+
     async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
         let elements = self.client.list("", Depth::Infinity).await?;
 

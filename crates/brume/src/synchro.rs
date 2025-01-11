@@ -11,7 +11,8 @@ use crate::{
     concrete::{ConcreteFS, ConcreteUpdateApplicationError},
     filesystem::FileSystem,
     sorted_vec::SortedVec,
-    update::{AppliedUpdate, ReconciledUpdate, VfsUpdateList},
+    update::{AppliedUpdate, ReconciledUpdate, VfsNodeUpdate, VfsUpdateList},
+    vfs::{NodeState, VirtualPath},
     Error,
 };
 
@@ -56,6 +57,21 @@ impl Display for SynchroStatus {
     }
 }
 
+#[derive(Copy, Clone)]
+pub enum SynchroSide {
+    Local,
+    Remote,
+}
+
+impl SynchroSide {
+    pub fn invert(self) -> Self {
+        match self {
+            SynchroSide::Local => Self::Remote,
+            SynchroSide::Remote => Self::Local,
+        }
+    }
+}
+
 /// A link between 2 [`FileSystem`] that are synchronized.
 ///
 /// Since synchronization is bidirectional, there is almost no difference between how the `local`
@@ -84,7 +100,7 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         self.remote
     }
 
-    /// Fully synchronize both filesystems.
+    /// Fully synchronizes both filesystems.
     ///
     /// This is done in three steps:
     /// - Vfs updates: both vfs are reloaded from their concrete FS. Updates on both filesystems are
@@ -114,18 +130,22 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
             .apply_updates_list(remote_applied)
             .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
 
+        Ok(self.get_status())
+    }
+
+    pub fn get_status(&self) -> SynchroStatus {
         if !self.local.vfs().get_errors().is_empty() || !self.remote.vfs().get_errors().is_empty() {
-            Ok(SynchroStatus::Error)
+            SynchroStatus::Error
         } else if !self.local.vfs().get_conflicts().is_empty()
             || !self.remote.vfs().get_conflicts().is_empty()
         {
-            Ok(SynchroStatus::Conflict)
+            SynchroStatus::Conflict
         } else {
-            Ok(SynchroStatus::Ok)
+            SynchroStatus::Ok
         }
     }
 
-    /// Reconcile updates lists from both filesystems by removing duplicates and detecting
+    /// Reconciles updates lists from both filesystems by removing duplicates and detecting
     /// conflicts.
     ///
     /// This is done in two steps:
@@ -145,7 +165,7 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         Ok(concrete_merged.resolve_ancestor_conflicts())
     }
 
-    /// Apply a list of updates on the two FS on both ends of the synchro
+    /// Applies a list of updates on the two FS on both ends of the synchro
     ///
     /// The target of the update will be chosen based on the value of the [`UpdateTarget`] of the
     /// [`ApplicableUpdate`].
@@ -189,15 +209,17 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         let (local_conflicts, remote_conflicts) = conflicts.split_local_remote();
 
         // Apply the updates
-        let local_futures = try_join_all(local_updates.into_iter().map(|update| {
-            self.local
-                .apply_update_concrete(self.remote, update.clone().into())
-        }));
+        let local_futures = try_join_all(
+            local_updates
+                .into_iter()
+                .map(|update| self.local.apply_update_concrete(self.remote, update)),
+        );
 
-        let remote_futures = try_join_all(remote_updates.into_iter().map(|update| {
-            self.remote
-                .apply_update_concrete(self.local, update.clone().into())
-        }));
+        let remote_futures = try_join_all(
+            remote_updates
+                .into_iter()
+                .map(|update| self.remote.apply_update_concrete(self.local, update)),
+        );
 
         let (local_applied, remote_applied) = try_join!(
             local_futures.map_err(|e| (e, LocalConcrete::TYPE_NAME)),
@@ -246,9 +268,64 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
         Ok((local_res, remote_res))
     }
 
-    /// Update both [`Vfs`] by querying and parsing their respective concrete FS.
+    /// Applies an update to the concrete FS and update the VFS accordingly
+    pub async fn apply_update(
+        &mut self,
+        side: SynchroSide,
+        update: VfsNodeUpdate,
+    ) -> Result<(), Error> {
+        match side {
+            SynchroSide::Local => {
+                let applied = self
+                    .local
+                    .apply_update_concrete(self.remote, update)
+                    .await
+                    .map_err(|e| Error::concrete_application(LocalConcrete::TYPE_NAME, e))?;
+
+                for update in applied {
+                    // Errors are applied on the source Vfs to make them trigger a resync, but they
+                    // are detected on the target side. So we need to move them
+                    // from one fs to the other.
+                    if let AppliedUpdate::FailedApplication(failed_update) = update {
+                        self.remote
+                            .vfs_mut()
+                            .apply_update(AppliedUpdate::FailedApplication(failed_update))
+                    } else {
+                        self.local.vfs_mut().apply_update(update)
+                    }
+                    .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
+                }
+                Ok(())
+            }
+            SynchroSide::Remote => {
+                let applied = self
+                    .remote
+                    .apply_update_concrete(self.local, update)
+                    .await
+                    .unwrap();
+
+                for update in applied {
+                    // Errors are applied on the source Vfs to make them trigger a resync, but they
+                    // are detected on the target side. So we need to move them
+                    // from one fs to the other.
+                    if let AppliedUpdate::FailedApplication(failed_update) = update {
+                        self.local
+                            .vfs_mut()
+                            .apply_update(AppliedUpdate::FailedApplication(failed_update))
+                    } else {
+                        self.remote.vfs_mut().apply_update(update)
+                    }
+                    .map_err(|e| Error::vfs_update_application(RemoteConcrete::TYPE_NAME, e))?;
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    /// Updates both [`Vfs`] by querying and parsing their respective concrete FS.
     ///
-    /// Return the updates on both fs, relative to the previously loaded Vfs.
+    /// Returns the updates on both fs, relative to the previously loaded Vfs.
     ///
     /// [`Vfs`]: crate::vfs::Vfs
     pub async fn update_vfs(&mut self) -> Result<(VfsUpdateList, VfsUpdateList), Error> {
@@ -260,6 +337,85 @@ impl<'local, 'remote, LocalConcrete: ConcreteFS, RemoteConcrete: ConcreteFS>
                 .update_vfs()
                 .map_err(|e| Error::vfs_reload(RemoteConcrete::TYPE_NAME, e))
         )
+    }
+
+    /// Resolves a conflict by selecting a [`SynchroSide`] an applying its update on the other side
+    pub async fn resolve_conflict(
+        &mut self,
+        path: &VirtualPath,
+        side: SynchroSide,
+    ) -> Result<SynchroStatus, Error> {
+        if let Some(update) = self.get_conflict_update(path, side) {
+            self.apply_update(side.invert(), update).await?;
+        } else {
+            // If no conflict is found, it probably means that it has been resolved in the meantime,
+            // so we just log it
+            warn!("conflict not found on node {path:?}");
+        }
+
+        self.mark_conflict_resolved(path, side).await?;
+        Ok(self.get_status())
+    }
+
+    fn get_conflict_update(&self, path: &VirtualPath, side: SynchroSide) -> Option<VfsNodeUpdate> {
+        // First try to find the conflict at the given path. If nothing is found, it might be
+        // because the update was a deletion and the node does not exist on the VFS anymore. In that
+        // case, the conflict update must have been stored on the other side, reversed (ie: as a
+        // creation)
+        match side {
+            SynchroSide::Local => self.local.vfs().find_conflict(path).cloned().or_else(|| {
+                self.remote
+                    .vfs()
+                    .find_conflict(path)
+                    .map(|update| update.clone().invert())
+            }),
+            SynchroSide::Remote => self.remote.vfs().find_conflict(path).cloned().or_else(|| {
+                self.local
+                    .vfs()
+                    .find_conflict(path)
+                    .map(|update| update.clone().invert())
+            }),
+        }
+    }
+
+    /// Removes the "Conflict" state of a node. Sets the state to Ok with updated SyncInfo.
+    async fn mark_conflict_resolved(
+        &mut self,
+        path: &VirtualPath,
+        side: SynchroSide,
+    ) -> Result<(), Error> {
+        match side {
+            SynchroSide::Local => {
+                // Skip if the node does not exist, meaning it was a removal
+                if self.local.vfs().find_node(path).is_some() {
+                    let state = match self.local.concrete().get_sync_info(path).await {
+                        Ok(info) => NodeState::Ok(info),
+                        // If we can reach the concrete FS, we delay until the next full_sync
+                        Err(_) => NodeState::NeedResync,
+                    };
+                    self.local
+                        .vfs_mut()
+                        .update_node_state(path, state)
+                        .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))
+                } else {
+                    Ok(())
+                }
+            }
+            SynchroSide::Remote => {
+                if self.remote.vfs().find_node(path).is_some() {
+                    let state = match self.remote.concrete().get_sync_info(path).await {
+                        Ok(info) => NodeState::Ok(info),
+                        Err(_) => NodeState::NeedResync,
+                    };
+                    self.remote
+                        .vfs_mut()
+                        .update_node_state(path, state)
+                        .map_err(|e| Error::vfs_update_application(LocalConcrete::TYPE_NAME, e))
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 }
 
@@ -545,7 +701,7 @@ mod test {
             vec![
                 D(
                     "Doc",
-                    vec![FF("f1.md", b"hello"), FF("f2.pdf", b"brave world")],
+                    vec![FF("f1.md", b"hello"), FF("f2.pdf", b"brave new world")],
                 ),
                 FF("file.doc", b"content"),
             ],
@@ -571,7 +727,22 @@ mod test {
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
-            .is_conflict())
+            .is_conflict());
+
+        // Resolve the conflict
+        assert_eq!(
+            synchro
+                .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Local)
+                .await
+                .unwrap(),
+            SynchroStatus::Ok
+        );
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(synchro.remote.vfs())
+            .unwrap()
+            .is_empty());
     }
 
     /// Test conflict handling in synchro where a file is modified on one side and removed on the
@@ -637,7 +808,23 @@ mod test {
             .remote
             .vfs()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
-            .is_none())
+            .is_none());
+
+        // Resolve the conflict
+        assert_eq!(
+            synchro
+                .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Remote)
+                .await
+                .unwrap(),
+            SynchroStatus::Ok
+        );
+
+        assert!(synchro
+            .local
+            .vfs()
+            .diff(synchro.remote.vfs())
+            .unwrap()
+            .is_empty());
     }
 
     // Test synchro with from scratch with a file where the concrete FS return an error

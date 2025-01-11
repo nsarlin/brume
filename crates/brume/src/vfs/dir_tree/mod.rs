@@ -8,9 +8,7 @@ pub use file::*;
 
 use crate::{
     sorted_vec::{Sortable, SortedVec},
-    update::{
-        ApplicableUpdate, FailedUpdateApplication, ModificationState, VirtualReconciledUpdate,
-    },
+    update::{FailedUpdateApplication, ModificationState, VirtualReconciledUpdate},
     Error, NameMismatchError,
 };
 
@@ -40,7 +38,7 @@ pub enum NodeState<SyncInfo> {
     /// time
     Error(FailedUpdateApplication),
     /// There is a conflict on this node that needs to be manually resolved
-    Conflict(ApplicableUpdate),
+    Conflict(VfsNodeUpdate),
 }
 
 impl<SyncInfo> NodeState<SyncInfo> {

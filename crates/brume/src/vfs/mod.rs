@@ -82,6 +82,16 @@ impl<SyncInfo> Vfs<SyncInfo> {
         self.root.find_node_mut(path)
     }
 
+    /// Returns the update inside a node that is in conflict state
+    pub fn find_conflict(&self, path: &VirtualPath) -> Option<&VfsNodeUpdate> {
+        let node = self.find_node(path)?;
+
+        match node.state() {
+            NodeState::Conflict(update) => Some(update),
+            _ => None,
+        }
+    }
+
     /// Applies a list of updates to the VFS, by calling [`Self::apply_update`] on each of them.
     pub fn apply_updates_list(
         &mut self,
@@ -186,6 +196,27 @@ impl<SyncInfo> Vfs<SyncInfo> {
                 Ok(())
             }
         }
+    }
+
+    /// Updates the state of a node
+    pub fn update_node_state(
+        &mut self,
+        path: &VirtualPath,
+        state: NodeState<SyncInfo>,
+    ) -> Result<(), VfsUpdateApplicationError> {
+        let parent = self
+            .root_mut()
+            .find_dir_mut(path.parent().ok_or(VfsUpdateApplicationError::PathIsRoot)?)?;
+
+        // Invalidate parent sync info because its content has been changed
+        parent.force_resync();
+
+        let node = self.root_mut().find_node_mut(path).ok_or_else(|| {
+            VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(path.to_owned()))
+        })?;
+        node.set_state(state);
+
+        Ok(())
     }
 }
 
