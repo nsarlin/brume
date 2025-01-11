@@ -297,7 +297,7 @@ impl TestNode<'_> {
     }
 }
 
-impl<'a> LocalPath for TestNode<'a> {
+impl LocalPath for TestNode<'_> {
     type DirEntry = Self;
     fn is_file(&self) -> bool {
         match self {
