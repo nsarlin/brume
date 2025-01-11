@@ -144,7 +144,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
                         ))
                     })?;
 
-                let state = NodeState::Conflict;
+                let state = NodeState::Conflict(update);
                 node.set_state(state);
 
                 Ok(())
