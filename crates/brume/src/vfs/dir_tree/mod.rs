@@ -366,7 +366,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         };
 
         for child in self.children().iter() {
-            ret.extend(child.get_errors(&dir_path));
+            ret.extend(child.get_errors_list(&dir_path));
         }
 
         ret
@@ -384,7 +384,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
         };
 
         for child in self.children().iter() {
-            ret.extend(child.get_conflicts(&dir_path));
+            ret.extend(child.get_conflicts_list(&dir_path));
         }
 
         ret
@@ -690,7 +690,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
     }
 
     /// Returns the list of errors for this node and its children
-    pub fn get_errors(
+    pub fn get_errors_list(
         &self,
         parent_path: &VirtualPath,
     ) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
@@ -710,7 +710,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
     }
 
     /// Returns the list of conflicts for this node and its children
-    pub fn get_conflicts(&self, parent_path: &VirtualPath) -> Vec<VirtualPathBuf> {
+    pub fn get_conflicts_list(&self, parent_path: &VirtualPath) -> Vec<VirtualPathBuf> {
         let mut path = self.path(parent_path);
 
         match self {

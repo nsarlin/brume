@@ -561,7 +561,6 @@ mod test {
         assert!(synchro
             .local
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -569,7 +568,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -631,7 +629,6 @@ mod test {
         assert!(synchro
             .local
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -639,7 +636,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .is_none())
     }
@@ -684,7 +680,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -768,7 +763,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -839,7 +833,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -920,7 +913,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -1004,7 +996,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -1049,7 +1040,6 @@ mod test {
         assert!(synchro
             .local
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
@@ -1057,7 +1047,6 @@ mod test {
         assert!(synchro
             .remote
             .vfs()
-            .root()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
             .unwrap()
             .state()
