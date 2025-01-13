@@ -1,72 +1,22 @@
-use std::{net::TcpListener, process::exit, sync::Arc, time::Duration};
+use std::{process::exit, sync::Arc, time::Duration};
 
 use brume::{concrete::local::LocalDir, filesystem::FileSystem};
 use env_logger::Builder;
-use interprocess::local_socket::{
-    tokio::{prelude::*, Stream},
-    GenericNamespaced, ToNsName,
-};
-
-use log::{info, LevelFilter};
-use tarpc::{
-    context, serde_transport, tokio_serde::formats::Bincode,
-    tokio_util::codec::LengthDelimitedCodec,
-};
-use testcontainers::{
-    core::{wait::HttpWaitStrategy, IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
-    ContainerAsync, GenericImage, ImageExt,
-};
 
 use brume_daemon::{
     daemon::{Daemon, DaemonConfig, ErrorMode},
-    protocol::{
-        AnyFsCreationInfo, BrumeServiceClient, LocalDirCreationInfo, NextcloudFsCreationInfo,
-        BRUME_SOCK_NAME,
-    },
+    protocol::{AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo},
 };
+use log::{info, LevelFilter};
+use tarpc::context;
 use tokio::time::sleep;
 
-fn get_random_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to address");
-    listener
-        .local_addr()
-        .expect("Failed to get local address")
-        .port()
-}
+#[path = "utils.rs"]
+mod utils;
 
-pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
-    let name = BRUME_SOCK_NAME.to_ns_name::<GenericNamespaced>()?;
-
-    let conn = Stream::connect(name).await?;
-
-    let codec_builder = LengthDelimitedCodec::builder();
-
-    let transport = serde_transport::new(codec_builder.new_framed(conn), Bincode::default());
-
-    Ok(BrumeServiceClient::new(Default::default(), transport).spawn())
-}
-
-pub async fn start_nextcloud(exposed_port: u16, url: &str) -> ContainerAsync<GenericImage> {
-    GenericImage::new("nextcloud", "30.0")
-        .with_wait_for(WaitFor::http(
-            HttpWaitStrategy::new(url)
-                .with_port(80.tcp())
-                .with_expected_status_code(200u16),
-        ))
-        .with_env_var("NEXTCLOUD_ADMIN_USER", "admin")
-        .with_env_var("NEXTCLOUD_ADMIN_PASSWORD", "admin")
-        .with_env_var("SQLITE_DATABASE", "admin")
-        .with_mapped_port(exposed_port, 80.tcp())
-        .start()
-        .await
-        .expect("Failed to start Nextcloud server")
-}
-
-pub async fn stop_nextcloud(container: ContainerAsync<GenericImage>) {
-    container.stop().await.unwrap();
-    container.rm().await.unwrap();
-}
+use utils::{
+    connect_to_daemon, get_random_port, get_random_sock_name, start_nextcloud, stop_nextcloud,
+};
 
 #[tokio::test]
 async fn main() {
@@ -77,9 +27,12 @@ async fn main() {
         .init();
 
     // Start daemon
+    let sock_name = get_random_sock_name();
+    info!("using sock name {sock_name}");
     let config = DaemonConfig::default()
         .with_sync_interval(Duration::from_secs(2))
-        .with_error_mode(ErrorMode::Exit);
+        .with_error_mode(ErrorMode::Exit)
+        .with_sock_name(&sock_name);
     let daemon = Daemon::new(config).unwrap();
     let daemon = Arc::new(daemon);
 
@@ -114,7 +67,7 @@ async fn main() {
         "admin",
     ));
 
-    let rpc = connect_to_daemon().await.unwrap();
+    let rpc = connect_to_daemon(&sock_name).await.unwrap();
 
     rpc.new_synchro(context::current(), local_a, remote.clone(), None)
         .await
