@@ -272,6 +272,7 @@ dependencies = [
  "futures",
  "interprocess",
  "log",
+ "rand",
  "serde",
  "tarpc",
  "tempfile",

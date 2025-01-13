@@ -41,12 +41,14 @@ use crate::{
 };
 
 /// Configuration of a [`Daemon`]
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct DaemonConfig {
     /// Time between two synchronizations
     sync_interval: Duration,
     /// How internal errors are handled
     error_mode: ErrorMode,
+    /// Name of the unix socket used to communicate with the daemon
+    sock_name: String,
 }
 
 impl Default for DaemonConfig {
@@ -54,6 +56,7 @@ impl Default for DaemonConfig {
         Self {
             sync_interval: Duration::from_secs(10),
             error_mode: ErrorMode::default(),
+            sock_name: BRUME_SOCK_NAME.to_string(),
         }
     }
 }
@@ -69,8 +72,16 @@ impl DaemonConfig {
     pub fn with_error_mode(self, error_mode: ErrorMode) -> Self {
         Self { error_mode, ..self }
     }
+
+    pub fn with_sock_name(self, sock_name: &str) -> Self {
+        Self {
+            sock_name: sock_name.to_string(),
+            ..self
+        }
+    }
 }
 
+/// How errors should be handled by the daemon
 #[derive(Default, Copy, Clone, PartialEq, Eq)]
 pub enum ErrorMode {
     #[default]
@@ -94,7 +105,9 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new(config: DaemonConfig) -> Result<Self> {
-        let name = BRUME_SOCK_NAME
+        let name = config
+            .sock_name
+            .as_str()
             .to_ns_name::<GenericNamespaced>()
             .context("Invalid name for sock")?;
         let opts = ListenerOptions::new().name(name);
