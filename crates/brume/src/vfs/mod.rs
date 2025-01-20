@@ -280,6 +280,15 @@ impl<SyncInfo> Vfs<SyncInfo> {
     }
 }
 
+// Converts into a generic vfs by dropping the backend specific sync info
+impl<SyncInfo> From<&Vfs<SyncInfo>> for Vfs<()> {
+    fn from(value: &Vfs<SyncInfo>) -> Self {
+        Self {
+            root: (&value.root).into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{

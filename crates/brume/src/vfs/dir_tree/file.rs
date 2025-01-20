@@ -47,3 +47,13 @@ impl<SyncInfo> FileMeta<SyncInfo> {
         &mut self.state
     }
 }
+
+impl<SyncInfo> From<&FileMeta<SyncInfo>> for FileMeta<()> {
+    fn from(value: &FileMeta<SyncInfo>) -> Self {
+        Self {
+            name: value.name.clone(),
+            size: value.size,
+            state: (&value.state).into(),
+        }
+    }
+}
