@@ -48,3 +48,12 @@ impl<SyncInfo> DirMeta<SyncInfo> {
         self.state = NodeState::NeedResync;
     }
 }
+
+impl<SyncInfo> From<&DirMeta<SyncInfo>> for DirMeta<()> {
+    fn from(value: &DirMeta<SyncInfo>) -> Self {
+        Self {
+            name: value.name.clone(),
+            state: (&value.state).into(),
+        }
+    }
+}

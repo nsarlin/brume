@@ -50,6 +50,17 @@ impl<SyncInfo> NodeState<SyncInfo> {
     }
 }
 
+impl<SyncInfo> From<&NodeState<SyncInfo>> for NodeState<()> {
+    fn from(value: &NodeState<SyncInfo>) -> Self {
+        match value {
+            NodeState::Ok(_) => NodeState::Ok(()),
+            NodeState::NeedResync => NodeState::NeedResync,
+            NodeState::Error(failed_update) => NodeState::Error(failed_update.clone()),
+            NodeState::Conflict(update) => NodeState::Conflict(update.clone()),
+        }
+    }
+}
+
 /// A directory, seen as a tree.
 ///
 /// It is composed of metadata for the directory itself and a list of children.
@@ -481,6 +492,18 @@ impl<SyncInfo: IsModified> DirTree<SyncInfo> {
     }
 }
 
+impl<SyncInfo> From<&DirTree<SyncInfo>> for DirTree<()> {
+    fn from(value: &DirTree<SyncInfo>) -> Self {
+        Self {
+            metadata: (&value.metadata).into(),
+            // Ok to use unchecked because the input list is sorted
+            children: SortedVec::unchecked_from_vec(
+                value.children.iter().map(|child| child.into()).collect(),
+            ),
+        }
+    }
+}
+
 /// The kind of node represented by the root of this tree
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
@@ -813,6 +836,16 @@ impl<SyncInfo: IsModified> VfsNode<SyncInfo> {
                 nself.to_removed_diff(parent_path),
                 nother.to_created_diff(parent_path),
             ])),
+        }
+    }
+}
+
+// Converts into a generic node by dropping the backend specific sync info
+impl<SyncInfo> From<&VfsNode<SyncInfo>> for VfsNode<()> {
+    fn from(value: &VfsNode<SyncInfo>) -> Self {
+        match value {
+            VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.into()),
+            VfsNode::File(file_meta) => VfsNode::File(file_meta.into()),
         }
     }
 }
