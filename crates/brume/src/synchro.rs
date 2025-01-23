@@ -11,7 +11,7 @@ use crate::{
     concrete::{ConcreteUpdateApplicationError, FSBackend},
     filesystem::FileSystem,
     sorted_vec::SortedVec,
-    update::{AppliedUpdate, ReconciledUpdate, VfsNodeUpdate, VfsUpdateList},
+    update::{AppliedUpdate, ReconciledUpdate, VfsDiff, VfsDiffList},
     vfs::{NodeState, VirtualPath},
     Error,
 };
@@ -153,8 +153,8 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     /// - Then find conflicts with a directory and one of its elements
     pub async fn reconcile(
         &self,
-        local_updates: VfsUpdateList,
-        remote_updates: VfsUpdateList,
+        local_updates: VfsDiffList,
+        remote_updates: VfsDiffList,
     ) -> Result<SortedVec<ReconciledUpdate>, Error> {
         let merged = local_updates.merge(remote_updates, self.local.vfs(), self.remote.vfs())?;
 
@@ -269,11 +269,7 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     }
 
     /// Applies an update to the concrete FS and update the VFS accordingly
-    pub async fn apply_update(
-        &mut self,
-        side: SynchroSide,
-        update: VfsNodeUpdate,
-    ) -> Result<(), Error> {
+    pub async fn apply_update(&mut self, side: SynchroSide, update: VfsDiff) -> Result<(), Error> {
         match side {
             SynchroSide::Local => {
                 let applied = self
@@ -328,7 +324,7 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     /// Returns the updates on both fs, relative to the previously loaded Vfs.
     ///
     /// [`Vfs`]: crate::vfs::Vfs
-    pub async fn update_vfs(&mut self) -> Result<(VfsUpdateList, VfsUpdateList), Error> {
+    pub async fn update_vfs(&mut self) -> Result<(VfsDiffList, VfsDiffList), Error> {
         try_join!(
             self.local
                 .update_vfs()
@@ -357,7 +353,7 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         Ok(self.get_status())
     }
 
-    fn get_conflict_update(&self, path: &VirtualPath, side: SynchroSide) -> Option<VfsNodeUpdate> {
+    fn get_conflict_update(&self, path: &VirtualPath, side: SynchroSide) -> Option<VfsDiff> {
         // First try to find the conflict at the given path. If nothing is found, it might be
         // because the update was a deletion and the node does not exist on the VFS anymore. In that
         // case, the conflict update must have been stored on the other side, reversed (ie: as a
@@ -427,7 +423,7 @@ mod test {
             ConcreteTestNode,
             TestNode::{D, FE, FF},
         },
-        update::VfsNodeUpdate,
+        update::VfsDiff,
         vfs::{Vfs, VirtualPathBuf},
     };
 
@@ -458,9 +454,9 @@ mod test {
         synchro.update_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
-            VfsNodeUpdate::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
-            VfsNodeUpdate::dir_created(VirtualPathBuf::new("/e").unwrap()),
+            VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+            VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
+            VfsDiff::dir_created(VirtualPathBuf::new("/e").unwrap()),
         ]);
 
         let remote_diff = local_diff.clone();
@@ -498,24 +494,23 @@ mod test {
         synchro.update_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
-            VfsNodeUpdate::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::dir_created(VirtualPathBuf::new("/e").unwrap()),
+            VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+            VfsDiff::dir_created(VirtualPathBuf::new("/e").unwrap()),
         ]);
 
-        let remote_diff = SortedVec::from([VfsNodeUpdate::dir_removed(
-            VirtualPathBuf::new("/a/b").unwrap(),
-        )]);
+        let remote_diff =
+            SortedVec::from([VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap())]);
 
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
         let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::applicable_remote(&VfsNodeUpdate::file_modified(
+            ReconciledUpdate::applicable_remote(&VfsDiff::file_modified(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             )),
-            ReconciledUpdate::applicable_local(&VfsNodeUpdate::dir_removed(
+            ReconciledUpdate::applicable_local(&VfsDiff::dir_removed(
                 VirtualPathBuf::new("/a/b").unwrap(),
             )),
-            ReconciledUpdate::applicable_remote(&VfsNodeUpdate::dir_created(
+            ReconciledUpdate::applicable_remote(&VfsDiff::dir_created(
                 VirtualPathBuf::new("/e").unwrap(),
             )),
         ]);
@@ -553,25 +548,25 @@ mod test {
         synchro.update_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
-            VfsNodeUpdate::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
+            VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+            VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
         ]);
 
         let remote_diff = SortedVec::from([
-            VfsNodeUpdate::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
-            VfsNodeUpdate::file_created(VirtualPathBuf::new("/a/b/test.log").unwrap()),
+            VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
+            VfsDiff::file_created(VirtualPathBuf::new("/a/b/test.log").unwrap()),
         ]);
 
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
-        let modif_update = VfsNodeUpdate::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap());
+        let modif_update = VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap());
 
         let reconciled_ref = SortedVec::from([
             ReconciledUpdate::conflict_both(&modif_update),
-            ReconciledUpdate::conflict_local(&VfsNodeUpdate::dir_removed(
+            ReconciledUpdate::conflict_local(&VfsDiff::dir_removed(
                 VirtualPathBuf::new("/a/b").unwrap(),
             )),
-            ReconciledUpdate::conflict_remote(&VfsNodeUpdate::file_created(
+            ReconciledUpdate::conflict_remote(&VfsDiff::file_created(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),
         ]);
@@ -609,22 +604,20 @@ mod test {
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         synchro.update_vfs().await.unwrap();
 
-        let local_diff = SortedVec::from([VfsNodeUpdate::dir_created(
-            VirtualPathBuf::new("/").unwrap(),
-        )]);
+        let local_diff = SortedVec::from([VfsDiff::dir_created(VirtualPathBuf::new("/").unwrap())]);
 
         let remote_diff = local_diff.clone();
 
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
         let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::conflict_both(&VfsNodeUpdate::file_created(
+            ReconciledUpdate::conflict_both(&VfsDiff::file_created(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             )),
-            ReconciledUpdate::applicable_local(&VfsNodeUpdate::file_created(
+            ReconciledUpdate::applicable_local(&VfsDiff::file_created(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),
-            ReconciledUpdate::applicable_remote(&VfsNodeUpdate::dir_created(
+            ReconciledUpdate::applicable_remote(&VfsDiff::dir_created(
                 VirtualPathBuf::new("/e/g").unwrap(),
             )),
         ]);

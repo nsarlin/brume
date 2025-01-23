@@ -14,8 +14,8 @@ pub use virtual_path::*;
 
 use crate::{
     update::{
-        AppliedUpdate, DiffError, FailedUpdateApplication, IsModified, VfsNodeUpdate,
-        VfsUpdateApplicationError, VfsUpdateList,
+        AppliedUpdate, DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList,
+        VfsUpdateApplicationError,
     },
     NameMismatchError,
 };
@@ -83,7 +83,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
     }
 
     /// Returns the update inside a node that is in conflict state
-    pub fn find_conflict(&self, path: &VirtualPath) -> Option<&VfsNodeUpdate> {
+    pub fn find_conflict(&self, path: &VirtualPath) -> Option<&VfsDiff> {
         let node = self.find_node(path)?;
 
         match node.state() {
@@ -223,12 +223,12 @@ impl<SyncInfo> Vfs<SyncInfo> {
 impl<SyncInfo: IsModified + Clone> Vfs<SyncInfo> {
     /// Diff two VFS by comparing their nodes.
     ///
-    /// This function returns a sorted list of [`VfsNodeUpdate`].
+    /// This function returns a sorted list of [`VfsDiff`].
     /// The node comparison is based on the `SyncInfo` and might be recursive based on the result of
     /// [`modification_state`]. The result of the SyncInfo comparison on node is trusted.
     ///
     /// [`modification_state`]: IsModified::modification_state
-    pub fn diff(&self, other: &Vfs<SyncInfo>) -> Result<VfsUpdateList, DiffError> {
+    pub fn diff(&self, other: &Vfs<SyncInfo>) -> Result<VfsDiffList, DiffError> {
         self.root.diff(other.root(), VirtualPath::root())
     }
 }

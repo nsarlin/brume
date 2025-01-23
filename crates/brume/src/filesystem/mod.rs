@@ -8,7 +8,7 @@ use crate::{
     concrete::{ConcreteFS, ConcreteUpdateApplicationError, FSBackend, FsBackendError},
     update::{
         AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, FailedUpdateApplication,
-        UpdateKind, VfsNodeUpdate, VfsUpdateList,
+        UpdateKind, VfsDiff, VfsDiffList,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
     Error,
@@ -50,7 +50,7 @@ impl<SyncInfo> ConcreteDirCloneResult<SyncInfo> {
         Self {
             success: None,
             failures: vec![FailedUpdateApplication::new(
-                VfsNodeUpdate::dir_created(path.to_owned()),
+                VfsDiff::dir_created(path.to_owned()),
                 error.into(),
             )],
         }
@@ -87,7 +87,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     }
 
     /// Queries the concrete FS to update the in memory virtual representation
-    pub async fn update_vfs(&mut self) -> Result<VfsUpdateList, VfsReloadError> {
+    pub async fn update_vfs(&mut self) -> Result<VfsDiffList, VfsReloadError> {
         debug!("Updating VFS from {}", Backend::TYPE_NAME);
         let new_vfs = self.backend().load_virtual().await.map_err(|e| e.into())?;
 
@@ -137,7 +137,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     pub async fn apply_update_concrete<RefBackend: FSBackend>(
         &self,
         ref_fs: &FileSystem<RefBackend>,
-        update: VfsNodeUpdate,
+        update: VfsDiff,
     ) -> Result<Vec<AppliedUpdate<Backend::SyncInfo>>, ConcreteUpdateApplicationError> {
         if update.path().is_root() {
             return Err(ConcreteUpdateApplicationError::PathIsRoot);
@@ -281,7 +281,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
                             }
                             Err(error) => {
                                 let failure = FailedUpdateApplication::new(
-                                    VfsNodeUpdate::file_created(child_path),
+                                    VfsDiff::file_created(child_path),
                                     error,
                                 );
                                 (None, vec![failure])
@@ -365,7 +365,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/e/g/h").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::dir_created(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsDiff::dir_created(dir_path.clone()))
             .await
             .unwrap();
 
@@ -389,7 +389,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/a/b").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::dir_removed(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsDiff::dir_removed(dir_path.clone()))
             .await
             .unwrap();
 
@@ -420,7 +420,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f3.rs").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::file_created(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsDiff::file_created(dir_path.clone()))
             .await
             .unwrap();
 
@@ -444,7 +444,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f1.md").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::file_modified(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsDiff::file_modified(dir_path.clone()))
             .await
             .unwrap();
 
@@ -468,7 +468,7 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f2.pdf").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsNodeUpdate::file_removed(dir_path.clone()))
+            .apply_update_concrete(&remote_fs, VfsDiff::file_removed(dir_path.clone()))
             .await
             .unwrap();
 
