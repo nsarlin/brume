@@ -2,11 +2,11 @@
 //!
 //! For 2 filesystems A and B that are kept in sync, the lifecycle of an update comes in 3 steps:
 //! 1. **VFS diff**: The [`VFS`] of each filesystem is loaded from the [`FSBackend`] and compared
-//!    with its previous version. This will create two separated [`VfsUpdateList`], one for A and
-//!    one for B. The comparison does not access the concrete filesystems, only the metadata of the
+//!    with its previous version. This will create two separated [`VfsDiffList`], one for A and one
+//!    for B. The comparison does not access the concrete filesystems, only the metadata of the
 //!    files are used.
-//! 2. **Reconciliation**: The two [`VfsUpdateList`] are compared and merged, using the
-//!    [`FSBackend`] of A and B when needed. This step will classify the updates in 3 categories:
+//! 2. **Reconciliation**: The two [`VfsDiffList`] are compared and merged, using the [`FSBackend`]
+//!    of A and B when needed. This step will classify the updates in 3 categories:
 //!      - Updates that should be applied (on A if they come from B and vice-versa):
 //!        [`ApplicableUpdate`]
 //!      - Updates that should be ignored, when the exact same modification has been performed on
@@ -197,14 +197,14 @@ impl UpdateTarget {
     }
 }
 
-/// A single node update
+/// A single diff on a vfs node, returned by [`Vfs::diff`]
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct VfsNodeUpdate {
+pub struct VfsDiff {
     path: VirtualPathBuf, // Field order is important for the "Ord" impl
     kind: UpdateKind,
 }
 
-impl VfsNodeUpdate {
+impl VfsDiff {
     pub fn dir_created(path: VirtualPathBuf) -> Self {
         Self {
             path,
@@ -255,7 +255,7 @@ impl VfsNodeUpdate {
     /// `NeedBackendCheck` so they can be resolved later with concrete fs access.
     fn reconcile<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
-        remote_update: &VfsNodeUpdate,
+        remote_update: &VfsDiff,
         vfs_local: &Vfs<LocalSyncInfo>,
         vfs_remote: &Vfs<RemoteSyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
@@ -337,7 +337,7 @@ impl VfsNodeUpdate {
     }
 }
 
-impl Sortable for VfsNodeUpdate {
+impl Sortable for VfsDiff {
     type Key = VirtualPath;
 
     fn key(&self) -> &Self::Key {
@@ -345,15 +345,15 @@ impl Sortable for VfsNodeUpdate {
     }
 }
 
-/// Sorted list of [`VfsNodeUpdate`]
-pub type VfsUpdateList = SortedVec<VfsNodeUpdate>;
+/// Sorted list of [`VfsDiff`]
+pub type VfsDiffList = SortedVec<VfsDiff>;
 
-impl VfsUpdateList {
-    /// Merge two update lists by calling [`VfsNodeUpdate::reconcile`] on their elements one by
+impl VfsDiffList {
+    /// Merge two update lists by calling [`VfsDiff::reconcile`] on their elements one by
     /// one
     pub(crate) fn merge<SyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
-        remote_updates: VfsUpdateList,
+        remote_updates: VfsDiffList,
         local_vfs: &Vfs<SyncInfo>,
         remote_vfs: &Vfs<RemoteSyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
@@ -408,12 +408,12 @@ impl VfsUpdateList {
 /// An update that is ready to be applied
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ApplicableUpdate {
-    update: VfsNodeUpdate, // Fields order is important for the ord implementation
+    update: VfsDiff, // Fields order is important for the ord implementation
     target: UpdateTarget,
 }
 
 impl ApplicableUpdate {
-    pub fn new(target: UpdateTarget, update: &VfsNodeUpdate) -> Self {
+    pub fn new(target: UpdateTarget, update: &VfsDiff) -> Self {
         Self {
             target,
             update: update.clone(),
@@ -425,7 +425,7 @@ impl ApplicableUpdate {
         self.target
     }
 
-    pub fn update(&self) -> &VfsNodeUpdate {
+    pub fn update(&self) -> &VfsDiff {
         &self.update
     }
 
@@ -452,10 +452,10 @@ impl ApplicableUpdate {
     /// use brume::update::*;
     /// use brume::vfs::VirtualPathBuf;
     ///
-    /// let update = VfsNodeUpdate::dir_removed(VirtualPathBuf::new("/a/b").unwrap());
+    /// let update = VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap());
     /// let applicable = ApplicableUpdate::new(UpdateTarget::Local, &update);
     ///
-    /// let inverse_up = VfsNodeUpdate::dir_created(VirtualPathBuf::new("/a/b").unwrap());
+    /// let inverse_up = VfsDiff::dir_created(VirtualPathBuf::new("/a/b").unwrap());
     /// let inverse_app = ApplicableUpdate::new(UpdateTarget::Remote, &inverse_up);
     ///
     /// assert_eq!(applicable.invert(), inverse_app);
@@ -468,7 +468,7 @@ impl ApplicableUpdate {
     }
 }
 
-impl From<ApplicableUpdate> for VfsNodeUpdate {
+impl From<ApplicableUpdate> for VfsDiff {
     fn from(value: ApplicableUpdate) -> Self {
         value.update
     }
@@ -496,15 +496,15 @@ impl SortedVec<ApplicableUpdate> {
     ///
     /// let mut list = SortedVec::new();
     ///
-    /// let update_a = VfsNodeUpdate::dir_removed(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let update_a = VfsDiff::dir_removed(VirtualPathBuf::new("/dir/a").unwrap());
     /// let applicable_a = ApplicableUpdate::new(UpdateTarget::Local, &update_a);
     /// list.insert(applicable_a);
     ///
-    /// let update_b = VfsNodeUpdate::file_created(VirtualPathBuf::new("/dir/b").unwrap());
+    /// let update_b = VfsDiff::file_created(VirtualPathBuf::new("/dir/b").unwrap());
     /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Remote, &update_b);
     /// list.insert(applicable_b);
     ///
-    /// let update_c = VfsNodeUpdate::file_modified(VirtualPathBuf::new("/dir/c").unwrap());
+    /// let update_c = VfsDiff::file_modified(VirtualPathBuf::new("/dir/c").unwrap());
     /// let applicable_c = ApplicableUpdate::new(UpdateTarget::Both, &update_c);
     /// list.insert(applicable_c);
     ///
@@ -512,7 +512,7 @@ impl SortedVec<ApplicableUpdate> {
     /// assert_eq!(local.len(), 2);
     /// assert_eq!(remote.len(), 2);
     /// ```
-    pub fn split_local_remote(self) -> (Vec<VfsNodeUpdate>, Vec<VfsNodeUpdate>) {
+    pub fn split_local_remote(self) -> (Vec<VfsDiff>, Vec<VfsDiff>) {
         let mut local = Vec::new();
         let mut remote = Vec::new();
 
@@ -544,11 +544,11 @@ impl SortedVec<ApplicableUpdate> {
     ///
     /// let mut list = SortedVec::new();
     ///
-    /// let update_a = VfsNodeUpdate::file_modified(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let update_a = VfsDiff::file_modified(VirtualPathBuf::new("/dir/a").unwrap());
     /// let applicable_a = ApplicableUpdate::new(UpdateTarget::Local, &update_a);
     /// list.insert(applicable_a);
     ///
-    /// let update_b = VfsNodeUpdate::file_created(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let update_b = VfsDiff::file_created(VirtualPathBuf::new("/dir/a").unwrap());
     /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Remote, &update_b);
     /// list.insert(applicable_b.clone());
     ///
@@ -595,32 +595,32 @@ impl VirtualReconciledUpdate {
     }
 
     /// Create a new `Applicable` update with [`UpdateTarget::SelfFs`]
-    pub(crate) fn applicable_local(update: &VfsNodeUpdate) -> Self {
+    pub(crate) fn applicable_local(update: &VfsDiff) -> Self {
         Self::Applicable(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
     /// Create a new `Applicable` update with [`UpdateTarget::Remote`]
-    pub(crate) fn applicable_remote(update: &VfsNodeUpdate) -> Self {
+    pub(crate) fn applicable_remote(update: &VfsDiff) -> Self {
         Self::Applicable(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
     /// Create a new `Conflict` update with [`UpdateTarget::Local`]
-    pub(crate) fn conflict_local(update: &VfsNodeUpdate) -> Self {
+    pub(crate) fn conflict_local(update: &VfsDiff) -> Self {
         Self::Conflict(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
     /// Create a new `Conflict` update with [`UpdateTarget::Remote`]
-    pub(crate) fn conflict_remote(update: &VfsNodeUpdate) -> Self {
+    pub(crate) fn conflict_remote(update: &VfsDiff) -> Self {
         Self::Conflict(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
     /// Create a new `Conflict` updates with [`UpdateTarget::Both`]
-    pub(crate) fn conflict_both(update: &VfsNodeUpdate) -> Self {
+    pub(crate) fn conflict_both(update: &VfsDiff) -> Self {
         Self::Conflict(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 
     /// Create a new `NeedBackendCheck` updates with [`UpdateTarget::Both`]
-    pub(crate) fn backend_check_both(update: &VfsNodeUpdate) -> Self {
+    pub(crate) fn backend_check_both(update: &VfsDiff) -> Self {
         Self::NeedBackendCheck(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 
@@ -708,28 +708,28 @@ impl ReconciledUpdate {
     }
 
     /// Create a new `Applicable` update with [`UpdateTarget::Local`]
-    pub fn applicable_local(update: &VfsNodeUpdate) -> Self {
+    pub fn applicable_local(update: &VfsDiff) -> Self {
         Self::Applicable(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
     /// Create a new `Applicable` update with [`UpdateTarget::Remote`]
-    pub fn applicable_remote(update: &VfsNodeUpdate) -> Self {
+    pub fn applicable_remote(update: &VfsDiff) -> Self {
         Self::Applicable(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
     /// Create a new `Conflict` update with [`UpdateTarget::Local`]
-    pub fn conflict_local(update: &VfsNodeUpdate) -> Self {
+    pub fn conflict_local(update: &VfsDiff) -> Self {
         Self::Conflict(ApplicableUpdate::new(UpdateTarget::Local, update))
     }
 
     /// Create a new `Conflict` update with [`UpdateTarget::Remote`]
-    pub fn conflict_remote(update: &VfsNodeUpdate) -> Self {
+    pub fn conflict_remote(update: &VfsDiff) -> Self {
         Self::Conflict(ApplicableUpdate::new(UpdateTarget::Remote, update))
     }
 
     /// Create two new `Conflict` updates with [`UpdateTarget::Local`] and
     /// [`UpdateTarget::Remote`]
-    pub fn conflict_both(update: &VfsNodeUpdate) -> Self {
+    pub fn conflict_both(update: &VfsDiff) -> Self {
         Self::Conflict(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 }
@@ -866,7 +866,7 @@ pub enum AppliedUpdate<SyncInfo> {
     FileModified(AppliedFileUpdate<SyncInfo>),
     FileRemoved(VirtualPathBuf),
     FailedApplication(FailedUpdateApplication),
-    Conflict(VfsNodeUpdate),
+    Conflict(VfsDiff),
     //TODO: detect moves
 }
 
@@ -892,11 +892,11 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
 #[derive(Clone, Debug)]
 pub struct FailedUpdateApplication {
     error: FsBackendError,
-    update: VfsNodeUpdate,
+    update: VfsDiff,
 }
 
 impl FailedUpdateApplication {
-    pub fn new(update: VfsNodeUpdate, error: FsBackendError) -> Self {
+    pub fn new(update: VfsDiff, error: FsBackendError) -> Self {
         Self { update, error }
     }
 
@@ -904,7 +904,7 @@ impl FailedUpdateApplication {
         self.update.path()
     }
 
-    pub fn update(&self) -> &VfsNodeUpdate {
+    pub fn update(&self) -> &VfsDiff {
         &self.update
     }
 

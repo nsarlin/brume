@@ -10,7 +10,7 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::{
     concrete::{local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription, Named},
     filesystem::FileSystem,
-    update::{FailedUpdateApplication, IsModified, ModificationState, VfsNodeUpdate},
+    update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},
     vfs::{DirTree, FileMeta, NodeState, Vfs, VfsNode, VirtualPath, VirtualPathBuf},
 };
 
@@ -127,7 +127,7 @@ impl TestNode<'_> {
                 path.push(name);
 
                 let failed_update = FailedUpdateApplication::new(
-                    VfsNodeUpdate::file_created(path),
+                    VfsDiff::file_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 VfsNode::File(FileMeta::new_error(name, 0, failed_update))
@@ -137,7 +137,7 @@ impl TestNode<'_> {
                 path.push(name);
 
                 let failed_update = FailedUpdateApplication::new(
-                    VfsNodeUpdate::dir_created(path),
+                    VfsDiff::dir_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
 
@@ -219,7 +219,7 @@ impl TestNode<'_> {
                 path.push(name);
 
                 let failed_update = FailedUpdateApplication::new(
-                    VfsNodeUpdate::file_created(path),
+                    VfsDiff::file_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 VfsNode::File(FileMeta::new_error(name, 0, failed_update))
@@ -229,7 +229,7 @@ impl TestNode<'_> {
                 path.push(name);
 
                 let failed_update = FailedUpdateApplication::new(
-                    VfsNodeUpdate::dir_created(path),
+                    VfsDiff::dir_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 VfsNode::Dir(DirTree::new_error(name, failed_update))
@@ -288,7 +288,7 @@ impl TestNode<'_> {
             Self::FE(_, _) => panic!(),
             Self::DE(name, error) => {
                 let failed_update = FailedUpdateApplication::new(
-                    VfsNodeUpdate::file_created(VirtualPathBuf::root()),
+                    VfsDiff::file_created(VirtualPathBuf::root()),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
                 DirTree::new_error(name, failed_update)
