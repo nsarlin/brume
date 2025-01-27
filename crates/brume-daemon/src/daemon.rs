@@ -89,7 +89,7 @@ pub enum ErrorMode {
     Exit,
 }
 
-/// The daemon holds the list of the synchronized folders, and synchronize them regurlarly.
+/// The daemon holds the list of the synchronized folders, and synchronize them regularly.
 ///
 /// It can be queried by client applications through the [`Server`].
 pub struct Daemon {

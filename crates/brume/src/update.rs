@@ -52,7 +52,7 @@ pub enum VfsUpdateApplicationError {
     NameMismatch(#[from] NameMismatchError),
     #[error("the file at {0:?} already exists")]
     FileExists(VirtualPathBuf),
-    #[error("the dir at {0:?} alread exists")]
+    #[error("the dir at {0:?} already exists")]
     DirExists(VirtualPathBuf),
     #[error("cannot apply an update to the root dir itself")]
     PathIsRoot,
@@ -888,7 +888,7 @@ impl<SyncInfo> AppliedUpdate<SyncInfo> {
     }
 }
 
-/// An update that failed because an error occured on one of the concrete fs
+/// An update that failed because an error occurred on one of the concrete fs
 #[derive(Clone, Debug)]
 pub struct FailedUpdateApplication {
     error: FsBackendError,

@@ -17,6 +17,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: rustup update nightly && rustup component add --toolchain nightly rustfmt
+    - name: Spell Check Repo
+      uses: crate-ci/typos@v1.29.4
+    - name: Check doc
+      env:
+        RUSTDOCFLAGS: "-D warnings"
+      run: cargo doc --no-deps
     - name: Build
       run: cargo build
     - name: Format
@@ -25,7 +31,3 @@ jobs:
       run: cargo clippy --all-targets -- -Dwarnings
     - name: Run tests
       run: cargo test
-    - name: Check doc
-      env:
-        RUSTDOCFLAGS: "-D warnings"
-      run: cargo doc --no-deps

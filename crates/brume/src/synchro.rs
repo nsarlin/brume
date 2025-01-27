@@ -16,7 +16,7 @@ use crate::{
     Error,
 };
 
-/// State in which the [`Synchro`] can be after a call to [`full_sync`]
+/// Status in which the [`Synchro`] can be after a call to [`full_sync`]
 ///
 /// In case of successful sync, this is returned by `full_sync`. In that case, "Error" means
 /// that some individual nodes failed to synchronize but the VFS was successfully updated.
@@ -842,7 +842,7 @@ mod test {
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
 
-        // Everything should have been transfered except the file in error
+        // Everything should have been transferred except the file in error
         let expected_local = D(
             "",
             vec![
@@ -925,7 +925,7 @@ mod test {
 
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
 
-        // Everything should have been transfered except the file in error
+        // Everything should have been transferred except the file in error
         let expected_local = D(
             "",
             vec![
@@ -996,7 +996,7 @@ mod test {
         // sync with an Io error on a file
         assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
 
-        // Everything should have been transfered except the file in error
+        // Everything should have been transferred except the file in error
         let expected_local = D(
             "",
             vec![

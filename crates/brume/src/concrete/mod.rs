@@ -47,7 +47,7 @@ pub trait Named {
     const TYPE_NAME: &'static str;
 }
 
-/// A backend is used by the [`ConcreteFS`] to perfom io operations
+/// A backend is used by the [`ConcreteFS`] to perform io operations
 pub trait FSBackend:
     Named + Sized + TryFrom<Self::CreationInfo, Error = <Self as FSBackend>::IoError>
 {
