@@ -21,12 +21,12 @@
 //!
 //! [`VFS`]: crate::vfs::Vfs
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::HashSet};
 
 use futures::future::try_join_all;
 
 use crate::{
-    concrete::{ConcreteFS, FSBackend, FsBackendError, Named},
+    concrete::{ConcreteFS, ConcreteFileCloneResult, FSBackend, FsBackendError, Named},
     sorted_vec::{Sortable, SortedVec},
     vfs::{
         DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
@@ -110,13 +110,13 @@ pub enum ModificationState {
 /// Trait used for VFS node comparisons
 ///
 /// This trait is implemented for the "SyncInfo" types, to
-/// allow different node comparison stategies (for example based on timestamp or a revision id
+/// allow different node comparison strategies (for example based on timestamp or a revision id
 /// value). See [`NextcloudSyncInfo`] and [`LocalSyncInfo`] for examples.
 ///
 /// [`LocalSyncInfo`]: crate::concrete::local::LocalSyncInfo
 /// [`NextcloudSyncInfo`]: crate::concrete::nextcloud::NextcloudSyncInfo
 pub trait IsModified {
-    /// Tell if a node have been modified, and if possible also recusively answers for its children
+    /// Tell if a node have been modified, and if possible also recursively answers for its children
     fn modification_state(&self, reference: &Self) -> ModificationState;
 
     /// Return a boolean telling if the node itself have been modified
@@ -180,7 +180,7 @@ impl UpdateKind {
 }
 
 /// The target filesystem of an update, as defined in the synchro
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub enum UpdateTarget {
     Local,
     Remote,
@@ -530,11 +530,11 @@ impl SortedVec<ApplicableUpdate> {
         (local, remote)
     }
 
-    /// Remove duplicate updates that target the same nodes.
+    /// Remove duplicate updates that target the same nodes on the same FS.
     ///
-    /// Only the first update will be kept for a given path. This means that the priority will be
-    /// based on the order of the [`UpdateKind`] enum. In practice, file creation will be favored
-    /// over file modifications.
+    /// Only the first update will be kept for a given path and a given [`UpdateTarget`]. This means
+    /// that the priority will be based on the order of the [`UpdateKind`] enum. In practice,
+    /// file creation will be favored over file modifications.
     ///
     /// # Example
     /// ```
@@ -549,21 +549,32 @@ impl SortedVec<ApplicableUpdate> {
     /// list.insert(applicable_a);
     ///
     /// let update_b = VfsDiff::file_created(VirtualPathBuf::new("/dir/a").unwrap());
-    /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Remote, &update_b);
+    /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Local, &update_b);
     /// list.insert(applicable_b.clone());
     ///
+    /// let update_c = VfsDiff::file_created(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let applicable_c = ApplicableUpdate::new(UpdateTarget::Remote, &update_c);
+    /// list.insert(applicable_c.clone());
+    ///
+    /// let update_d = VfsDiff::file_created(VirtualPathBuf::new("/dir/d").unwrap());
+    /// let applicable_d = ApplicableUpdate::new(UpdateTarget::Remote, &update_d);
+    /// list.insert(applicable_d.clone());
+    ///
     /// let mut simplified = list.remove_duplicates();
-    /// assert_eq!(simplified.len(), 1);
+    /// assert_eq!(simplified.len(), 3);
     /// let first = simplified.pop().unwrap();
-    /// assert_eq!(first, applicable_b);
+    /// assert_eq!(first, applicable_d);
+    /// let second = simplified.pop().unwrap();
+    /// assert_eq!(second, applicable_c);
+    /// let third = simplified.pop().unwrap();
+    /// assert_eq!(third, applicable_b);
     /// ```
     pub fn remove_duplicates(self) -> Self {
-        let mut path = VirtualPathBuf::root();
+        let mut seen = HashSet::new();
         let mut result = Vec::new();
 
         for update in self.into_iter() {
-            if update.path() != path {
-                path = update.path().to_owned();
+            if seen.insert((update.path().to_owned(), update.target())) {
                 result.push(update);
             }
         }
@@ -791,100 +802,189 @@ impl SortedVec<ReconciledUpdate> {
 
 /// Represent a DirCreation update that has been successfully applied on the [`FSBackend`].
 #[derive(Clone, Debug)]
-pub struct AppliedDirCreation<SyncInfo> {
+pub struct AppliedDirCreation<SrcSyncInfo, DstSyncInfo> {
     path: VirtualPathBuf,
-    dir: DirTree<SyncInfo>,
+    src_dir: DirTree<SrcSyncInfo>,
+    dst_dir: DirTree<DstSyncInfo>,
 }
 
-impl<SyncInfo> AppliedDirCreation<SyncInfo> {
+impl<SrcSyncInfo, DstSyncInfo> AppliedDirCreation<SrcSyncInfo, DstSyncInfo> {
     /// Create a new `AppliedDirCreation`.
     ///
     /// `parent_path` is the path to the parent of the created dir. Since an update cannot create a
     /// root dir, it always exist.
-    pub fn new(parent_path: &VirtualPath, dir: DirTree<SyncInfo>) -> Self {
-        let name = dir.name();
+    pub fn new(
+        parent_path: &VirtualPath,
+        src_dir: DirTree<SrcSyncInfo>,
+        dst_dir: DirTree<DstSyncInfo>,
+    ) -> Self {
+        let name = src_dir.name();
         let mut path = parent_path.to_owned();
         path.push(name);
 
-        Self { path, dir }
-    }
-
-    pub fn path(&self) -> &VirtualPath {
-        &self.path
-    }
-}
-
-impl<SyncInfo> From<AppliedDirCreation<SyncInfo>> for DirTree<SyncInfo> {
-    fn from(value: AppliedDirCreation<SyncInfo>) -> Self {
-        value.dir
+        Self {
+            path,
+            src_dir,
+            dst_dir,
+        }
     }
 }
 
-/// Represent a File creation or modification update that has been successfully applied on the
+impl<SrcSyncInfo, DstSyncInfo> From<AppliedDirCreation<SrcSyncInfo, DstSyncInfo>>
+    for (VfsDirCreation<SrcSyncInfo>, VfsDirCreation<DstSyncInfo>)
+{
+    fn from(value: AppliedDirCreation<SrcSyncInfo, DstSyncInfo>) -> Self {
+        let src_update = VfsDirCreation {
+            path: value.path.clone(),
+            dir: value.src_dir,
+        };
+
+        let dst_update = VfsDirCreation {
+            path: value.path,
+            dir: value.dst_dir,
+        };
+
+        (src_update, dst_update)
+    }
+}
+
+/// Represents a File creation or modification update that has been successfully applied on the
 /// [`FSBackend`].
 #[derive(Clone, Debug)]
-pub struct AppliedFileUpdate<SyncInfo> {
+pub struct AppliedFileUpdate<SrcSyncInfo, DstSyncInfo> {
     path: VirtualPathBuf,
-    file_info: SyncInfo,
+    src_file_info: SrcSyncInfo,
+    dst_file_info: DstSyncInfo,
     file_size: u64,
 }
 
-impl<SyncInfo> AppliedFileUpdate<SyncInfo> {
-    pub fn new(path: &VirtualPath, file_size: u64, file_info: SyncInfo) -> Self {
+impl<SrcSyncInfo, DstSyncInfo> AppliedFileUpdate<SrcSyncInfo, DstSyncInfo> {
+    pub fn new(
+        path: &VirtualPath,
+        file_size: u64,
+        src_file_info: SrcSyncInfo,
+        dst_file_info: DstSyncInfo,
+    ) -> Self {
         Self {
             path: path.to_owned(),
             file_size,
-            file_info,
+            src_file_info,
+            dst_file_info,
         }
     }
 
-    pub fn path(&self) -> &VirtualPath {
-        &self.path
+    pub fn from_clone_result(
+        path: &VirtualPath,
+        clone_result: ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>,
+    ) -> Self {
+        let file_size = clone_result.file_size();
+        let (src_file_info, dst_file_info) = clone_result.into();
+        Self::new(path, file_size, src_file_info, dst_file_info)
     }
+}
 
-    pub fn file_size(&self) -> u64 {
-        self.file_size
-    }
+impl<SrcSyncInfo, DstSyncInfo> From<AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>>
+    for (VfsFileUpdate<SrcSyncInfo>, VfsFileUpdate<DstSyncInfo>)
+{
+    fn from(value: AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>) -> Self {
+        let src_update = VfsFileUpdate {
+            path: value.path.clone(),
+            file_info: value.src_file_info,
+            file_size: value.file_size,
+        };
 
-    pub fn into_sync_info(self) -> SyncInfo {
-        self.file_info
+        let dst_update = VfsFileUpdate {
+            path: value.path,
+            file_info: value.dst_file_info,
+            file_size: value.file_size,
+        };
+
+        (src_update, dst_update)
     }
 }
 
 /// An update that has been applied on a [`FSBackend`], and will be propagated to the [`Vfs`].
 ///
 /// For node creation or modification, this types holds the SyncInfo needed to apply the update on
-/// the `Vfs`. These SyncInfo must be fetched from the `FSBackend` immediatly after the update
-/// application for correctness.
+/// both `Vfs` the src and the dst one. The src Vfs is the one where the update originated as a
+/// [`VfsDiff`] object. The dst Vfs is the one where the update has been propagated. These SyncInfo
+/// must be fetched from the `FSBackend` immediately after the update application for correctness.
 ///
 /// [`Vfs`]: crate::vfs::Vfs
 #[derive(Clone, Debug)]
-pub enum AppliedUpdate<SyncInfo> {
-    DirCreated(AppliedDirCreation<SyncInfo>),
+pub enum AppliedUpdate<SrcSyncInfo, DstSyncInfo> {
+    DirCreated(AppliedDirCreation<SrcSyncInfo, DstSyncInfo>),
     DirRemoved(VirtualPathBuf),
-    FileCreated(AppliedFileUpdate<SyncInfo>),
-    FileModified(AppliedFileUpdate<SyncInfo>),
+    /// A dir was to be removed, but the application has been skipped because it did not exist on
+    /// dest
+    DirRemovedSkipped(VirtualPathBuf),
+    FileCreated(AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>),
+    FileModified(AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>),
     FileRemoved(VirtualPathBuf),
+    /// A file was to be removed, but the application has been skipped because it did not exist on
+    /// dest
+    FileRemovedSkipped(VirtualPathBuf),
     FailedApplication(FailedUpdateApplication),
-    Conflict(VfsDiff),
     //TODO: detect moves
 }
 
-impl<SyncInfo> AppliedUpdate<SyncInfo> {
-    pub fn path(&self) -> &VirtualPath {
-        match self {
-            AppliedUpdate::DirCreated(update) => update.path(),
-            AppliedUpdate::FileCreated(update) | AppliedUpdate::FileModified(update) => {
-                update.path()
+impl<SrcSyncInfo, DstSyncInfo> From<AppliedUpdate<SrcSyncInfo, DstSyncInfo>>
+    for (VfsUpdate<SrcSyncInfo>, Option<VfsUpdate<DstSyncInfo>>)
+{
+    fn from(value: AppliedUpdate<SrcSyncInfo, DstSyncInfo>) -> Self {
+        match value {
+            AppliedUpdate::DirCreated(dir_creation) => {
+                let (src_update, dst_update) = dir_creation.into();
+                (
+                    VfsUpdate::DirCreated(src_update),
+                    Some(VfsUpdate::DirCreated(dst_update)),
+                )
             }
-            AppliedUpdate::DirRemoved(path) | AppliedUpdate::FileRemoved(path) => path,
-            AppliedUpdate::FailedApplication(failed_update) => failed_update.path(),
-            AppliedUpdate::Conflict(update) => update.path(),
+            AppliedUpdate::DirRemoved(path) => (
+                VfsUpdate::DirRemoved(path.clone()),
+                Some(VfsUpdate::DirRemoved(path)),
+            ),
+            AppliedUpdate::DirRemovedSkipped(path) => (VfsUpdate::DirRemoved(path.clone()), None),
+            AppliedUpdate::FileCreated(file_update) => {
+                let (src_update, dst_update) = file_update.into();
+                (
+                    VfsUpdate::FileCreated(src_update),
+                    Some(VfsUpdate::FileCreated(dst_update)),
+                )
+            }
+            AppliedUpdate::FileModified(file_update) => {
+                let (src_update, dst_update) = file_update.into();
+                (
+                    VfsUpdate::FileModified(src_update),
+                    Some(VfsUpdate::FileModified(dst_update)),
+                )
+            }
+            AppliedUpdate::FileRemoved(path) => (
+                VfsUpdate::FileRemoved(path.clone()),
+                Some(VfsUpdate::FileRemoved(path)),
+            ),
+            AppliedUpdate::FileRemovedSkipped(path) => (VfsUpdate::FileRemoved(path.clone()), None),
+            AppliedUpdate::FailedApplication(failed_update) => {
+                // Errors are applied on the source Vfs to make them trigger a resync, and not on
+                // the dest Vfs because the node might not even exist
+                (VfsUpdate::FailedApplication(failed_update.clone()), None)
+            }
         }
     }
+}
 
-    pub fn is_err(&self) -> bool {
-        matches!(self, Self::FailedApplication(_))
+impl<SrcSyncInfo, DstSyncInfo> AppliedUpdate<SrcSyncInfo, DstSyncInfo> {
+    pub fn path(&self) -> &VirtualPath {
+        match self {
+            AppliedUpdate::DirCreated(dir_creation) => &dir_creation.path,
+            AppliedUpdate::DirRemoved(path) => path,
+            AppliedUpdate::DirRemovedSkipped(path) => path,
+            AppliedUpdate::FileCreated(file_update) => &file_update.path,
+            AppliedUpdate::FileModified(file_update) => &file_update.path,
+            AppliedUpdate::FileRemoved(path) => path,
+            AppliedUpdate::FileRemovedSkipped(path) => path,
+            AppliedUpdate::FailedApplication(failed_update) => failed_update.path(),
+        }
     }
 }
 
@@ -910,5 +1010,118 @@ impl FailedUpdateApplication {
 
     pub fn error(&self) -> &FsBackendError {
         &self.error
+    }
+}
+
+/// Represents a DirCreation update that has been successfully applied on the [`FSBackend`] and can
+/// be applied to the Vfs.
+#[derive(Clone, Debug)]
+pub struct VfsDirCreation<SyncInfo> {
+    path: VirtualPathBuf,
+    dir: DirTree<SyncInfo>,
+}
+
+impl<SyncInfo> VfsDirCreation<SyncInfo> {
+    /// Creates a new `VfsDirCreation`.
+    ///
+    /// `parent_path` is the path to the parent of the created dir. Since an update cannot create a
+    /// root dir, it always exist.
+    pub fn new(parent_path: &VirtualPath, dir: DirTree<SyncInfo>) -> Self {
+        let name = dir.name();
+        let mut path = parent_path.to_owned();
+        path.push(name);
+
+        Self {
+            path: path.to_owned(),
+            dir,
+        }
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+}
+
+impl<SyncInfo> From<VfsDirCreation<SyncInfo>> for DirTree<SyncInfo> {
+    fn from(value: VfsDirCreation<SyncInfo>) -> Self {
+        value.dir
+    }
+}
+
+/// Represents a File creation or modification update that has been successfully applied on the
+/// [`FSBackend`] and can be applied to a VFS.
+#[derive(Clone, Debug)]
+pub struct VfsFileUpdate<SyncInfo> {
+    path: VirtualPathBuf,
+    file_info: SyncInfo,
+    file_size: u64,
+}
+
+impl<SyncInfo> VfsFileUpdate<SyncInfo> {
+    pub fn new(path: &VirtualPath, file_size: u64, file_info: SyncInfo) -> Self {
+        Self {
+            path: path.to_owned(),
+            file_info,
+            file_size,
+        }
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    pub fn into_sync_info(self) -> SyncInfo {
+        self.file_info
+    }
+}
+
+/// An update that can be applied to the [`Vfs`] at the end of the update lifecycle.
+#[derive(Debug)]
+pub enum VfsUpdate<SyncInfo> {
+    DirCreated(VfsDirCreation<SyncInfo>),
+    DirRemoved(VirtualPathBuf),
+    FileCreated(VfsFileUpdate<SyncInfo>),
+    FileModified(VfsFileUpdate<SyncInfo>),
+    FileRemoved(VirtualPathBuf),
+    FailedApplication(FailedUpdateApplication),
+    Conflict(VfsDiff),
+    //TODO: detect moves
+}
+
+impl<SyncInfo> VfsUpdate<SyncInfo> {
+    pub fn path(&self) -> &VirtualPath {
+        match self {
+            Self::DirCreated(update) => update.path(),
+            Self::FileCreated(update) | Self::FileModified(update) => update.path(),
+            Self::DirRemoved(path) | Self::FileRemoved(path) => path,
+            Self::FailedApplication(failed_update) => failed_update.path(),
+            Self::Conflict(update) => update.path(),
+        }
+    }
+
+    pub fn is_err(&self) -> bool {
+        matches!(self, Self::FailedApplication(_))
+    }
+
+    pub fn is_removal(&self) -> bool {
+        matches!(self, Self::DirRemoved(_) | Self::FileRemoved(_))
+    }
+
+    pub fn is_creation(&self) -> bool {
+        matches!(self, Self::DirCreated(_) | Self::FileCreated(_))
+    }
+}
+
+impl<SyncInfo> Sortable for VfsUpdate<SyncInfo> {
+    // Sort by path, since reconciliation guarantees that there will be only one update for each
+    // path
+    type Key = VirtualPath;
+
+    fn key(&self) -> &Self::Key {
+        self.path()
     }
 }

@@ -126,6 +126,38 @@ impl<T: FSBackend> Named for T {
     const TYPE_NAME: &'static str = T::SyncInfo::TYPE_NAME;
 }
 
+/// Return value of a successful [`ConcreteFS::clone_file`].
+///
+/// It holds up-to-date values for the syncinfo on the source and destination filesystems, that can
+/// be used to update the [`Vfs`] accordingly.
+pub struct ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo> {
+    src_file_info: SrcSyncInfo,
+    dst_file_info: DstSyncInfo,
+    file_size: u64,
+}
+
+impl<SrcSyncInfo, DstSyncInfo> ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo> {
+    pub fn new(file_size: u64, src_file_info: SrcSyncInfo, dst_file_info: DstSyncInfo) -> Self {
+        Self {
+            file_size,
+            src_file_info,
+            dst_file_info,
+        }
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+}
+
+impl<SrcSyncInfo, DstSyncInfo> From<ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>>
+    for (SrcSyncInfo, DstSyncInfo)
+{
+    fn from(value: ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>) -> Self {
+        (value.src_file_info, value.dst_file_info)
+    }
+}
+
 /// Represents a concrete underlying filesystem.
 ///
 /// It holds a [`FSBackend`] object, which provides the actual implementation for filesystem
@@ -175,15 +207,16 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
     /// Clone a file from `ref_concrete` into the concrete fs of self.
     ///
     /// Return the syncinfo associated with the created file and the number of bytes written.
-    pub async fn clone_file<OtherBackend: FSBackend>(
+    pub async fn clone_file<RefBackend: FSBackend>(
         &self,
-        ref_concrete: &ConcreteFS<OtherBackend>,
+        ref_concrete: &ConcreteFS<RefBackend>,
         path: &VirtualPath,
-    ) -> Result<(Backend::SyncInfo, u64), FsBackendError> {
+    ) -> Result<ConcreteFileCloneResult<RefBackend::SyncInfo, Backend::SyncInfo>, FsBackendError>
+    {
         info!(
             "Cloning file {:?} from {} to {}",
             path,
-            OtherBackend::TYPE_NAME,
+            RefBackend::TYPE_NAME,
             Backend::TYPE_NAME
         );
         let counter = Arc::new(AtomicU64::new(0));
@@ -196,18 +229,23 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 e.into()
             })?
             .count_bytes(counter.clone());
-        let res = self
-            .backend()
-            .write_file(path, stream)
+        let dst_info = self.backend().write_file(path, stream).await.map_err(|e| {
+            error!("Failed to clone file {path:?}: {e:?}");
+            e.into()
+        })?;
+        let src_info = ref_concrete
+            .backend
+            .get_sync_info(path)
             .await
             .map_err(|e| {
-                error!("Failed to clone file {path:?}: {e:?}");
+                error!("Failed to read src sync info {path:?}: {e:?}");
                 e.into()
-            })
-            .map(|info| (info, counter.load(std::sync::atomic::Ordering::SeqCst)))?;
+            })?;
+
+        let size = counter.load(std::sync::atomic::Ordering::SeqCst);
 
         info!("File {path:?} successfully cloned");
 
-        Ok(res)
+        Ok(ConcreteFileCloneResult::new(size, src_info, dst_info))
     }
 }

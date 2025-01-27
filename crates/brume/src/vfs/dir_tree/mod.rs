@@ -224,8 +224,19 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// If there were no child with this name returns None. If a child exists but is of the wrong
     /// kind, returns Some(false).
     fn remove_child_kind(&mut self, child_name: &str, node_kind: NodeKind) -> Option<bool> {
-        self.children
-            .remove_if(child_name, |child| child.kind() == node_kind)
+        self.remove_child_if(child_name, |child| child.kind() == node_kind)
+    }
+
+    /// Removes a child if its node matches the provided predicate.
+    ///
+    /// If there were no child with this name returns None. If a child exists but the predicates is
+    /// not verified, returns Some(false).
+    pub fn remove_child_if<F: FnOnce(&VfsNode<SyncInfo>) -> bool>(
+        &mut self,
+        child_name: &str,
+        condition: F,
+    ) -> Option<bool> {
+        self.children.remove_if(child_name, condition)
     }
 
     /// Removes a child dir from this directory.
@@ -411,7 +422,7 @@ impl<SyncInfo: IsModified> DirTree<SyncInfo> {
             // The SyncInfo tells us that nothing has been modified for this dir, but can't
             // speak about its children. So we need to walk them.
             ModificationState::ShallowUnmodified => {
-                // Since the current dir is unmodifed, both self and other should have the same
+                // Since the current dir is unmodified, both self and other should have the same
                 // number of children with the same names.
                 if self.children.len() != other.children.len() {
                     return Err(DiffError::InvalidSyncInfo(dir_path));
@@ -447,9 +458,7 @@ impl<SyncInfo: IsModified> DirTree<SyncInfo> {
                         &other.children,
                         |self_child| -> Result<_, DiffError> {
                             let mut res = SortedVec::new();
-                            if !self_child.can_skip_removal() {
-                                res.insert(self_child.to_removed_diff(&dir_path));
-                            }
+                            res.insert(self_child.to_removed_diff(&dir_path));
                             Ok(res)
                         },
                         |self_child, other_child| self_child.diff(other_child, &dir_path),
@@ -625,6 +634,21 @@ impl<SyncInfo> VfsNode<SyncInfo> {
                     } else {
                         None
                     }
+                }
+            }
+        }
+    }
+
+    pub fn delete_node(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
+        match self {
+            VfsNode::Dir(dir) => dir.delete_node(path),
+            VfsNode::File(file) => {
+                if path.len() == 1 && file.name() == path.name() {
+                    Err(DeleteNodeError::PathIsRoot)
+                } else {
+                    Err(DeleteNodeError::InvalidPath(InvalidPathError::NotFound(
+                        path.to_owned(),
+                    )))
                 }
             }
         }

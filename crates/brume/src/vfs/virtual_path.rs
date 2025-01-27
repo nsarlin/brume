@@ -258,7 +258,7 @@ impl<'a> Iterator for VirtualPathIterator<'a> {
 
 /// Similar to the distinction with Path and PathBuf, this is a VirtualPath that owns the underlying
 /// data.
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Clone)]
 #[repr(transparent)]
 pub struct VirtualPathBuf {
     path: String,

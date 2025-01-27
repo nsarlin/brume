@@ -14,16 +14,22 @@ pub use virtual_path::*;
 
 use crate::{
     update::{
-        AppliedUpdate, DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList,
+        DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList, VfsUpdate,
         VfsUpdateApplicationError,
     },
     NameMismatchError,
 };
 
-/// The virtual representation of a file system, local or remote.
+/// The virtual in-memory representation of a file system.
+///
+/// The VFS serves 2 purposes
+/// - Detecting [`updates`] by comparing its structure and metadata at different points in time
+/// - Storing status information such as errors or conflicts
 ///
 /// `SyncInfo` is a metadata type that will be stored with FS nodes and used for more efficient VFS
 /// comparison, using their implementation of the [`IsModified`] trait.
+///
+/// [`updates`]: crate::update
 #[derive(Debug)]
 pub struct Vfs<SyncInfo> {
     root: VfsNode<SyncInfo>,
@@ -91,24 +97,16 @@ impl<SyncInfo> Vfs<SyncInfo> {
             _ => None,
         }
     }
+}
 
-    /// Applies a list of updates to the VFS, by calling [`Self::apply_update`] on each of them.
-    pub fn apply_updates_list(
-        &mut self,
-        updates: Vec<AppliedUpdate<SyncInfo>>,
-    ) -> Result<(), VfsUpdateApplicationError> {
-        for update in updates {
-            self.apply_update(update)?;
-        }
-        Ok(())
-    }
-
+impl<SyncInfo: Clone> Vfs<SyncInfo> {
     /// Applies an update to the Vfs, by adding or removing nodes.
     ///
-    /// The created or modified nodes use the SyncInfo from the [`AppliedUpdate`].
+    /// The created or modified nodes uses the SyncInfo from the [`VfsUpdate`].
     pub fn apply_update(
         &mut self,
-        update: AppliedUpdate<SyncInfo>,
+        update: VfsUpdate<SyncInfo>,
+        loaded_vfs: &Vfs<SyncInfo>,
     ) -> Result<(), VfsUpdateApplicationError> {
         let path = update.path().to_owned();
 
@@ -119,8 +117,14 @@ impl<SyncInfo> Vfs<SyncInfo> {
         // Invalidate parent sync info because its content has been changed
         parent.force_resync();
 
+        // Remove the child if in error. It will be restored as Ok or as an Error based on the
+        // result of the last concrete application attempt
+        parent.remove_child_if(update.path().name(), |child| {
+            child.state().is_err() && update.is_creation()
+        });
+
         match update {
-            AppliedUpdate::DirCreated(update) => {
+            VfsUpdate::DirCreated(update) => {
                 let child = VfsNode::Dir(update.into());
 
                 if path.name() != child.name() {
@@ -136,12 +140,12 @@ impl<SyncInfo> Vfs<SyncInfo> {
                     Err(VfsUpdateApplicationError::DirExists(path.to_owned()))
                 }
             }
-            AppliedUpdate::DirRemoved(path) => self
+            VfsUpdate::DirRemoved(path) => self
                 .root_mut()
                 .as_dir_mut()?
                 .delete_dir(&path)
                 .map_err(|e| e.into()),
-            AppliedUpdate::FileCreated(update) => {
+            VfsUpdate::FileCreated(update) => {
                 let child = VfsNode::File(FileMeta::new(
                     path.name(),
                     update.file_size(),
@@ -153,45 +157,66 @@ impl<SyncInfo> Vfs<SyncInfo> {
                     Err(VfsUpdateApplicationError::FileExists(path.to_owned()))
                 }
             }
-            AppliedUpdate::FileModified(update) => {
+            VfsUpdate::FileModified(update) => {
                 let file = self.root_mut().find_file_mut(update.path())?;
                 file.set_size(update.file_size());
                 let state = file.state_mut();
                 *state = NodeState::Ok(update.into_sync_info());
                 Ok(())
             }
-            AppliedUpdate::FileRemoved(path) => self
+            VfsUpdate::FileRemoved(path) => self
                 .root_mut()
                 .as_dir_mut()?
                 .delete_file(&path)
                 .map_err(|e| e.into()),
-            AppliedUpdate::FailedApplication(failure) => {
-                let node = self
-                    .root_mut()
-                    .find_node_mut(failure.path())
+            VfsUpdate::FailedApplication(failure) => {
+                let mut node = loaded_vfs
+                    .find_node(failure.path())
+                    // If not found on the loaded vfs, it might have been removed so we try to get
+                    // the node on the status one
+                    .or_else(|| self.find_node(failure.path()))
                     .ok_or_else(|| {
                         VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(
                             failure.path().to_owned(),
                         ))
-                    })?;
+                    })?
+                    .clone();
 
                 let state = NodeState::Error(failure);
                 node.set_state(state);
 
+                // Ok to unwrap because we checked earlier that "parent" exists
+                let parent = self
+                    .root_mut()
+                    .find_dir_mut(path.parent().unwrap())
+                    .unwrap();
+                parent.replace_child(node);
+
                 Ok(())
             }
-            AppliedUpdate::Conflict(update) => {
-                let node = self
-                    .root_mut()
-                    .find_node_mut(update.path())
+            VfsUpdate::Conflict(update) => {
+                let mut node = loaded_vfs
+                    .find_node(update.path())
+                    // If not found on the loaded vfs, it might have been removed so we try to get
+                    // the node on the status one
+                    .or_else(|| self.find_node(update.path()))
                     .ok_or_else(|| {
                         VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(
                             update.path().to_owned(),
                         ))
-                    })?;
+                    })?
+                    .clone();
 
                 let state = NodeState::Conflict(update);
                 node.set_state(state);
+
+                // Ok to unwrap because we checked earlier that "parent" exists
+                let parent = self
+                    .root_mut()
+                    .find_dir_mut(path.parent().unwrap())
+                    .unwrap();
+
+                parent.replace_child(node);
 
                 Ok(())
             }
@@ -259,7 +284,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
 mod test {
     use crate::{
         test_utils::ShallowTestSyncInfo,
-        update::{AppliedDirCreation, AppliedFileUpdate},
+        update::{VfsDirCreation, VfsFileUpdate},
     };
 
     use super::*;
@@ -297,14 +322,13 @@ mod test {
         .into_node();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
-        let update = AppliedUpdate::DirCreated(AppliedDirCreation::new(
+        let update = VfsUpdate::DirCreated(VfsDirCreation::new(
             &VirtualPathBuf::new("/e/g").unwrap(),
             new_dir,
         ));
-
-        vfs.apply_update(update).unwrap();
-
         let ref_vfs = Vfs::new(updated);
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
@@ -321,11 +345,10 @@ mod test {
         )
         .into_node();
 
-        let update = AppliedUpdate::DirRemoved(VirtualPathBuf::new("/e/g").unwrap());
-
-        vfs.apply_update(update).unwrap();
-
+        let update = VfsUpdate::DirRemoved(VirtualPathBuf::new("/e/g").unwrap());
         let ref_vfs = Vfs::new(updated);
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
@@ -343,15 +366,14 @@ mod test {
         .into_node();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = AppliedUpdate::FileCreated(AppliedFileUpdate::new(
+        let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
             &VirtualPathBuf::new("/e/g/file.bin").unwrap(),
             0,
             new_file_info,
         ));
-
-        vfs.apply_update(update).unwrap();
-
         let ref_vfs = Vfs::new(updated);
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
@@ -369,15 +391,14 @@ mod test {
         .into_node();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = AppliedUpdate::FileModified(AppliedFileUpdate::new(
+        let update = VfsUpdate::FileModified(VfsFileUpdate::new(
             &VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             0,
             new_file_info,
         ));
-
-        vfs.apply_update(update).unwrap();
-
         let ref_vfs = Vfs::new(updated);
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
@@ -394,11 +415,10 @@ mod test {
         )
         .into_node();
 
-        let update = AppliedUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f2.pdf").unwrap());
-
-        vfs.apply_update(update).unwrap();
-
+        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f2.pdf").unwrap());
         let ref_vfs = Vfs::new(updated);
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
     }
@@ -432,14 +452,13 @@ mod test {
         .into_node();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
-        let update = AppliedUpdate::DirCreated(AppliedDirCreation::new(
+        let update = VfsUpdate::DirCreated(VfsDirCreation::new(
             &VirtualPathBuf::new("/").unwrap(),
             new_dir,
         ));
-
-        vfs.apply_update(update).unwrap();
-
         let ref_vfs = Vfs::new(updated);
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
@@ -455,11 +474,10 @@ mod test {
         )
         .into_node();
 
-        let update = AppliedUpdate::DirRemoved(VirtualPathBuf::new("/e").unwrap());
-
-        vfs.apply_update(update).unwrap();
-
+        let update = VfsUpdate::DirRemoved(VirtualPathBuf::new("/e").unwrap());
         let ref_vfs = Vfs::new(updated);
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
@@ -478,15 +496,14 @@ mod test {
         .into_node();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = AppliedUpdate::FileCreated(AppliedFileUpdate::new(
+        let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
             &VirtualPathBuf::new("/file.bin").unwrap(),
             0,
             new_file_info,
         ));
-
-        vfs.apply_update(update).unwrap();
-
         let ref_vfs = Vfs::new(updated.clone());
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
@@ -494,25 +511,19 @@ mod test {
         let mut vfs = ref_vfs;
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = AppliedUpdate::FileModified(AppliedFileUpdate::new(
+        let update = VfsUpdate::FileModified(VfsFileUpdate::new(
             &VirtualPathBuf::new("/file.bin").unwrap(),
             0,
             new_file_info,
         ));
-
-        vfs.apply_update(update).unwrap();
-
         let ref_vfs = Vfs::new(updated.clone());
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
         // Test file removal
         let mut vfs = ref_vfs;
-
-        let update = AppliedUpdate::FileRemoved(VirtualPathBuf::new("/file.bin").unwrap());
-
-        vfs.apply_update(update).unwrap();
-
         let updated = D(
             "",
             vec![
@@ -524,6 +535,10 @@ mod test {
         .into_node();
 
         let ref_vfs = Vfs::new(updated);
+
+        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/file.bin").unwrap());
+
+        vfs.apply_update(update, &ref_vfs).unwrap();
 
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
     }
@@ -542,28 +557,29 @@ mod test {
 
         // Test invalid path
         let mut vfs = Vfs::new(base.clone());
+        let ref_vfs = Vfs::new(base.clone());
 
-        let update = AppliedUpdate::FileRemoved(VirtualPathBuf::new("/e/f/h").unwrap());
+        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/e/f/h").unwrap());
 
-        assert!(vfs.apply_update(update).is_err());
+        assert!(vfs.apply_update(update, &ref_vfs).is_err());
 
         // Test double create
         let mut vfs = Vfs::new(base.clone());
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = AppliedUpdate::FileCreated(AppliedFileUpdate::new(
+        let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
             &VirtualPathBuf::new("/e/g/tmp.txt").unwrap(),
             0,
             new_file_info,
         ));
 
-        assert!(vfs.apply_update(update).is_err());
+        assert!(vfs.apply_update(update, &ref_vfs).is_err());
 
         // Test double remove
         let mut vfs = Vfs::new(base.clone());
 
-        let update = AppliedUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f3.doc").unwrap());
+        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f3.doc").unwrap());
 
-        assert!(vfs.apply_update(update).is_err());
+        assert!(vfs.apply_update(update, &ref_vfs).is_err());
     }
 }
