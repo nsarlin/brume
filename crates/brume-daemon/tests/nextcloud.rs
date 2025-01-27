@@ -109,8 +109,8 @@ async fn main() {
     let concrete_b: LocalDir = LocalDirCreationInfo::new(dir_b.path()).try_into().unwrap();
     let mut fs_b = FileSystem::new(concrete_b);
 
-    fs_a.update_vfs().await.unwrap();
-    fs_b.update_vfs().await.unwrap();
+    fs_a.diff_vfs().await.unwrap();
+    fs_b.diff_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
 
     // Remove a file on one side
@@ -123,8 +123,8 @@ async fn main() {
         exit(1)
     }
 
-    fs_a.update_vfs().await.unwrap();
-    fs_b.update_vfs().await.unwrap();
+    fs_a.diff_vfs().await.unwrap();
+    fs_b.diff_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
 
     // Modify a file
@@ -142,8 +142,8 @@ async fn main() {
         exit(1)
     }
 
-    fs_a.update_vfs().await.unwrap();
-    fs_b.update_vfs().await.unwrap();
+    fs_a.diff_vfs().await.unwrap();
+    fs_b.diff_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
     let content_b = std::fs::read(dir_a.path().to_path_buf().join("Templates/Readme.md")).unwrap();
     assert_eq!(content_a, content_b.as_slice());
@@ -158,8 +158,8 @@ async fn main() {
         exit(1)
     }
 
-    fs_a.update_vfs().await.unwrap();
-    fs_b.update_vfs().await.unwrap();
+    fs_a.diff_vfs().await.unwrap();
+    fs_b.diff_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
 
     // Create a file
@@ -177,8 +177,8 @@ async fn main() {
         exit(1)
     }
 
-    fs_a.update_vfs().await.unwrap();
-    fs_b.update_vfs().await.unwrap();
+    fs_a.diff_vfs().await.unwrap();
+    fs_b.diff_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
     let content_b = std::fs::read(dir_a.path().to_path_buf().join("testdir/testfile")).unwrap();
     assert_eq!(content_a, content_b.as_slice());
@@ -192,8 +192,8 @@ async fn main() {
         exit(1)
     }
 
-    fs_a.update_vfs().await.unwrap();
-    fs_b.update_vfs().await.unwrap();
+    fs_a.diff_vfs().await.unwrap();
+    fs_b.diff_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
 
     // Test deletion

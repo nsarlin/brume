@@ -11,7 +11,7 @@ use crate::{
     concrete::{ConcreteUpdateApplicationError, FSBackend},
     filesystem::FileSystem,
     sorted_vec::SortedVec,
-    update::{AppliedUpdate, ReconciledUpdate, VfsDiff, VfsDiffList},
+    update::{AppliedUpdate, ReconciledUpdate, VfsDiff, VfsDiffList, VfsUpdate},
     vfs::{NodeState, VirtualPath},
     Error,
 };
@@ -112,7 +112,7 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     ///
     /// See [`crate::update`] for more information about the update process.
     pub async fn full_sync(&mut self) -> Result<SynchroStatus, Error> {
-        let (local_diff, remote_diff) = self.update_vfs().await?;
+        let (local_diff, remote_diff) = self.diff_vfs().await?;
 
         let reconciled = self.reconcile(local_diff, remote_diff).await?;
 
@@ -122,12 +122,10 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
             .map_err(|(e, name)| Error::concrete_application(name, e))?;
 
         self.local
-            .vfs_mut()
-            .apply_updates_list(local_applied)
+            .apply_updates_list_vfs(local_applied)
             .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))?;
         self.remote
-            .vfs_mut()
-            .apply_updates_list(remote_applied)
+            .apply_updates_list_vfs(remote_applied)
             .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
 
         Ok(self.get_status())
@@ -156,7 +154,11 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         local_updates: VfsDiffList,
         remote_updates: VfsDiffList,
     ) -> Result<SortedVec<ReconciledUpdate>, Error> {
-        let merged = local_updates.merge(remote_updates, self.local.vfs(), self.remote.vfs())?;
+        let merged = local_updates.merge(
+            remote_updates,
+            self.local.loaded_vfs(),
+            self.remote.loaded_vfs(),
+        )?;
 
         let concrete_merged = merged
             .resolve_concrete(self.local.concrete(), self.remote.concrete())
@@ -177,13 +179,14 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         updates: SortedVec<ReconciledUpdate>,
     ) -> Result<
         (
-            Vec<AppliedUpdate<LocalBackend::SyncInfo>>,
-            Vec<AppliedUpdate<RemoteBackend::SyncInfo>>,
+            SortedVec<VfsUpdate<LocalBackend::SyncInfo>>,
+            SortedVec<VfsUpdate<RemoteBackend::SyncInfo>>,
         ),
         (ConcreteUpdateApplicationError, &'static str),
     > {
         let mut applicables = SortedVec::new();
         let mut conflicts = SortedVec::new();
+
         for update in updates {
             match update {
                 ReconciledUpdate::Applicable(applicable) => {
@@ -196,7 +199,8 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
                         // source Vfs. Instead, store a "reverse" update in the destination
                         // directory. For example, if the update was a removed dir in src, instead
                         // we store a created dir in dest.
-                        conflicts.insert(update.invert());
+                        conflicts.insert(update.clone().invert());
+                        conflicts.insert(update);
                     } else {
                         conflicts.insert(update);
                     }
@@ -226,46 +230,42 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
             remote_futures.map_err(|e| (e, RemoteBackend::TYPE_NAME))
         )?;
 
-        // Errors are applied on the source Vfs to make them trigger a resync, but they are detected
-        // on the target side. So we need to move them from one fs to the other.
         let mut local_res = Vec::new();
-        let mut local_failed = Vec::new();
-        for applied in local_applied.into_iter().flatten() {
-            match applied {
-                AppliedUpdate::FailedApplication(failed_update) => {
-                    local_failed.push(AppliedUpdate::FailedApplication(failed_update))
-                }
-                _ => local_res.push(applied),
-            }
-        }
-
         let mut remote_res = Vec::new();
-        let mut remote_failed = Vec::new();
-        for applied in remote_applied.into_iter().flatten() {
-            match applied {
-                AppliedUpdate::FailedApplication(failed_update) => {
-                    remote_failed.push(AppliedUpdate::FailedApplication(failed_update))
-                }
-                _ => remote_res.push(applied),
+
+        for applied in local_applied.into_iter().flatten() {
+            let (remote, local) = applied.into();
+            remote_res.push(remote);
+            if let Some(local) = local {
+                local_res.push(local);
             }
         }
 
-        local_res.extend(remote_failed);
+        for applied in remote_applied.into_iter().flatten() {
+            let (local, remote) = applied.into();
+            local_res.push(local);
+            if let Some(remote) = remote {
+                remote_res.push(remote);
+            }
+        }
+
         local_res.extend(
             local_conflicts
                 .clone()
                 .into_iter()
-                .map(|update| AppliedUpdate::Conflict(update.clone())),
+                .map(|update| VfsUpdate::Conflict(update.clone())),
         );
-        remote_res.extend(local_failed);
         remote_res.extend(
             remote_conflicts
                 .clone()
                 .into_iter()
-                .map(|update| AppliedUpdate::Conflict(update.clone())),
+                .map(|update| VfsUpdate::Conflict(update.clone())),
         );
 
-        Ok((local_res, remote_res))
+        Ok((
+            SortedVec::from_vec(local_res),
+            SortedVec::from_vec(remote_res),
+        ))
     }
 
     /// Applies an update to the concrete FS and update the VFS accordingly
@@ -284,12 +284,18 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
                     // from one fs to the other.
                     if let AppliedUpdate::FailedApplication(failed_update) = update {
                         self.remote
-                            .vfs_mut()
-                            .apply_update(AppliedUpdate::FailedApplication(failed_update))
+                            .apply_update_vfs(VfsUpdate::FailedApplication(failed_update))
                     } else {
-                        self.local.vfs_mut().apply_update(update)
+                        let (remote, local) = update.into();
+                        self.remote.apply_update_vfs(remote).and_then(|_| {
+                            if let Some(local) = local {
+                                self.local.apply_update_vfs(local)
+                            } else {
+                                Ok(())
+                            }
+                        })
                     }
-                    .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
+                    .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))?;
                 }
                 Ok(())
             }
@@ -298,7 +304,7 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
                     .remote
                     .apply_update_concrete(self.local, update)
                     .await
-                    .unwrap();
+                    .map_err(|e| Error::concrete_application(RemoteBackend::TYPE_NAME, e))?;
 
                 for update in applied {
                     // Errors are applied on the source Vfs to make them trigger a resync, but they
@@ -306,10 +312,16 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
                     // from one fs to the other.
                     if let AppliedUpdate::FailedApplication(failed_update) = update {
                         self.local
-                            .vfs_mut()
-                            .apply_update(AppliedUpdate::FailedApplication(failed_update))
+                            .apply_update_vfs(VfsUpdate::FailedApplication(failed_update))
                     } else {
-                        self.remote.vfs_mut().apply_update(update)
+                        let (local, remote) = update.into();
+                        self.local.apply_update_vfs(local).and_then(|_| {
+                            if let Some(remote) = remote {
+                                self.remote.apply_update_vfs(remote)
+                            } else {
+                                Ok(())
+                            }
+                        })
                     }
                     .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
                 }
@@ -319,18 +331,16 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         }
     }
 
-    /// Updates both [`Vfs`] by querying and parsing their respective concrete FS.
+    /// Applies [`FileSystem::diff_vfs`] on both ends of the synchro.
     ///
-    /// Returns the updates on both fs, relative to the previously loaded Vfs.
-    ///
-    /// [`Vfs`]: crate::vfs::Vfs
-    pub async fn update_vfs(&mut self) -> Result<(VfsDiffList, VfsDiffList), Error> {
+    /// Returns the updates on both fs relative to the previously loaded Vfs.
+    pub async fn diff_vfs(&mut self) -> Result<(VfsDiffList, VfsDiffList), Error> {
         try_join!(
             self.local
-                .update_vfs()
+                .diff_vfs()
                 .map_err(|e| Error::vfs_reload(LocalBackend::TYPE_NAME, e)),
             self.remote
-                .update_vfs()
+                .diff_vfs()
                 .map_err(|e| Error::vfs_reload(RemoteBackend::TYPE_NAME, e))
         )
     }
@@ -354,23 +364,9 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     }
 
     fn get_conflict_update(&self, path: &VirtualPath, side: SynchroSide) -> Option<VfsDiff> {
-        // First try to find the conflict at the given path. If nothing is found, it might be
-        // because the update was a deletion and the node does not exist on the VFS anymore. In that
-        // case, the conflict update must have been stored on the other side, reversed (ie: as a
-        // creation)
         match side {
-            SynchroSide::Local => self.local.vfs().find_conflict(path).cloned().or_else(|| {
-                self.remote
-                    .vfs()
-                    .find_conflict(path)
-                    .map(|update| update.clone().invert())
-            }),
-            SynchroSide::Remote => self.remote.vfs().find_conflict(path).cloned().or_else(|| {
-                self.local
-                    .vfs()
-                    .find_conflict(path)
-                    .map(|update| update.clone().invert())
-            }),
+            SynchroSide::Local => self.local.vfs().find_conflict(path).cloned(),
+            SynchroSide::Remote => self.remote.vfs().find_conflict(path).cloned(),
         }
     }
 
@@ -451,7 +447,7 @@ mod test {
         let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base));
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
-        synchro.update_vfs().await.unwrap();
+        synchro.diff_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
             VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
@@ -491,7 +487,7 @@ mod test {
         let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
-        synchro.update_vfs().await.unwrap();
+        synchro.diff_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([
             VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
@@ -521,17 +517,32 @@ mod test {
     /// Test conflict detection
     #[tokio::test]
     async fn test_reconciliation_conflict() {
-        let local_base = D(
+        let base = D(
             "",
             vec![
-                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                D("Doc", vec![FF("f1.md", b"hi"), FF("f2.pdf", b"world")]),
                 D("a", vec![D("b", vec![D("c", vec![])])]),
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
 
-        let remote_base = D(
+        let mut local_fs = FileSystem::new(ConcreteTestNode::from(base.clone()));
+        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(base.clone()));
+
+        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
+        synchro.full_sync().await.unwrap();
+
+        let local_mod = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                D("a", vec![]),
+                D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
+            ],
+        );
+        synchro.local.set_backend(ConcreteTestNode::from(local_mod));
+
+        let remote_mod = D(
             "",
             vec![
                 D("Doc", vec![FF("f1.md", b"hell"), FF("f2.pdf", b"world")]),
@@ -542,10 +553,9 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
-
-        let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
-        synchro.update_vfs().await.unwrap();
+        synchro
+            .remote
+            .set_backend(ConcreteTestNode::from(remote_mod));
 
         let local_diff = SortedVec::from([
             VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
@@ -602,7 +612,7 @@ mod test {
         let mut remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
-        synchro.update_vfs().await.unwrap();
+        synchro.diff_vfs().await.unwrap();
 
         let local_diff = SortedVec::from([VfsDiff::dir_created(VirtualPathBuf::new("/").unwrap())]);
 
@@ -801,7 +811,9 @@ mod test {
             .remote
             .vfs()
             .find_node("/Doc/f2.pdf".try_into().unwrap())
-            .is_none());
+            .unwrap()
+            .state()
+            .is_conflict());
 
         // Resolve the conflict
         assert_eq!(
