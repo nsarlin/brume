@@ -33,8 +33,8 @@ pub enum NodeState<SyncInfo> {
     Ok(SyncInfo),
     /// The node should be re-synchronized at the next synchro, whatever its state
     NeedResync,
-    /// The previous syncronization of this node returned an error, it will be re-synchronized next
-    /// time
+    /// The previous synchronization of this node returned an error, it will be re-synchronized
+    /// next time
     Error(FailedUpdateApplication),
     /// There is a conflict on this node that needs to be manually resolved
     Conflict(VfsDiff),
@@ -1076,7 +1076,7 @@ mod test {
             10,
             vec![
                 DH("Doc", 1, vec![FH("f1.md", 2), FH("f2.pdf", 3)]),
-                DH("a", 14, vec![DH("ba", 15, vec![DH("c", 6, vec![])])]),
+                DH("a", 14, vec![DH("bc", 15, vec![DH("c", 6, vec![])])]),
             ],
         )
         .into_node_recursive_diff();
@@ -1087,7 +1087,7 @@ mod test {
             diff,
             vec![
                 VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
-                VfsDiff::dir_created(VirtualPathBuf::new("/a/ba").unwrap(),)
+                VfsDiff::dir_created(VirtualPathBuf::new("/a/bc").unwrap(),)
             ]
             .into()
         );
@@ -1171,7 +1171,7 @@ mod test {
             0,
             vec![
                 DH("Doc", 1, vec![FH("f1.md", 2), FH("f2.pdf", 3)]),
-                DH("a", 14, vec![DH("ba", 15, vec![DH("c", 6, vec![])])]),
+                DH("a", 14, vec![DH("bc", 15, vec![DH("c", 6, vec![])])]),
             ],
         )
         .into_node_shallow_diff();
@@ -1182,7 +1182,7 @@ mod test {
             diff,
             vec![
                 VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
-                VfsDiff::dir_created(VirtualPathBuf::new("/a/ba").unwrap(),)
+                VfsDiff::dir_created(VirtualPathBuf::new("/a/bc").unwrap(),)
             ]
             .into()
         );

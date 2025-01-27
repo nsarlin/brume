@@ -92,7 +92,7 @@ impl VirtualPath {
         }
     }
 
-    /// Return true if the node pointed by "self" is contained in "other", eventualy recursively
+    /// Return true if the node pointed by "self" is contained in "other", eventually recursively
     /// Return also true if self == other
     pub fn is_inside(&self, other: &VirtualPath) -> bool {
         if let Some(suffix) = self.path.strip_prefix(other.trimmed_path()) {
@@ -108,7 +108,7 @@ impl VirtualPath {
     pub fn name(&self) -> &str {
         let path = self.trimmed_path();
 
-        // Since we have the invariant that all pathes should start with '/', if we don't find a '/'
+        // Since we have the invariant that all paths should start with '/', if we don't find a '/'
         // we have removed it in the previous step, so our path is actually the root
         path.rsplit_once('/')
             .map(|(_, suffix)| suffix)

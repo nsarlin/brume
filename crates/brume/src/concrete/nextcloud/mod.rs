@@ -39,7 +39,7 @@ pub enum NextcloudFsError {
     BadStructure,
     #[error("failed to decode server provided url")]
     UrlDecode(#[from] FromUtf8Error),
-    #[error("a dav protocol error occured during communication with the nextcloud server")]
+    #[error("a dav protocol error occurred during communication with the nextcloud server")]
     ProtocolError(#[from] reqwest_dav::Error),
     #[error("io error while sending or receiving a file")]
     IoError(#[from] io::Error),

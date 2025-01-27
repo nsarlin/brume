@@ -1,6 +1,6 @@
 //! An in-memory representation of a FileSystem using a tree structure.
 //!
-//! The Vfs is used to be able to apply filesystems diff algorithms that are independant of the
+//! The Vfs is used to be able to apply filesystems diff algorithms that are independent of the
 //! concrete filesystem behind it.
 
 pub mod dir_tree;

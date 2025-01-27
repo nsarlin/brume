@@ -401,7 +401,7 @@ impl LocalPath for TestNode<'_> {
     }
 }
 
-/// Like a TestNode, but own its content, wich allows modifications.
+/// Like a TestNode, but own its content, which allows modifications.
 ///
 /// Can be used to define a test concrete fs
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

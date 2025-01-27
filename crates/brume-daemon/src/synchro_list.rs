@@ -376,7 +376,7 @@ impl SynchroList {
         Some(SynchroMutex { local, remote })
     }
 
-    /// Perfoms a [`full_sync`] on the provided synchro, that should be in the list
+    /// Performs a [`full_sync`] on the provided synchro, that should be in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
     pub async fn sync_one<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>(
@@ -419,7 +419,7 @@ impl SynchroList {
         }
     }
 
-    /// Perfoms a [`full_sync`] on all the synchro in the list
+    /// Performs a [`full_sync`] on all the synchro in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
     pub async fn sync_all(&self) -> Vec<Result<(), SyncError>> {
