@@ -2,18 +2,19 @@
 
 use std::{collections::HashMap, fmt::Display};
 
-use brume::concrete::{
-    local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsInstanceDescription, Named,
+use brume::{
+    concrete::{local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsInstanceDescription, Named},
+    vfs::VirtualPathBuf,
 };
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
+pub use brume::synchro::SynchroSide;
 
 use crate::synchro_list::AnySynchroRef;
 
-// TODO: make configurable
 /// Name of the socket where the clients should connect
 pub const BRUME_SOCK_NAME: &str = "brume.socket";
 
@@ -158,4 +159,11 @@ pub trait BrumeService {
 
     /// Resumes a synchronization
     async fn resume_synchro(id: SynchroId) -> Result<(), String>;
+
+    /// Resolves a conflict
+    async fn resolve_conflict(
+        id: SynchroId,
+        path: VirtualPathBuf,
+        side: SynchroSide,
+    ) -> Result<(), String>;
 }

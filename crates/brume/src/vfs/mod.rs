@@ -265,7 +265,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
 
     pub fn empty() -> Self {
         Self {
-            root: VfsNode::Dir(DirTree::new_without_syncinfo("")),
+            root: VfsNode::Dir(DirTree::new_force_resync("")),
         }
     }
 

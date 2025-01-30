@@ -13,6 +13,7 @@ async fn main() -> Result<()> {
     logs_builder
         .filter_level(LevelFilter::Info)
         .filter(Some("tarpc"), LevelFilter::Error)
+        .filter(Some("brume_daemon"), LevelFilter::Debug)
         .init();
 
     let daemon = Arc::new(Daemon::new(DaemonConfig::default())?);

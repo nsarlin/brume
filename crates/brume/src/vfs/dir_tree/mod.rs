@@ -80,12 +80,10 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Creates a new directory without syncinfo.
-    ///
-    /// This mean that the synchronization process will force a resync with the backend Fs
-    pub fn new_without_syncinfo(name: &str) -> Self {
+    /// Creates a new directory that will always trigger a resync on the first synchro
+    pub fn new_force_resync(name: &str) -> Self {
         Self {
-            metadata: DirMeta::new_without_syncinfo(name),
+            metadata: DirMeta::new_force_resync(name),
             children: SortedNodeList::new(),
         }
     }

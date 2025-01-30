@@ -57,7 +57,7 @@ impl Display for SynchroStatus {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum SynchroSide {
     Local,
     Remote,
