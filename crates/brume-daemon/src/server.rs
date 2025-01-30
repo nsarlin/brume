@@ -7,6 +7,7 @@ use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
+    daemon::{StateChangeRequest, SynchroState},
     protocol::{
         AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService, SynchroId,
     },
@@ -23,6 +24,7 @@ use crate::{
 pub struct Server {
     creation_chan: UnboundedSender<AnySynchroCreationInfo>,
     deletion_chan: UnboundedSender<SynchroId>,
+    state_change_chan: UnboundedSender<StateChangeRequest>,
     synchro_list: ReadOnlySynchroList,
 }
 
@@ -30,11 +32,13 @@ impl Server {
     pub(crate) fn new(
         creation_chan: UnboundedSender<AnySynchroCreationInfo>,
         deletion_chan: UnboundedSender<SynchroId>,
+        state_change_chan: UnboundedSender<StateChangeRequest>,
         synchro_list: ReadOnlySynchroList,
     ) -> Self {
         Self {
             creation_chan,
             deletion_chan,
+            state_change_chan,
             synchro_list,
         }
     }
@@ -95,5 +99,21 @@ impl BrumeService for Server {
     async fn delete_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {
         info!("Received synchro deletion request: id {id:?}");
         self.deletion_chan.send(id).map_err(|e| e.to_string())
+    }
+
+    async fn pause_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {
+        info!("Received synchro pause request: id {id:?}");
+        let request = StateChangeRequest::new(id, SynchroState::Paused);
+        self.state_change_chan
+            .send(request)
+            .map_err(|e| e.to_string())
+    }
+
+    async fn resume_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {
+        info!("Received synchro resume request: id {id:?}");
+        let request = StateChangeRequest::new(id, SynchroState::Running);
+        self.state_change_chan
+            .send(request)
+            .map_err(|e| e.to_string())
     }
 }

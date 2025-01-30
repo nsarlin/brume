@@ -12,7 +12,10 @@ use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use uuid::Uuid;
 
-use crate::protocol::{AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, SynchroId};
+use crate::{
+    daemon::SynchroState,
+    protocol::{AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, SynchroId},
+};
 
 #[derive(Error, Debug)]
 pub enum SyncError {
@@ -51,6 +54,14 @@ pub enum SynchroCreationError {
 
 #[derive(Error, Debug)]
 pub enum SynchroDeletionError {
+    #[error("Invalid synchro")]
+    InvalidSynchroState(#[from] InvalidSynchro),
+    #[error("Synchro not found: {0:?}")]
+    SynchroNotFound(SynchroId),
+}
+
+#[derive(Error, Debug)]
+pub enum SynchroModificationError {
     #[error("Invalid synchro")]
     InvalidSynchroState(#[from] InvalidSynchro),
     #[error("Synchro not found: {0:?}")]
@@ -98,7 +109,11 @@ impl AnyFsRef {
 pub struct AnySynchroRef {
     local: AnyFsRef,
     remote: AnyFsRef,
+    /// the status of the synchro is automatically updated, for example in case of error or
+    /// conflict
     status: SynchroStatus,
+    /// the state is defined by the user, for example running or paused
+    state: SynchroState,
     name: String,
 }
 
@@ -130,6 +145,11 @@ impl AnySynchroRef {
     /// Returns the status of this synchro
     pub fn status(&self) -> SynchroStatus {
         self.status
+    }
+
+    /// Returns the state of this synchro
+    pub fn state(&self) -> SynchroState {
+        self.state
     }
 }
 
@@ -311,6 +331,7 @@ impl SynchroList {
             local: local_ref,
             remote: remote_ref,
             status: SynchroStatus::default(),
+            state: SynchroState::default(),
             name,
         };
 
@@ -427,6 +448,9 @@ impl SynchroList {
             .synchros
             .values()
             .map(|synchro| async move {
+                if matches!(synchro.read().await.state(), SynchroState::Paused) {
+                    return Ok(());
+                }
                 let local_desc = synchro.read().await.local.description().clone();
                 let remote_desc = synchro.read().await.remote.description().clone();
                 match (local_desc, remote_desc) {
@@ -448,6 +472,21 @@ impl SynchroList {
 
         // TODO: switch to FutureUnordered ?
         join_all(futures).await
+    }
+
+    /// Sets the state of a synchro in the list
+    pub async fn set_state(
+        &self,
+        id: SynchroId,
+        state: SynchroState,
+    ) -> Result<(), SynchroModificationError> {
+        let sync = self
+            .synchros
+            .get(&id)
+            .ok_or(SynchroModificationError::SynchroNotFound(id))?;
+
+        sync.write().await.state = state;
+        Ok(())
     }
 }
 

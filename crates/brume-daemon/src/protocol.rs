@@ -152,4 +152,10 @@ pub trait BrumeService {
 
     /// Deletes a synchronization
     async fn delete_synchro(id: SynchroId) -> Result<(), String>;
+
+    /// Pauses a synchronization
+    async fn pause_synchro(id: SynchroId) -> Result<(), String>;
+
+    /// Resumes a synchronization
+    async fn resume_synchro(id: SynchroId) -> Result<(), String>;
 }

@@ -20,6 +20,7 @@ use interprocess::local_socket::{
     tokio::Listener, traits::tokio::Listener as _, GenericNamespaced, ListenerOptions, ToNsName,
 };
 use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use tarpc::{
     serde_transport,
     server::{BaseChannel, Channel},
@@ -89,6 +90,25 @@ pub enum ErrorMode {
     Exit,
 }
 
+/// User controlled state of the synchro
+#[derive(Default, Copy, Clone, Debug, Serialize, Deserialize)]
+pub enum SynchroState {
+    #[default]
+    Running,
+    Paused,
+}
+
+pub struct StateChangeRequest {
+    id: SynchroId,
+    state: SynchroState,
+}
+
+impl StateChangeRequest {
+    pub fn new(id: SynchroId, state: SynchroState) -> Self {
+        Self { id, state }
+    }
+}
+
 /// The daemon holds the list of the synchronized folders, and synchronize them regularly.
 ///
 /// It can be queried by client applications through the [`Server`].
@@ -99,6 +119,7 @@ pub struct Daemon {
     server: Server,
     creation_chan: Arc<Mutex<UnboundedReceiver<AnySynchroCreationInfo>>>,
     deletion_chan: Arc<Mutex<UnboundedReceiver<SynchroId>>>,
+    state_change_chan: Arc<Mutex<UnboundedReceiver<StateChangeRequest>>>,
     is_running: AtomicBool,
     config: DaemonConfig,
 }
@@ -127,12 +148,14 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         let codec_builder = LengthDelimitedCodec::builder();
         let (creation_to_daemon, creation_from_server) = unbounded_channel();
         let (deletion_to_daemon, deletion_from_server) = unbounded_channel();
+        let (state_change_to_daemon, state_change_from_server) = unbounded_channel();
 
         let synchro_list = ReadWriteSynchroList::new();
 
         let server = Server::new(
             creation_to_daemon,
             deletion_to_daemon,
+            state_change_to_daemon,
             synchro_list.as_read_only(),
         );
 
@@ -143,6 +166,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             server,
             creation_chan: Arc::new(Mutex::new(creation_from_server)),
             deletion_chan: Arc::new(Mutex::new(deletion_from_server)),
+            state_change_chan: Arc::new(Mutex::new(state_change_from_server)),
             is_running: AtomicBool::new(false),
             config,
         })
@@ -239,6 +263,13 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         list
     }
 
+    pub async fn recv_state_changes(&self) -> Vec<StateChangeRequest> {
+        let mut list = Vec::new();
+        let mut receiver = self.state_change_chan.lock().await;
+        receiver.recv_many(&mut list, 100).await; // TODO: configure recv size ?
+        list
+    }
+
     /// Updates the synchro list from messages of client applications
     pub async fn update_synchro_list(&self) -> Result<()> {
         tokio::select! {
@@ -246,7 +277,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                 for synchro_info in new_synchros {
                     if let Err(err) = self.synchro_list.insert(synchro_info).await {
                         let wrapped_err = anyhow!(err);
-                        error!("Failed insert new synchro: {wrapped_err:?}");
+                        error!("Failed to insert new synchro: {wrapped_err:?}");
                         if self.config.error_mode == ErrorMode::Exit {
                             return Err(wrapped_err);
                         }
@@ -257,7 +288,21 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                 for synchro_id in to_delete {
                     if let Err(err) = self.synchro_list.remove(synchro_id).await {
                         let wrapped_err = anyhow!(err);
-                        error!("Failed delete synchro: {wrapped_err:?}");
+                        error!("Failed to delete synchro: {wrapped_err:?}");
+                        if self.config.error_mode == ErrorMode::Exit {
+                            return Err(wrapped_err);
+                        }
+                    }
+                }
+            }
+            states_to_change = self.recv_state_changes() => {
+                for state_request in states_to_change {
+                    if let Err(err) = self.synchro_list
+                                                .read()
+                                                .await
+                                                .set_state(state_request.id, state_request.state).await {
+                        let wrapped_err = anyhow!(err);
+                        error!("Failed to set synchro state: {wrapped_err:?}");
                         if self.config.error_mode == ErrorMode::Exit {
                             return Err(wrapped_err);
                         }
