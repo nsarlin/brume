@@ -1,6 +1,6 @@
 use std::fs;
 
-use brume_cli::{connect_to_daemon, get_synchro};
+use brume_cli::{connect_to_daemon, get_synchro, get_synchro_id};
 use comfy_table::Table;
 use tarpc::context;
 
@@ -8,8 +8,11 @@ use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use url::Url;
 
-use brume_daemon::protocol::{
-    AnyFsCreationInfo, AnyFsDescription, LocalDirCreationInfo, NextcloudFsCreationInfo,
+use brume_daemon::{
+    daemon::SynchroState,
+    protocol::{
+        AnyFsCreationInfo, AnyFsDescription, LocalDirCreationInfo, NextcloudFsCreationInfo,
+    },
 };
 
 #[derive(Parser)]
@@ -51,6 +54,12 @@ enum Commands {
     #[command(visible_aliases = ["remove", "delete"])]
     Rm { synchro: String },
 
+    /// Pause a synchronization
+    Pause { synchro: String },
+
+    /// Resume a synchronization
+    Resume { synchro: String },
+
     /// Get the status of a synchronization
     Status { synchro: String },
 }
@@ -80,12 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Ls {} => {
             let synchros = daemon.list_synchros(context::current()).await?;
             let mut table = Table::new();
-            table.set_header(vec!["ID", "Status", "Local", "Remote", "Name"]);
+            table.set_header(vec!["ID", "Status", "State", "Local", "Remote", "Name"]);
 
             for (id, synchro) in synchros {
                 table.add_row(vec![
                     format!("{:08x}", id.short()),
                     synchro.status().to_string(),
+                    synchro.state().to_string(),
                     synchro.local().to_string(),
                     synchro.remote().to_string(),
                     synchro.name().to_string(),
@@ -98,17 +108,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Removing synchro: {synchro}");
             let list = daemon.list_synchros(context::current()).await?;
 
-            let id = get_synchro(&list, &synchro)
+            let id = get_synchro_id(&list, &synchro)
                 .await
                 .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
 
             daemon.delete_synchro(context::current(), id).await??;
             println!("Done");
         }
+        Commands::Pause { synchro } => {
+            println!("Pausing synchro: {synchro}");
+            let list = daemon.list_synchros(context::current()).await?;
+
+            let (id, sync) = get_synchro(&list, &synchro)
+                .await
+                .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+
+            if matches!(sync.state(), SynchroState::Paused) {
+                println!("Synchro is already paused");
+                return Ok(());
+            }
+
+            daemon.pause_synchro(context::current(), id).await??;
+            println!("Done");
+        }
+
+        Commands::Resume { synchro } => {
+            println!("Resuming synchro: {synchro}");
+            let list = daemon.list_synchros(context::current()).await?;
+
+            let (id, sync) = get_synchro(&list, &synchro)
+                .await
+                .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+
+            if matches!(sync.state(), SynchroState::Running) {
+                println!("Synchro is already running");
+                return Ok(());
+            }
+
+            daemon.resume_synchro(context::current(), id).await??;
+            println!("Done");
+        }
+
         Commands::Status { synchro } => {
             let list = daemon.list_synchros(context::current()).await?;
 
-            let id = get_synchro(&list, &synchro)
+            let id = get_synchro_id(&list, &synchro)
                 .await
                 .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
 
@@ -116,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("○ Synchro: {} - {}", synchro.name(), id.id());
             for (key, value) in [
                 ("Status", synchro.status().to_string().as_str()),
-                ("State", "Running"), // TODO: Running/Paused state
+                ("State", synchro.state().to_string().as_str()),
                 ("Local type", synchro.local().description().type_name()),
                 ("Local", &synchro.local().description().to_string()),
                 ("Remote type", synchro.remote().description().type_name()),

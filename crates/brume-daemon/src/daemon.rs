@@ -4,6 +4,7 @@
 //! remove filesystem pairs to synchronize. It regularly synchronizes them.
 
 use std::{
+    fmt::Display,
     future::Future,
     io,
     sync::{
@@ -96,6 +97,12 @@ pub enum SynchroState {
     #[default]
     Running,
     Paused,
+}
+
+impl Display for SynchroState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 pub struct StateChangeRequest {
