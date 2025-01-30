@@ -2,14 +2,16 @@
 
 use std::collections::HashMap;
 
+use brume::vfs::VirtualPathBuf;
 use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    daemon::{StateChangeRequest, SynchroState},
+    daemon::{ConflictResolutionRequest, StateChangeRequest, SynchroState},
     protocol::{
         AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService, SynchroId,
+        SynchroSide,
     },
     synchro_list::{AnySynchroRef, ReadOnlySynchroList},
 };
@@ -25,6 +27,7 @@ pub struct Server {
     creation_chan: UnboundedSender<AnySynchroCreationInfo>,
     deletion_chan: UnboundedSender<SynchroId>,
     state_change_chan: UnboundedSender<StateChangeRequest>,
+    conflict_resolution_chan: UnboundedSender<ConflictResolutionRequest>,
     synchro_list: ReadOnlySynchroList,
 }
 
@@ -33,12 +36,14 @@ impl Server {
         creation_chan: UnboundedSender<AnySynchroCreationInfo>,
         deletion_chan: UnboundedSender<SynchroId>,
         state_change_chan: UnboundedSender<StateChangeRequest>,
+        conflict_resolution_chan: UnboundedSender<ConflictResolutionRequest>,
         synchro_list: ReadOnlySynchroList,
     ) -> Self {
         Self {
             creation_chan,
             deletion_chan,
             state_change_chan,
+            conflict_resolution_chan,
             synchro_list,
         }
     }
@@ -115,5 +120,45 @@ impl BrumeService for Server {
         self.state_change_chan
             .send(request)
             .map_err(|e| e.to_string())
+    }
+
+    async fn resolve_conflict(
+        self,
+        _context: Context,
+        id: SynchroId,
+        path: VirtualPathBuf,
+        side: SynchroSide,
+    ) -> Result<(), String> {
+        info!("Received conflict resolution request: id {id:?}, path {path:?}, side: {side:?}");
+        // Check if the synchro is valid and if the file exist to be able to return an early error
+        let (local_vfs, remote_vfs) = {
+            let list = self.synchro_list.read().await;
+
+            let local = list
+                .get_vfs(id, SynchroSide::Local)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let remote = list
+                .get_vfs(id, SynchroSide::Remote)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            (local, remote)
+        };
+
+        let node = local_vfs
+            .find_node(&path)
+            .or_else(|| remote_vfs.find_node(&path))
+            .ok_or_else(|| "Invalid path".to_string())?;
+
+        if !node.state().is_conflict() {
+            return Err("Node is not in conflict".to_string());
+        }
+
+        self.conflict_resolution_chan
+            .send(ConflictResolutionRequest::new(id, path, side))
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }

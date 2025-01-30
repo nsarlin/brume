@@ -16,6 +16,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 
+use brume::vfs::VirtualPathBuf;
 use futures::StreamExt;
 use interprocess::local_socket::{
     tokio::Listener, traits::tokio::Listener as _, GenericNamespaced, ListenerOptions, ToNsName,
@@ -37,7 +38,7 @@ use tokio::{
 };
 
 use crate::{
-    protocol::{AnySynchroCreationInfo, BrumeService, SynchroId, BRUME_SOCK_NAME},
+    protocol::{AnySynchroCreationInfo, BrumeService, SynchroId, SynchroSide, BRUME_SOCK_NAME},
     server::Server,
     synchro_list::ReadWriteSynchroList,
 };
@@ -105,6 +106,7 @@ impl Display for SynchroState {
     }
 }
 
+/// A user request to change the [`SynchroState`] of a synchro
 pub struct StateChangeRequest {
     id: SynchroId,
     state: SynchroState,
@@ -113,6 +115,19 @@ pub struct StateChangeRequest {
 impl StateChangeRequest {
     pub fn new(id: SynchroId, state: SynchroState) -> Self {
         Self { id, state }
+    }
+}
+
+/// A use request for a conflict resolution
+pub struct ConflictResolutionRequest {
+    id: SynchroId,
+    path: VirtualPathBuf,
+    side: SynchroSide,
+}
+
+impl ConflictResolutionRequest {
+    pub fn new(id: SynchroId, path: VirtualPathBuf, side: SynchroSide) -> Self {
+        Self { id, path, side }
     }
 }
 
@@ -127,6 +142,7 @@ pub struct Daemon {
     creation_chan: Arc<Mutex<UnboundedReceiver<AnySynchroCreationInfo>>>,
     deletion_chan: Arc<Mutex<UnboundedReceiver<SynchroId>>>,
     state_change_chan: Arc<Mutex<UnboundedReceiver<StateChangeRequest>>>,
+    conflict_resolution_chan: Arc<Mutex<UnboundedReceiver<ConflictResolutionRequest>>>,
     is_running: AtomicBool,
     config: DaemonConfig,
 }
@@ -156,6 +172,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         let (creation_to_daemon, creation_from_server) = unbounded_channel();
         let (deletion_to_daemon, deletion_from_server) = unbounded_channel();
         let (state_change_to_daemon, state_change_from_server) = unbounded_channel();
+        let (resolution_to_daemon, resolution_from_server) = unbounded_channel();
 
         let synchro_list = ReadWriteSynchroList::new();
 
@@ -163,6 +180,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             creation_to_daemon,
             deletion_to_daemon,
             state_change_to_daemon,
+            resolution_to_daemon,
             synchro_list.as_read_only(),
         );
 
@@ -174,6 +192,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             creation_chan: Arc::new(Mutex::new(creation_from_server)),
             deletion_chan: Arc::new(Mutex::new(deletion_from_server)),
             state_change_chan: Arc::new(Mutex::new(state_change_from_server)),
+            conflict_resolution_chan: Arc::new(Mutex::new(resolution_from_server)),
             is_running: AtomicBool::new(false),
             config,
         })
@@ -190,6 +209,8 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
 
         // Synchronize all filesystems
         let mut interval = time::interval(self.config.sync_interval);
+        interval.tick().await; // The first interval is immediate
+
         loop {
             info!("Starting full sync for all filesystems");
             let synchro_list = self.synchro_list();
@@ -211,7 +232,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             loop {
                 tokio::select! {
                     _ = interval.tick() => break,
-                    res = self.update_synchro_list() => {
+                    res = self.handle_user_commands() => {
                         res.inspect_err(|_| {
                             self.is_running.store(false, Ordering::Relaxed);
                         })?
@@ -256,18 +277,14 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         self.synchro_list.clone()
     }
 
-    pub async fn recv_creations(&self) -> Vec<AnySynchroCreationInfo> {
-        let mut list = Vec::new();
+    pub async fn recv_creations(&self) -> Option<AnySynchroCreationInfo> {
         let mut receiver = self.creation_chan.lock().await;
-        receiver.recv_many(&mut list, 100).await; // TODO: configure recv size ?
-        list
+        receiver.recv().await
     }
 
-    pub async fn recv_deletions(&self) -> Vec<SynchroId> {
-        let mut list = Vec::new();
+    pub async fn recv_deletions(&self) -> Option<SynchroId> {
         let mut receiver = self.deletion_chan.lock().await;
-        receiver.recv_many(&mut list, 100).await; // TODO: configure recv size ?
-        list
+        receiver.recv().await
     }
 
     pub async fn recv_state_changes(&self) -> Vec<StateChangeRequest> {
@@ -277,32 +294,33 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         list
     }
 
-    /// Updates the synchro list from messages of client applications
-    pub async fn update_synchro_list(&self) -> Result<()> {
+    pub async fn recv_conflict_resolutions(&self) -> Option<ConflictResolutionRequest> {
+        let mut receiver = self.conflict_resolution_chan.lock().await;
+        receiver.recv().await
+    }
+
+    /// Handles messages of client applications
+    pub async fn handle_user_commands(&self) -> Result<()> {
         tokio::select! {
-            new_synchros = self.recv_creations() => {
-                for synchro_info in new_synchros {
-                    if let Err(err) = self.synchro_list.insert(synchro_info).await {
-                        let wrapped_err = anyhow!(err);
-                        error!("Failed to insert new synchro: {wrapped_err:?}");
-                        if self.config.error_mode == ErrorMode::Exit {
-                            return Err(wrapped_err);
-                        }
+            Some(new_synchro) = self.recv_creations() => {
+                if let Err(err) = self.synchro_list.insert(new_synchro).await {
+                    let wrapped_err = anyhow!(err);
+                    error!("Failed insert new synchro: {wrapped_err:?}");
+                    if self.config.error_mode == ErrorMode::Exit {
+                        return Err(wrapped_err);
                     }
                 }
             }
-            to_delete = self.recv_deletions() => {
-                for synchro_id in to_delete {
-                    if let Err(err) = self.synchro_list.remove(synchro_id).await {
-                        let wrapped_err = anyhow!(err);
-                        error!("Failed to delete synchro: {wrapped_err:?}");
-                        if self.config.error_mode == ErrorMode::Exit {
-                            return Err(wrapped_err);
-                        }
+            Some(to_delete) = self.recv_deletions() => {
+                if let Err(err) = self.synchro_list.remove(to_delete).await {
+                    let wrapped_err = anyhow!(err);
+                    error!("Failed delete synchro: {wrapped_err:?}");
+                    if self.config.error_mode == ErrorMode::Exit {
+                        return Err(wrapped_err);
                     }
                 }
             }
-            states_to_change = self.recv_state_changes() => {
+                        states_to_change = self.recv_state_changes() => {
                 for state_request in states_to_change {
                     if let Err(err) = self.synchro_list
                                                 .read()
@@ -313,6 +331,17 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                         if self.config.error_mode == ErrorMode::Exit {
                             return Err(wrapped_err);
                         }
+                                                                                                }
+                                }
+                        }
+            Some(conflict) = self.recv_conflict_resolutions() => {
+                let res = self.synchro_list.resolve_conflict(conflict.id, &conflict.path,
+                                                             conflict.side).await;
+                if let Err(err) = res {
+                    let wrapped_err = anyhow!(err);
+                    error!("Failed resolve conflict: {wrapped_err:?}");
+                    if self.config.error_mode == ErrorMode::Exit {
+                        return Err(wrapped_err);
                     }
                 }
             }
@@ -321,5 +350,3 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         Ok(())
     }
 }
-
-// TODO: Add tests for synchro list

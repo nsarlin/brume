@@ -3,10 +3,11 @@ use std::{any::Any, collections::HashMap, fmt::Display, sync::Arc};
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsBackendError},
     filesystem::FileSystem,
-    synchro::{Synchro, SynchroStatus},
+    synchro::{Synchro, SynchroSide, SynchroStatus},
+    vfs::{Vfs, VirtualPath},
 };
 use futures::{future::join_all, stream, StreamExt};
-use log::info;
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
@@ -23,6 +24,8 @@ pub enum SyncError {
     SyncFailed(#[from] SynchroFailed),
     #[error("Invalid synchro")]
     InvalidSynchroState(#[from] InvalidSynchro),
+    #[error("Synchro not found: {0:?}")]
+    SynchroNotFound(SynchroId),
 }
 
 #[derive(Error, Debug)]
@@ -364,6 +367,38 @@ impl SynchroList {
         }
     }
 
+    pub async fn resolve_conflict(
+        &self,
+        id: SynchroId,
+        path: &VirtualPath,
+        side: SynchroSide,
+    ) -> Result<(), SyncError> {
+        let synchro = self
+            .synchros
+            .get(&id)
+            .ok_or_else(|| SyncError::SynchroNotFound(id))?;
+        let local_desc = synchro.read().await.local.description().clone();
+        let remote_desc = synchro.read().await.remote.description().clone();
+        match (local_desc, remote_desc) {
+            (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
+                self.resolve_conflict_sync::<LocalDir, LocalDir>(synchro, path, side)
+                    .await
+            }
+            (AnyFsDescription::LocalDir(_), AnyFsDescription::Nextcloud(_)) => {
+                self.resolve_conflict_sync::<LocalDir, NextcloudFs>(synchro, path, side)
+                    .await
+            }
+            (AnyFsDescription::Nextcloud(_), AnyFsDescription::LocalDir(_)) => {
+                self.resolve_conflict_sync::<NextcloudFs, LocalDir>(synchro, path, side)
+                    .await
+            }
+            (AnyFsDescription::Nextcloud(_), AnyFsDescription::Nextcloud(_)) => {
+                self.resolve_conflict_sync::<NextcloudFs, NextcloudFs>(synchro, path, side)
+                    .await
+            }
+        }
+    }
+
     fn get_fs<Backend: FSBackend + 'static>(
         &self,
         fs: &AnyFsRef,
@@ -400,6 +435,56 @@ impl SynchroList {
     /// Performs a [`full_sync`] on the provided synchro, that should be in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
+    pub async fn resolve_conflict_sync<
+        LocalBackend: FSBackend + 'static,
+        RemoteBackend: FSBackend + 'static,
+    >(
+        &self,
+        synchro_lock: &RwLock<AnySynchroRef>,
+        path: &VirtualPath,
+        side: SynchroSide,
+    ) -> Result<(), SyncError> {
+        let res = {
+            let synchro = synchro_lock.read().await;
+
+            // Skip synchro that are already identified as desynchronized until the user fixes
+            // it
+            if synchro.status == SynchroStatus::Desync {
+                return Ok(());
+            }
+
+            let synchro_mutex = self
+                .get_sync::<LocalBackend, RemoteBackend>(&synchro)
+                .ok_or_else(|| InvalidSynchro::from(synchro.clone()))
+                .unwrap();
+
+            let mut local_fs = synchro_mutex.local.lock().await;
+            let mut remote_fs = synchro_mutex.remote.lock().await;
+            let mut sync = Synchro::new(&mut local_fs, &mut remote_fs);
+            sync.resolve_conflict(path, side).await
+        };
+
+        match res {
+            Ok(status) => {
+                let mut synchro = synchro_lock.write().await;
+                synchro.status = status;
+                Ok(())
+            }
+            Err(err) => {
+                let mut synchro = synchro_lock.write().await;
+                synchro.status = SynchroStatus::from(&err);
+                Err(SynchroFailed {
+                    synchro: synchro.to_owned(),
+                    source: err,
+                }
+                .into())
+            }
+        }
+    }
+
+    /// Performs a [`full_sync`] on the provided synchro, that should be in the list
+    ///
+    /// [`full_sync`]: brume::synchro::Synchro::full_sync
     pub async fn sync_one<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>(
         &self,
         synchro_lock: &RwLock<AnySynchroRef>,
@@ -425,11 +510,13 @@ impl SynchroList {
         match res {
             Ok(status) => {
                 let mut synchro = synchro_lock.write().await;
+                debug!("Synchro {} returned with status: {status}", synchro.name);
                 synchro.status = status;
                 Ok(())
             }
             Err(err) => {
                 let mut synchro = synchro_lock.write().await;
+                error!("Synchro {} returned an error: {err}", synchro.name);
                 synchro.status = SynchroStatus::from(&err);
                 Err(SynchroFailed {
                     synchro: synchro.to_owned(),
@@ -488,6 +575,43 @@ impl SynchroList {
         sync.write().await.state = state;
         Ok(())
     }
+
+    pub async fn get_vfs(&self, id: SynchroId, side: SynchroSide) -> Result<Vfs<()>, SyncError> {
+        let synchro = self
+            .synchros
+            .get(&id)
+            .ok_or_else(|| SyncError::SynchroNotFound(id))?
+            .read()
+            .await;
+
+        let (desc, id) = match side {
+            SynchroSide::Local => (synchro.local.description().clone(), synchro.local.id),
+            SynchroSide::Remote => (synchro.remote.description().clone(), synchro.remote.id),
+        };
+
+        match desc {
+            AnyFsDescription::LocalDir(_) => {
+                let fs = self
+                    .local_dir_list
+                    .get(&id)
+                    .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?
+                    .lock()
+                    .await;
+
+                Ok(fs.vfs().into())
+            }
+            AnyFsDescription::Nextcloud(_) => {
+                let fs = self
+                    .nextcloud_list
+                    .get(&id)
+                    .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?
+                    .lock()
+                    .await;
+
+                Ok(fs.vfs().into())
+            }
+        }
+    }
 }
 
 /// A [`SynchroList`] that allows read-write access and can be shared between threads.
@@ -525,6 +649,18 @@ impl ReadWriteSynchroList {
         let maps = self.maps.read().await;
 
         maps.sync_all().await
+    }
+
+    /// Resolves a conflict on a path inside a synchro, by applying the update from `side`
+    pub async fn resolve_conflict(
+        &self,
+        id: SynchroId,
+        path: &VirtualPath,
+        side: SynchroSide,
+    ) -> Result<(), SyncError> {
+        let maps = self.maps.read().await;
+
+        maps.resolve_conflict(id, path, side).await
     }
 
     /// Returns a read-only view of the list

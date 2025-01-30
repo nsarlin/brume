@@ -17,7 +17,7 @@ impl<SyncInfo> DirMeta<SyncInfo> {
         }
     }
 
-    pub fn new_without_syncinfo(name: &str) -> Self {
+    pub fn new_force_resync(name: &str) -> Self {
         Self {
             name: name.to_string(),
             state: NodeState::NeedResync,

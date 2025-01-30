@@ -2,6 +2,7 @@
 
 use std::{borrow::Borrow, ops::Deref, path::Path};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::NodeKind;
@@ -258,7 +259,7 @@ impl<'a> Iterator for VirtualPathIterator<'a> {
 
 /// Similar to the distinction with Path and PathBuf, this is a VirtualPath that owns the underlying
 /// data.
-#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct VirtualPathBuf {
     path: String,
