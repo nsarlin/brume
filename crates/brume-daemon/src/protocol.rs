@@ -2,16 +2,16 @@
 
 use std::{collections::HashMap, fmt::Display};
 
-use brume::{
-    concrete::{local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsInstanceDescription, Named},
-    vfs::VirtualPathBuf,
+use brume::concrete::{
+    local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsInstanceDescription, Named,
 };
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
-pub use brume::synchro::SynchroSide;
+pub use brume::synchro::{SynchroSide, SynchroStatus};
+pub use brume::vfs::virtual_path::{VirtualPath, VirtualPathBuf};
 
 use crate::synchro_list::AnySynchroRef;
 
