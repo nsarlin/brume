@@ -4,7 +4,7 @@ use brume_cli::{connect_to_daemon, get_synchro, get_synchro_id};
 use comfy_table::Table;
 use tarpc::context;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use url::Url;
 
@@ -12,6 +12,7 @@ use brume_daemon::{
     daemon::SynchroState,
     protocol::{
         AnyFsCreationInfo, AnyFsDescription, LocalDirCreationInfo, NextcloudFsCreationInfo,
+        VirtualPathBuf,
     },
 };
 
@@ -62,6 +63,34 @@ enum Commands {
 
     /// Get the status of a synchronization
     Status { synchro: String },
+
+    /// Resolve a conflict in a synchronization
+    Resolve {
+        /// The id of the synchro
+        synchro: String,
+        /// The path of the node in conflict, as an absolute path from the root of the synchro
+        #[arg(short, long)]
+        path: String,
+        /// The side of the synchro to chose for the resolution
+        #[arg(short, long)]
+        side: SynchroSide,
+    },
+}
+
+/// Like [`brume_daemon::protocol::SynchroSide`], but can be parsed by clap
+#[derive(clap::ValueEnum, Copy, Clone, Debug)]
+enum SynchroSide {
+    Local,
+    Remote,
+}
+
+impl From<SynchroSide> for brume_daemon::protocol::SynchroSide {
+    fn from(value: SynchroSide) -> Self {
+        match value {
+            SynchroSide::Local => Self::Local,
+            SynchroSide::Remote => Self::Remote,
+        }
+    }
 }
 
 #[tokio::main]
@@ -170,6 +199,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             //TODO: display more information in case of error/desync
+        }
+
+        Commands::Resolve {
+            synchro,
+            path,
+            side,
+        } => {
+            println!("Resolving conflict in synchro: {synchro}, path: {path}, side: {side:?}");
+            let list = daemon.list_synchros(context::current()).await?;
+
+            let id = get_synchro_id(&list, &synchro)
+                .await
+                .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+
+            let vpath = VirtualPathBuf::new(&path).context("Invalid path")?;
+
+            daemon
+                .resolve_conflict(context::current(), id, vpath, side.into())
+                .await??;
+            println!("Done");
         }
     }
 
