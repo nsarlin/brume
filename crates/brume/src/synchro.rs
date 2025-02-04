@@ -1,7 +1,5 @@
 //! Link two [`FileSystem`] for bidirectional synchronization
 
-use std::fmt::Display;
-
 use futures::{future::try_join_all, TryFutureExt};
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -27,8 +25,8 @@ use crate::{
 /// [`full_sync`]: Synchro::full_sync
 /// [`NodeState`]: crate::vfs::dir_tree::NodeState
 /// [`Error`]: enum@crate::Error
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
-pub enum SynchroStatus {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum FullSyncStatus {
     /// No node in any FS is in Conflict or Error state
     #[default]
     Ok,
@@ -41,19 +39,13 @@ pub enum SynchroStatus {
     Desync,
 }
 
-impl From<&Error> for SynchroStatus {
+impl From<&Error> for FullSyncStatus {
     fn from(value: &Error) -> Self {
         if value.is_concrete() {
             Self::Error
         } else {
             Self::Desync
         }
-    }
-}
-
-impl Display for SynchroStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
     }
 }
 
@@ -111,7 +103,7 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     ///   accordingly.
     ///
     /// See [`crate::update`] for more information about the update process.
-    pub async fn full_sync(&mut self) -> Result<SynchroStatus, Error> {
+    pub async fn full_sync(&mut self) -> Result<FullSyncStatus, Error> {
         let (local_diff, remote_diff) = self.diff_vfs().await?;
 
         let reconciled = self.reconcile(local_diff, remote_diff).await?;
@@ -131,15 +123,15 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         Ok(self.get_status())
     }
 
-    pub fn get_status(&self) -> SynchroStatus {
+    pub fn get_status(&self) -> FullSyncStatus {
         if !self.local.vfs().get_errors().is_empty() || !self.remote.vfs().get_errors().is_empty() {
-            SynchroStatus::Error
+            FullSyncStatus::Error
         } else if !self.local.vfs().get_conflicts().is_empty()
             || !self.remote.vfs().get_conflicts().is_empty()
         {
-            SynchroStatus::Conflict
+            FullSyncStatus::Conflict
         } else {
-            SynchroStatus::Ok
+            FullSyncStatus::Ok
         }
     }
 
@@ -350,7 +342,7 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         &mut self,
         path: &VirtualPath,
         side: SynchroSide,
-    ) -> Result<SynchroStatus, Error> {
+    ) -> Result<FullSyncStatus, Error> {
         if let Some(update) = self.get_conflict_update(path, side) {
             self.apply_update(side.invert(), update).await?;
         } else {
@@ -652,7 +644,7 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         assert!(synchro
             .local
@@ -681,7 +673,7 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         // Then do a modification on both sides
         let local_modif = D(
@@ -714,7 +706,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_modif));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Conflict);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Conflict);
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
         assert!(synchro
@@ -738,7 +730,7 @@ mod test {
                 .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Local)
                 .await
                 .unwrap(),
-            SynchroStatus::Ok
+            FullSyncStatus::Ok
         );
         assert!(synchro
             .local
@@ -768,7 +760,7 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         // Then do a modification on both sides
         let local_modif = D(
@@ -798,7 +790,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_modif));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Conflict);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Conflict);
 
         assert!(synchro
             .local
@@ -821,7 +813,7 @@ mod test {
                 .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Remote)
                 .await
                 .unwrap(),
-            SynchroStatus::Ok
+            FullSyncStatus::Ok
         );
 
         assert!(synchro
@@ -851,8 +843,8 @@ mod test {
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
         // Check 2 sync with an Io error on a file
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
 
         // Everything should have been transferred except the file in error
         let expected_local = D(
@@ -890,7 +882,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         // Both filesystems should be perfectly in sync
         assert!(synchro
@@ -919,7 +911,7 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         // First do a normal sync
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         // Then put the file in error.
         // The next `update_vfs` will consider the node as "changed" because by default error test
@@ -935,7 +927,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
 
         // Everything should have been transferred except the file in error
         let expected_local = D(
@@ -976,7 +968,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         assert!(synchro
             .local
@@ -1006,7 +998,7 @@ mod test {
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
         // sync with an Io error on a file
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
 
         // Everything should have been transferred except the file in error
         let expected_local = D(
@@ -1045,7 +1037,7 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         // Both filesystems should be perfectly in sync
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
@@ -1069,7 +1061,7 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         // First do a normal sync
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         // Then put the file in error.
         // The next `update_vfs` will consider the node as "changed" because by default error test
@@ -1085,7 +1077,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
 
         // Nothing should be changed on the local side because of the error
         let expected_local = D(
@@ -1123,7 +1115,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         assert!(synchro
             .local
@@ -1152,7 +1144,7 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         // First do a normal sync
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Ok);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
 
         // Then put the file in error.
         // The next `update_vfs` will consider the node as "changed" because by default error test
@@ -1168,7 +1160,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Error);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
 
         // Nothing should be changed on the local side because of the error
         let expected_local = D(
@@ -1225,7 +1217,7 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), SynchroStatus::Conflict);
+        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Conflict);
 
         // This should create a conflict
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));

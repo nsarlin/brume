@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
-pub use brume::synchro::{SynchroSide, SynchroStatus};
+pub use brume::synchro::SynchroSide;
 pub use brume::vfs::virtual_path::{VirtualPath, VirtualPathBuf};
 
 use crate::synchro_list::AnySynchroRef;

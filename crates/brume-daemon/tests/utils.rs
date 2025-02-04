@@ -1,4 +1,4 @@
-use std::net::TcpListener;
+use std::{net::TcpListener, time::Duration};
 
 use interprocess::local_socket::{
     tokio::{prelude::*, Stream},
@@ -7,7 +7,8 @@ use interprocess::local_socket::{
 use rand::{thread_rng, Rng};
 
 use tarpc::{
-    serde_transport, tokio_serde::formats::Bincode, tokio_util::codec::LengthDelimitedCodec,
+    context, serde_transport, tokio_serde::formats::Bincode,
+    tokio_util::codec::LengthDelimitedCodec,
 };
 use testcontainers::{
     core::{wait::HttpWaitStrategy, IntoContainerPort, WaitFor},
@@ -15,7 +16,8 @@ use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
 };
 
-use brume_daemon::protocol::BrumeServiceClient;
+use brume_daemon::{daemon::SynchroStatus, protocol::BrumeServiceClient};
+use tokio::time::sleep;
 
 pub fn get_random_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to address");
@@ -64,4 +66,21 @@ pub async fn start_nextcloud(exposed_port: u16, url: &str) -> ContainerAsync<Gen
 pub async fn stop_nextcloud(container: ContainerAsync<GenericImage>) {
     container.stop().await.unwrap();
     container.rm().await.unwrap();
+}
+
+pub async fn wait_full_sync(sync_interval: Duration, rpc: &BrumeServiceClient) {
+    // Wait to at least get one sync to start
+    sleep(sync_interval).await;
+
+    // Wait for the sync to end
+    loop {
+        sleep(Duration::from_secs(1)).await;
+        let list = rpc.list_synchros(context::current()).await.unwrap();
+        if list
+            .values()
+            .all(|sync| sync.status() != SynchroStatus::SyncInProgress)
+        {
+            break;
+        }
+    }
 }

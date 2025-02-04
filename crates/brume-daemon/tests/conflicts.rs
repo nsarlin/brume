@@ -1,26 +1,23 @@
 use std::{process::exit, sync::Arc, time::Duration};
 
 use brume::{
-    concrete::local::LocalDir,
-    filesystem::FileSystem,
-    synchro::{SynchroSide, SynchroStatus},
-    vfs::VirtualPathBuf,
+    concrete::local::LocalDir, filesystem::FileSystem, synchro::SynchroSide, vfs::VirtualPathBuf,
 };
 use env_logger::Builder;
 
 use brume_daemon::{
-    daemon::{Daemon, DaemonConfig, ErrorMode},
+    daemon::{Daemon, DaemonConfig, ErrorMode, SynchroStatus},
     protocol::{AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo},
 };
 use log::{info, LevelFilter};
 use tarpc::context;
-use tokio::time::sleep;
 
 #[path = "utils.rs"]
 mod utils;
 
 use utils::{
     connect_to_daemon, get_random_port, get_random_sock_name, start_nextcloud, stop_nextcloud,
+    wait_full_sync,
 };
 
 #[tokio::test]
@@ -34,8 +31,9 @@ async fn main() {
     // Start daemon
     let sock_name = get_random_sock_name();
     info!("using sock name {sock_name}");
+    let sync_interval = Duration::from_secs(2);
     let config = DaemonConfig::default()
-        .with_sync_interval(Duration::from_secs(2))
+        .with_sync_interval(sync_interval)
         .with_error_mode(ErrorMode::Exit)
         .with_sock_name(&sock_name);
     let daemon = Daemon::new(config).unwrap();
@@ -80,7 +78,7 @@ async fn main() {
         .unwrap();
 
     // Wait a full sync
-    sleep(Duration::from_secs(15)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -100,7 +98,7 @@ async fn main() {
         .unwrap();
 
     // Wait a full sync
-    sleep(Duration::from_secs(15)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -144,7 +142,7 @@ async fn main() {
     .unwrap();
 
     // Wait for propagation on the first fs
-    sleep(Duration::from_secs(5)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -157,7 +155,7 @@ async fn main() {
         .unwrap();
 
     // Wait for another propagation
-    sleep(Duration::from_secs(5)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -180,7 +178,7 @@ async fn main() {
     .unwrap();
 
     // Wait for a full propagation
-    sleep(Duration::from_secs(10)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)

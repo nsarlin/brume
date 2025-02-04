@@ -1,9 +1,9 @@
-use std::{any::Any, collections::HashMap, fmt::Display, sync::Arc};
+use std::{any::Any, collections::HashMap, fmt::Display, sync::Arc, thread::sleep, time::Duration};
 
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsBackendError},
     filesystem::FileSystem,
-    synchro::{Synchro, SynchroSide, SynchroStatus},
+    synchro::{FullSyncStatus, Synchro, SynchroSide},
     vfs::{Vfs, VirtualPath},
 };
 use futures::{future::join_all, stream, StreamExt};
@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use uuid::Uuid;
 
 use crate::{
-    daemon::SynchroState,
+    daemon::{SynchroState, SynchroStatus},
     protocol::{AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, SynchroId},
 };
 
@@ -171,6 +171,14 @@ impl ReadOnlySynchroList {
     pub async fn read(&self) -> RwLockReadGuard<SynchroList> {
         self.maps.read().await
     }
+
+    pub async fn len(&self) -> usize {
+        self.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
 }
 
 /// A synchronized Filesystem pair where both filesystems are in a Mutex
@@ -212,6 +220,14 @@ impl SynchroList {
     /// Create a new empty list
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.synchros.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn synchro_ref_list(&self) -> &HashMap<SynchroId, RwLock<AnySynchroRef>> {
@@ -432,9 +448,7 @@ impl SynchroList {
         Some(SynchroMutex { local, remote })
     }
 
-    /// Performs a [`full_sync`] on the provided synchro, that should be in the list
-    ///
-    /// [`full_sync`]: brume::synchro::Synchro::full_sync
+    /// Resolves a conflict on a synchro in the list by applying the update from the chose side
     pub async fn resolve_conflict_sync<
         LocalBackend: FSBackend + 'static,
         RemoteBackend: FSBackend + 'static,
@@ -444,14 +458,21 @@ impl SynchroList {
         path: &VirtualPath,
         side: SynchroSide,
     ) -> Result<(), SyncError> {
+        // Wait for synchro to be ready
+        loop {
+            {
+                let mut synchro = synchro_lock.write().await;
+
+                if synchro.status.is_synchronizable() {
+                    synchro.status = SynchroStatus::SyncInProgress;
+                    break;
+                }
+            }
+            sleep(Duration::from_secs(1)); // TODO: make configurable
+        }
+
         let res = {
             let synchro = synchro_lock.read().await;
-
-            // Skip synchro that are already identified as desynchronized until the user fixes
-            // it
-            if synchro.status == SynchroStatus::Desync {
-                return Ok(());
-            }
 
             let synchro_mutex = self
                 .get_sync::<LocalBackend, RemoteBackend>(&synchro)
@@ -460,19 +481,21 @@ impl SynchroList {
 
             let mut local_fs = synchro_mutex.local.lock().await;
             let mut remote_fs = synchro_mutex.remote.lock().await;
-            let mut sync = Synchro::new(&mut local_fs, &mut remote_fs);
+
+            let mut sync: Synchro<'_, '_, LocalBackend, RemoteBackend> =
+                Synchro::new(&mut local_fs, &mut remote_fs);
             sync.resolve_conflict(path, side).await
         };
 
         match res {
             Ok(status) => {
                 let mut synchro = synchro_lock.write().await;
-                synchro.status = status;
+                synchro.status = status.into();
                 Ok(())
             }
             Err(err) => {
                 let mut synchro = synchro_lock.write().await;
-                synchro.status = SynchroStatus::from(&err);
+                synchro.status = FullSyncStatus::from(&err).into();
                 Err(SynchroFailed {
                     synchro: synchro.to_owned(),
                     source: err,
@@ -489,13 +512,19 @@ impl SynchroList {
         &self,
         synchro_lock: &RwLock<AnySynchroRef>,
     ) -> Result<(), SyncError> {
-        let res = {
-            let synchro = synchro_lock.read().await;
+        {
+            let mut synchro = synchro_lock.write().await;
 
             // Skip synchro that are already identified as desynchronized until the user fixes it
-            if synchro.status == SynchroStatus::Desync {
+            if !synchro.status.is_synchronizable() {
                 return Ok(());
             }
+            synchro.status = SynchroStatus::SyncInProgress;
+        }
+
+        let res = {
+            let synchro = synchro_lock.read().await;
+            debug!("Starting full_sync for Synchro {}", synchro.name);
 
             let synchro_mutex = self
                 .get_sync::<LocalBackend, RemoteBackend>(&synchro)
@@ -510,14 +539,14 @@ impl SynchroList {
         match res {
             Ok(status) => {
                 let mut synchro = synchro_lock.write().await;
-                debug!("Synchro {} returned with status: {status}", synchro.name);
-                synchro.status = status;
+                debug!("Synchro {} returned with status: {status:?}", synchro.name);
+                synchro.status = status.into();
                 Ok(())
             }
             Err(err) => {
                 let mut synchro = synchro_lock.write().await;
                 error!("Synchro {} returned an error: {err}", synchro.name);
-                synchro.status = SynchroStatus::from(&err);
+                synchro.status = FullSyncStatus::from(&err).into();
                 Err(SynchroFailed {
                     synchro: synchro.to_owned(),
                     source: err,
@@ -538,8 +567,14 @@ impl SynchroList {
                 if matches!(synchro.read().await.state(), SynchroState::Paused) {
                     return Ok(());
                 }
-                let local_desc = synchro.read().await.local.description().clone();
-                let remote_desc = synchro.read().await.remote.description().clone();
+
+                let (local_desc, remote_desc) = {
+                    let sync = synchro.read().await;
+                    (
+                        sync.local.description().clone(),
+                        sync.remote.description().clone(),
+                    )
+                };
                 match (local_desc, remote_desc) {
                     (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
                         self.sync_one::<LocalDir, LocalDir>(synchro).await
@@ -675,6 +710,14 @@ impl ReadWriteSynchroList {
         Self {
             maps: Arc::new(RwLock::new(SynchroList::new())),
         }
+    }
+
+    pub async fn len(&self) -> usize {
+        self.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
     }
 }
 

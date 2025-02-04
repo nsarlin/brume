@@ -9,13 +9,13 @@ use brume_daemon::{
 };
 use log::{info, LevelFilter};
 use tarpc::context;
-use tokio::time::sleep;
 
 #[path = "utils.rs"]
 mod utils;
 
 use utils::{
     connect_to_daemon, get_random_port, get_random_sock_name, start_nextcloud, stop_nextcloud,
+    wait_full_sync,
 };
 
 #[tokio::test]
@@ -29,8 +29,9 @@ async fn main() {
     // Start daemon
     let sock_name = get_random_sock_name();
     info!("using sock name {sock_name}");
+    let sync_interval = Duration::from_secs(2);
     let config = DaemonConfig::default()
-        .with_sync_interval(Duration::from_secs(2))
+        .with_sync_interval(sync_interval)
         .with_error_mode(ErrorMode::Exit)
         .with_sock_name(&sock_name);
     let daemon = Daemon::new(config).unwrap();
@@ -75,7 +76,8 @@ async fn main() {
         .unwrap();
 
     // Wait a full sync
-    sleep(Duration::from_secs(15)).await;
+    wait_full_sync(sync_interval, &rpc).await;
+
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -92,12 +94,7 @@ async fn main() {
         .unwrap()
         .unwrap();
 
-    // Wait a full sync
-    sleep(Duration::from_secs(15)).await;
-    if !daemon.is_running() {
-        stop_nextcloud(container).await;
-        exit(1)
-    }
+    wait_full_sync(sync_interval, &rpc).await;
 
     let list = rpc.list_synchros(context::current()).await.unwrap();
     assert_eq!(list.len(), 2);
@@ -117,7 +114,7 @@ async fn main() {
     std::fs::remove_file(dir_a.path().to_path_buf().join("Documents/Example.md")).unwrap();
 
     // Wait for propagation on both fs
-    sleep(Duration::from_secs(10)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -136,7 +133,8 @@ async fn main() {
     .unwrap();
 
     // Wait for propagation on both fs
-    sleep(Duration::from_secs(10)).await;
+    wait_full_sync(sync_interval, &rpc).await;
+
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -152,7 +150,7 @@ async fn main() {
     std::fs::create_dir(dir_a.path().to_path_buf().join("testdir")).unwrap();
 
     // Wait for propagation on both fs
-    sleep(Duration::from_secs(10)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -171,7 +169,7 @@ async fn main() {
     .unwrap();
 
     // Wait for propagation on both fs
-    sleep(Duration::from_secs(10)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -186,7 +184,7 @@ async fn main() {
     std::fs::remove_dir_all(dir_a.path().to_path_buf().join("testdir")).unwrap();
 
     // Wait for propagation on both fs
-    sleep(Duration::from_secs(10)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -204,7 +202,7 @@ async fn main() {
         .unwrap();
 
     // Wait for deletion
-    sleep(Duration::from_secs(5)).await;
+    wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
