@@ -181,19 +181,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Status { synchro } => {
             let list = daemon.list_synchros(context::current()).await?;
 
-            let id = get_synchro_id(&list, &synchro)
+            let (id, sync) = get_synchro(&list, &synchro)
                 .await
                 .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
 
-            let synchro = list.get(&id).unwrap(); // Ok to unwrap because we got the id from the list
-            println!("○ Synchro: {} - {}", synchro.name(), id.id());
+            println!("○ Synchro: {} - {}", sync.name(), id.id());
             for (key, value) in [
-                ("Status", synchro.status().to_string().as_str()),
-                ("State", synchro.state().to_string().as_str()),
-                ("Local type", synchro.local().description().type_name()),
-                ("Local", &synchro.local().description().to_string()),
-                ("Remote type", synchro.remote().description().type_name()),
-                ("Remote", &synchro.remote().description().to_string()),
+                ("Status", sync.status().to_string().as_str()),
+                ("State", sync.state().to_string().as_str()),
+                ("Local type", sync.local().description().type_name()),
+                ("Local", &sync.local().description().to_string()),
+                ("Remote type", sync.remote().description().type_name()),
+                ("Remote", &sync.remote().description().to_string()),
             ] {
                 println!("{:>15}: {}", key, value);
             }
