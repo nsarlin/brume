@@ -4,7 +4,6 @@
 //! remove filesystem pairs to synchronize. It regularly synchronizes them.
 
 use std::{
-    fmt::Display,
     future::Future,
     io,
     sync::{
@@ -16,13 +15,12 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 
-use brume::{synchro::FullSyncStatus, vfs::VirtualPathBuf};
+use brume::vfs::VirtualPathBuf;
 use futures::StreamExt;
 use interprocess::local_socket::{
     tokio::Listener, traits::tokio::Listener as _, GenericNamespaced, ListenerOptions, ToNsName,
 };
 use log::{error, info, warn};
-use serde::{Deserialize, Serialize};
 use tarpc::{
     serde_transport,
     server::{BaseChannel, Channel},
@@ -37,11 +35,11 @@ use tokio::{
     time,
 };
 
-use crate::{
-    protocol::{AnySynchroCreationInfo, BrumeService, SynchroId, SynchroSide, BRUME_SOCK_NAME},
-    server::Server,
-    synchro_list::ReadWriteSynchroList,
+use brume_daemon_proto::{
+    AnySynchroCreationInfo, BrumeService, SynchroId, SynchroSide, SynchroState, BRUME_SOCK_NAME,
 };
+
+use crate::{server::Server, synchro_list::ReadWriteSynchroList};
 
 /// Configuration of a [`Daemon`]
 #[derive(Clone)]
@@ -90,66 +88,6 @@ pub enum ErrorMode {
     #[default]
     Log,
     Exit,
-}
-
-/// Computed status of the synchro, based on synchronization events
-///
-/// This status is mostly gotten from the [`FullSyncStatus`] returned by [`full_sync`]. When
-/// [`full_sync`] is running, the status is set to [`Self::SyncInProgress`]
-///
-/// [`full_sync`]: brume::synchro::Synchro::full_sync
-#[derive(Default, Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum SynchroStatus {
-    /// No node in any FS is in Conflict or Error state
-    #[default]
-    Ok,
-    /// At least one node is in Conflict state, but no node is in Error state
-    Conflict,
-    /// At least one node is in Error state
-    Error,
-    /// There is some inconsistency in one of the Vfs, likely coming from a bug in brume.
-    /// User should re-sync the faulty vfs from scratch
-    Desync,
-    /// A synchronization is in progress
-    SyncInProgress,
-}
-
-impl Display for SynchroStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl From<FullSyncStatus> for SynchroStatus {
-    fn from(value: FullSyncStatus) -> Self {
-        match value {
-            FullSyncStatus::Ok => Self::Ok,
-            FullSyncStatus::Conflict => Self::Conflict,
-            FullSyncStatus::Error => Self::Error,
-            FullSyncStatus::Desync => Self::Desync,
-        }
-    }
-}
-
-impl SynchroStatus {
-    /// Returns true if the status allows further synchronization
-    pub fn is_synchronizable(self) -> bool {
-        !matches!(self, SynchroStatus::Desync | SynchroStatus::SyncInProgress)
-    }
-}
-
-/// User controlled state of the synchro
-#[derive(Default, Copy, Clone, Debug, Serialize, Deserialize)]
-pub enum SynchroState {
-    #[default]
-    Running,
-    Paused,
-}
-
-impl Display for SynchroState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
 }
 
 /// The different commands that can be received from user applications

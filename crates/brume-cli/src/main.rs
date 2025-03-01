@@ -8,12 +8,9 @@ use anyhow::{anyhow, Context};
 use clap::{Parser, Subcommand};
 use url::Url;
 
-use brume_daemon::{
-    daemon::SynchroState,
-    protocol::{
-        AnyFsCreationInfo, AnyFsDescription, LocalDirCreationInfo, NextcloudFsCreationInfo,
-        VirtualPathBuf,
-    },
+use brume_daemon_proto::{
+    AnyFsCreationInfo, AnyFsDescription, LocalDirCreationInfo, NextcloudFsCreationInfo,
+    SynchroState, VirtualPathBuf,
 };
 
 #[derive(Parser)]
@@ -84,7 +81,7 @@ enum SynchroSide {
     Remote,
 }
 
-impl From<SynchroSide> for brume_daemon::protocol::SynchroSide {
+impl From<SynchroSide> for brume_daemon_proto::SynchroSide {
     fn from(value: SynchroSide) -> Self {
         match value {
             SynchroSide::Local => Self::Local,

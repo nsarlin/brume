@@ -8,10 +8,7 @@ use tarpc::{
     serde_transport, tokio_serde::formats::Bincode, tokio_util::codec::LengthDelimitedCodec,
 };
 
-use brume_daemon::{
-    protocol::{BrumeServiceClient, SynchroId, BRUME_SOCK_NAME},
-    synchro_list::AnySynchroRef,
-};
+use brume_daemon_proto::{AnySynchroRef, BrumeServiceClient, SynchroId, BRUME_SOCK_NAME};
 
 pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
     let name = BRUME_SOCK_NAME.to_ns_name::<GenericNamespaced>()?;

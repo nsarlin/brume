@@ -7,16 +7,17 @@ use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
+use brume_daemon_proto::{
+    AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, AnySynchroRef, BrumeService,
+    SynchroId, SynchroSide, SynchroState,
+};
+
 use crate::{
     daemon::{
         ConflictResolutionRequest, StateChangeRequest, SynchroCreationRequest,
-        SynchroDeletionRequest, SynchroState, UserCommand,
+        SynchroDeletionRequest, UserCommand,
     },
-    protocol::{
-        AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService, SynchroId,
-        SynchroSide,
-    },
-    synchro_list::{AnySynchroRef, ReadOnlySynchroList},
+    synchro_list::ReadOnlySynchroList,
 };
 
 /// A Server that handle RPC connections from client applications

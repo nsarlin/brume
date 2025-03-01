@@ -3,10 +3,9 @@ use std::{process::exit, sync::Arc, time::Duration};
 use brume::{concrete::local::LocalDir, filesystem::FileSystem};
 use env_logger::Builder;
 
-use brume_daemon::{
-    daemon::{Daemon, DaemonConfig, ErrorMode},
-    protocol::{AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo},
-};
+use brume_daemon_proto::{AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo};
+
+use brume_daemon::daemon::{Daemon, DaemonConfig, ErrorMode};
 use log::{info, LevelFilter};
 use tarpc::context;
 
