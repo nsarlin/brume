@@ -16,7 +16,7 @@ use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
 };
 
-use brume_daemon::{daemon::SynchroStatus, protocol::BrumeServiceClient};
+use brume_daemon_proto::{BrumeServiceClient, SynchroStatus};
 use tokio::time::sleep;
 
 pub fn get_random_port() -> u16 {

@@ -5,9 +5,9 @@ use brume::{
 };
 use env_logger::Builder;
 
-use brume_daemon::{
-    daemon::{Daemon, DaemonConfig, ErrorMode, SynchroStatus},
-    protocol::{AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo},
+use brume_daemon::daemon::{Daemon, DaemonConfig, ErrorMode};
+use brume_daemon_proto::{
+    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroStatus,
 };
 use log::{info, LevelFilter};
 use tarpc::context;

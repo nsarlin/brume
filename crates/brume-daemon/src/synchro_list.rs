@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt::Display, sync::Arc, thread::sleep, time::Duration};
+use std::{any::Any, collections::HashMap, sync::Arc, thread::sleep, time::Duration};
 
 use brume::{
     concrete::{local::LocalDir, nextcloud::NextcloudFs, FSBackend, FsBackendError},
@@ -8,14 +8,13 @@ use brume::{
 };
 use futures::{future::join_all, stream, StreamExt};
 use log::{debug, error, info};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use uuid::Uuid;
 
-use crate::{
-    daemon::{SynchroState, SynchroStatus},
-    protocol::{AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, SynchroId},
+use brume_daemon_proto::{
+    AnyFsCreationInfo, AnyFsDescription, AnyFsRef, AnySynchroCreationInfo, AnySynchroRef,
+    SynchroId, SynchroState, SynchroStatus,
 };
 
 #[derive(Error, Debug)]
@@ -71,91 +70,6 @@ pub enum SynchroModificationError {
     SynchroNotFound(SynchroId),
 }
 
-/// A reference to a filesystem in the [`SynchroList`]
-///
-/// This type represents only an index and needs a valid [`SynchroList`], to actually be used. It
-/// must not be used after the Filesystem it points to has been removed from the SynchroList.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AnyFsRef {
-    id: Uuid,
-    description: AnyFsDescription,
-}
-
-impl Display for AnyFsRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.description)
-    }
-}
-
-impl From<AnyFsCreationInfo> for AnyFsRef {
-    fn from(value: AnyFsCreationInfo) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            description: value.into(),
-        }
-    }
-}
-
-impl AnyFsRef {
-    pub fn description(&self) -> &AnyFsDescription {
-        &self.description
-    }
-}
-
-/// A [`Synchro`] where the [`Backend`] filesystems are only known at runtime.
-///
-/// This type represents only an index and needs a valid [`SynchroList`], to actually be used. It
-/// must not be used after the Synchro it points to has been removed from the SynchroList.
-///
-/// [`Backend`]: FSBackend
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AnySynchroRef {
-    local: AnyFsRef,
-    remote: AnyFsRef,
-    /// the status of the synchro is automatically updated, for example in case of error or
-    /// conflict
-    status: SynchroStatus,
-    /// the state is defined by the user, for example running or paused
-    state: SynchroState,
-    name: String,
-}
-
-impl Display for AnySynchroRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "synchro between {} and {}", self.local, self.remote)
-    }
-}
-
-impl AnySynchroRef {
-    /// Returns the local counterpart of the synchro
-    pub fn local(&self) -> &AnyFsRef {
-        &self.local
-    }
-
-    /// Returns the remote counterpart of the synchro
-    pub fn remote(&self) -> &AnyFsRef {
-        &self.remote
-    }
-
-    /// Returns the name of the synchro
-    ///
-    /// This name is only "relatively" unique, meaning that names can be reused. However, at a
-    /// specific point in time and for a specific [`SynchroList`], there should be no collision.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Returns the status of this synchro
-    pub fn status(&self) -> SynchroStatus {
-        self.status
-    }
-
-    /// Returns the state of this synchro
-    pub fn state(&self) -> SynchroState {
-        self.state
-    }
-}
-
 /// A [`SynchroList`] that allows only read-only access.
 ///
 /// The list content cannot be modified, but since the underlying [`FileSystems`] are locked behind
@@ -208,7 +122,7 @@ impl<T: FSBackend + 'static> DynTyped for Mutex<FileSystem<T>> {
 /// The filesystems can be any of the [`supported types`]
 ///
 /// [`FileSystems`]: FileSystem
-/// [`supported types`]: crate::protocol::AnyFsCreationInfo
+/// [`supported types`]: brume_daemon_proto::AnyFsCreationInfo
 #[derive(Default)]
 pub struct SynchroList {
     synchros: HashMap<SynchroId, RwLock<AnySynchroRef>>,
@@ -243,13 +157,13 @@ impl SynchroList {
             AnyFsCreationInfo::LocalDir(info) => {
                 let concrete = info.try_into()?;
                 self.local_dir_list
-                    .insert(fs_ref.id, Mutex::new(FileSystem::new(concrete)));
+                    .insert(fs_ref.id(), Mutex::new(FileSystem::new(concrete)));
                 Ok(fs_ref)
             }
             AnyFsCreationInfo::Nextcloud(info) => {
                 let concrete = info.try_into()?;
                 self.nextcloud_list
-                    .insert(fs_ref.id, Mutex::new(FileSystem::new(concrete)));
+                    .insert(fs_ref.id(), Mutex::new(FileSystem::new(concrete)));
                 Ok(fs_ref)
             }
         }
@@ -263,9 +177,10 @@ impl SynchroList {
     ) -> bool {
         for sync in self.synchros.values() {
             let sync = sync.read().await;
-            if (sync.local.description() == local_desc || sync.local.description() == remote_desc)
-                && (sync.remote.description() == local_desc
-                    || sync.remote.description() == remote_desc)
+            if (sync.local().description() == local_desc
+                || sync.local().description() == remote_desc)
+                && (sync.remote().description() == local_desc
+                    || sync.remote().description() == remote_desc)
             {
                 return true;
             }
@@ -276,7 +191,7 @@ impl SynchroList {
 
     async fn name_is_unique(&self, name: &str) -> bool {
         for sync in self.synchros.values() {
-            if sync.read().await.name == name {
+            if sync.read().await.name() == name {
                 return false;
             }
         }
@@ -302,7 +217,7 @@ impl SynchroList {
     /// fs
     async fn unique_synchro_name(&self, local_name: &str, remote_name: &str) -> String {
         let same_remote: Vec<_> = stream::iter(self.synchros.values())
-            .filter(|sync| async { sync.read().await.remote.description.name() == remote_name })
+            .filter(|sync| async { sync.read().await.remote().name() == remote_name })
             .collect()
             .await;
 
@@ -311,7 +226,7 @@ impl SynchroList {
         }
 
         let same_local: Vec<_> = stream::iter(same_remote)
-            .filter(|sync| async { sync.read().await.local.description.name() == local_name })
+            .filter(|sync| async { sync.read().await.local().name() == local_name })
             .collect()
             .await;
 
@@ -341,18 +256,12 @@ impl SynchroList {
         let name = if let Some(name) = sync_info.name() {
             self.make_unique_name(name).await
         } else {
-            self.unique_synchro_name(local_ref.description.name(), remote_ref.description.name())
+            self.unique_synchro_name(local_ref.name(), remote_ref.name())
                 .await
         };
 
         info!("Synchro created: name: {name}, id: {id:?}");
-        let synchro = AnySynchroRef {
-            local: local_ref,
-            remote: remote_ref,
-            status: SynchroStatus::default(),
-            state: SynchroState::default(),
-            name,
-        };
+        let synchro = AnySynchroRef::new(local_ref, remote_ref, name);
 
         self.synchros.insert(id, RwLock::new(synchro));
 
@@ -365,12 +274,12 @@ impl SynchroList {
             let mut res = Ok(());
             let sync = sync.into_inner();
 
-            if !self.remove_fs(&sync.local) {
+            if !self.remove_fs(sync.local()) {
                 res = Err(SynchroDeletionError::InvalidSynchroState(
                     sync.clone().into(),
                 ));
             }
-            if !self.remove_fs(&sync.remote) {
+            if !self.remove_fs(sync.remote()) {
                 res = Err(SynchroDeletionError::InvalidSynchroState(
                     sync.clone().into(),
                 ));
@@ -393,8 +302,8 @@ impl SynchroList {
             .synchros
             .get(&id)
             .ok_or_else(|| SyncError::SynchroNotFound(id))?;
-        let local_desc = synchro.read().await.local.description().clone();
-        let remote_desc = synchro.read().await.remote.description().clone();
+        let local_desc = synchro.read().await.local().description().clone();
+        let remote_desc = synchro.read().await.remote().description().clone();
         match (local_desc, remote_desc) {
             (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
                 self.resolve_conflict_sync::<LocalDir, LocalDir>(synchro, path, side)
@@ -422,19 +331,19 @@ impl SynchroList {
         match fs.description() {
             AnyFsDescription::LocalDir(_) => self
                 .local_dir_list
-                .get(&fs.id)
+                .get(&fs.id())
                 .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Backend>>>()),
             AnyFsDescription::Nextcloud(_) => self
                 .nextcloud_list
-                .get(&fs.id)
+                .get(&fs.id())
                 .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Backend>>>()),
         }
     }
 
     fn remove_fs(&mut self, fs: &AnyFsRef) -> bool {
         match fs.description() {
-            AnyFsDescription::LocalDir(_) => self.local_dir_list.remove(&fs.id).is_some(),
-            AnyFsDescription::Nextcloud(_) => self.nextcloud_list.remove(&fs.id).is_some(),
+            AnyFsDescription::LocalDir(_) => self.local_dir_list.remove(&fs.id()).is_some(),
+            AnyFsDescription::Nextcloud(_) => self.nextcloud_list.remove(&fs.id()).is_some(),
         }
     }
 
@@ -442,8 +351,8 @@ impl SynchroList {
         &self,
         synchro: &AnySynchroRef,
     ) -> Option<SynchroMutex<LocalBackend, RemoteBackend>> {
-        let local = self.get_fs::<LocalBackend>(&synchro.local)?;
-        let remote = self.get_fs::<RemoteBackend>(&synchro.remote)?;
+        let local = self.get_fs::<LocalBackend>(synchro.local())?;
+        let remote = self.get_fs::<RemoteBackend>(synchro.remote())?;
 
         Some(SynchroMutex { local, remote })
     }
@@ -463,8 +372,8 @@ impl SynchroList {
             {
                 let mut synchro = synchro_lock.write().await;
 
-                if synchro.status.is_synchronizable() {
-                    synchro.status = SynchroStatus::SyncInProgress;
+                if synchro.status().is_synchronizable() {
+                    synchro.set_status(SynchroStatus::SyncInProgress);
                     break;
                 }
             }
@@ -490,12 +399,12 @@ impl SynchroList {
         match res {
             Ok(status) => {
                 let mut synchro = synchro_lock.write().await;
-                synchro.status = status.into();
+                synchro.set_status(status.into());
                 Ok(())
             }
             Err(err) => {
                 let mut synchro = synchro_lock.write().await;
-                synchro.status = FullSyncStatus::from(&err).into();
+                synchro.set_status(FullSyncStatus::from(&err).into());
                 Err(SynchroFailed {
                     synchro: synchro.to_owned(),
                     source: err,
@@ -516,15 +425,15 @@ impl SynchroList {
             let mut synchro = synchro_lock.write().await;
 
             // Skip synchro that are already identified as desynchronized until the user fixes it
-            if !synchro.status.is_synchronizable() {
+            if !synchro.status().is_synchronizable() {
                 return Ok(());
             }
-            synchro.status = SynchroStatus::SyncInProgress;
+            synchro.set_status(SynchroStatus::SyncInProgress);
         }
 
         let res = {
             let synchro = synchro_lock.read().await;
-            debug!("Starting full_sync for Synchro {}", synchro.name);
+            debug!("Starting full_sync for Synchro {}", synchro.name());
 
             let synchro_mutex = self
                 .get_sync::<LocalBackend, RemoteBackend>(&synchro)
@@ -539,14 +448,17 @@ impl SynchroList {
         match res {
             Ok(status) => {
                 let mut synchro = synchro_lock.write().await;
-                debug!("Synchro {} returned with status: {status:?}", synchro.name);
-                synchro.status = status.into();
+                debug!(
+                    "Synchro {} returned with status: {status:?}",
+                    synchro.name()
+                );
+                synchro.set_status(status.into());
                 Ok(())
             }
             Err(err) => {
                 let mut synchro = synchro_lock.write().await;
-                error!("Synchro {} returned an error: {err}", synchro.name);
-                synchro.status = FullSyncStatus::from(&err).into();
+                error!("Synchro {} returned an error: {err}", synchro.name());
+                synchro.set_status(FullSyncStatus::from(&err).into());
                 Err(SynchroFailed {
                     synchro: synchro.to_owned(),
                     source: err,
@@ -571,8 +483,8 @@ impl SynchroList {
                 let (local_desc, remote_desc) = {
                     let sync = synchro.read().await;
                     (
-                        sync.local.description().clone(),
-                        sync.remote.description().clone(),
+                        sync.local().description().clone(),
+                        sync.remote().description().clone(),
                     )
                 };
                 match (local_desc, remote_desc) {
@@ -607,7 +519,7 @@ impl SynchroList {
             .get(&id)
             .ok_or(SynchroModificationError::SynchroNotFound(id))?;
 
-        sync.write().await.state = state;
+        sync.write().await.set_state(state);
         Ok(())
     }
 
@@ -620,8 +532,11 @@ impl SynchroList {
             .await;
 
         let (desc, id) = match side {
-            SynchroSide::Local => (synchro.local.description().clone(), synchro.local.id),
-            SynchroSide::Remote => (synchro.remote.description().clone(), synchro.remote.id),
+            SynchroSide::Local => (synchro.local().description().clone(), synchro.local().id()),
+            SynchroSide::Remote => (
+                synchro.remote().description().clone(),
+                synchro.remote().id(),
+            ),
         };
 
         match desc {
@@ -724,8 +639,7 @@ impl ReadWriteSynchroList {
 #[cfg(test)]
 mod test {
     use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
-
-    use crate::protocol::{AnyFsCreationInfo, AnySynchroCreationInfo};
+    use brume_daemon_proto::{AnyFsCreationInfo, AnySynchroCreationInfo};
 
     use super::*;
 

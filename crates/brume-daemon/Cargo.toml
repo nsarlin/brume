@@ -4,40 +4,24 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Minimal dependencies needed by clients that will connect to the daemon
 tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
-serde = "1.0"
 
-# Dependencies needed by the daemon itself
-futures = { version = "0.3", optional = true }
-log = { version = "0.4", optional = true }
-env_logger = { version = "0.11", optional = true }
-anyhow = { version = "1.0", optional = true }
-thiserror = { version = "2.0", optional = true }
-tokio = { version = "1", features = ["full"], optional = true }
-interprocess = { version = "2.2", features = ["tokio"], optional = true }
+futures = { version = "0.3" }
+log = { version = "0.4" }
+env_logger = { version = "0.11" }
+anyhow = { version = "1.0" }
+thiserror = { version = "2.0" }
+tokio = { version = "1", features = ["full"] }
+interprocess = { version = "2.2", features = ["tokio"] }
 
-brume = { version = "0.1.0", path = "../brume", optional = true }
+brume-daemon-proto = { version = "0.1.0", path = "../brume-daemon-proto" }
+brume = { version = "0.1.0", path = "../brume" }
 
 [dev-dependencies]
 tempfile = "3.14"
 testcontainers = { version = "0.23", features = ["http_wait"] }
 rand = "0.9"
-
-[features]
-default = ["server"]
-server = [
-	"dep:futures",
-	"dep:log",
-	"dep:env_logger",
-	"dep:anyhow",
-	"dep:thiserror",
-	"dep:tokio",
-	"dep:interprocess",
-	"dep:brume",
-]
-
 
 [[bin]]
 name = "brumed"

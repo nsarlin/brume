@@ -1,0 +1,11 @@
+[package]
+name = "brume-daemon-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
+serde = "1.0"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+brume = { version = "0.1.0", path = "../brume" }
