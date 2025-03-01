@@ -4,7 +4,7 @@ use interprocess::local_socket::{
     tokio::{prelude::*, Stream},
     GenericNamespaced, ToNsName,
 };
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 
 use tarpc::{
     context, serde_transport, tokio_serde::formats::Bincode,
@@ -29,7 +29,7 @@ pub fn get_random_port() -> u16 {
 
 pub fn get_random_sock_name() -> String {
     let suffix: String = (0..5)
-        .map(|_| thread_rng().gen_range(b'a'..=b'z') as char)
+        .map(|_| rng().random_range(b'a'..=b'z') as char)
         .collect();
 
     format!("brume-{suffix}.socket")
