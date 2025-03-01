@@ -8,7 +8,10 @@ use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    daemon::{ConflictResolutionRequest, StateChangeRequest, SynchroState},
+    daemon::{
+        ConflictResolutionRequest, StateChangeRequest, SynchroCreationRequest,
+        SynchroDeletionRequest, SynchroState, UserCommand,
+    },
     protocol::{
         AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService, SynchroId,
         SynchroSide,
@@ -24,26 +27,17 @@ use crate::{
 /// [`Daemon`]: crate::daemon::Daemon
 #[derive(Clone)]
 pub struct Server {
-    creation_chan: UnboundedSender<AnySynchroCreationInfo>,
-    deletion_chan: UnboundedSender<SynchroId>,
-    state_change_chan: UnboundedSender<StateChangeRequest>,
-    conflict_resolution_chan: UnboundedSender<ConflictResolutionRequest>,
+    commands_chan: UnboundedSender<UserCommand>,
     synchro_list: ReadOnlySynchroList,
 }
 
 impl Server {
     pub(crate) fn new(
-        creation_chan: UnboundedSender<AnySynchroCreationInfo>,
-        deletion_chan: UnboundedSender<SynchroId>,
-        state_change_chan: UnboundedSender<StateChangeRequest>,
-        conflict_resolution_chan: UnboundedSender<ConflictResolutionRequest>,
+        commands_chan: UnboundedSender<UserCommand>,
         synchro_list: ReadOnlySynchroList,
     ) -> Self {
         Self {
-            creation_chan,
-            deletion_chan,
-            state_change_chan,
-            conflict_resolution_chan,
+            commands_chan,
             synchro_list,
         }
     }
@@ -82,9 +76,10 @@ impl BrumeService for Server {
         }
 
         let synchro = AnySynchroCreationInfo::new(local, remote, name);
+        let command = UserCommand::SynchroCreation(SynchroCreationRequest::new(synchro));
 
-        self.creation_chan
-            .send(synchro)
+        self.commands_chan
+            .send(command)
             .map_err(|e| e.to_string())?;
 
         Ok(())
@@ -103,23 +98,23 @@ impl BrumeService for Server {
 
     async fn delete_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {
         info!("Received synchro deletion request: id {id:?}");
-        self.deletion_chan.send(id).map_err(|e| e.to_string())
+
+        let command = UserCommand::SynchroDeletion(SynchroDeletionRequest::new(id));
+        self.commands_chan.send(command).map_err(|e| e.to_string())
     }
 
     async fn pause_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {
         info!("Received synchro pause request: id {id:?}");
         let request = StateChangeRequest::new(id, SynchroState::Paused);
-        self.state_change_chan
-            .send(request)
-            .map_err(|e| e.to_string())
+        let command = UserCommand::StateChange(request);
+        self.commands_chan.send(command).map_err(|e| e.to_string())
     }
 
     async fn resume_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {
         info!("Received synchro resume request: id {id:?}");
         let request = StateChangeRequest::new(id, SynchroState::Running);
-        self.state_change_chan
-            .send(request)
-            .map_err(|e| e.to_string())
+        let command = UserCommand::StateChange(request);
+        self.commands_chan.send(command).map_err(|e| e.to_string())
     }
 
     async fn resolve_conflict(
@@ -156,8 +151,11 @@ impl BrumeService for Server {
             return Err("Node is not in conflict".to_string());
         }
 
-        self.conflict_resolution_chan
-            .send(ConflictResolutionRequest::new(id, path, side))
+        let request = ConflictResolutionRequest::new(id, path, side);
+        let command = UserCommand::ConflictResolution(request);
+
+        self.commands_chan
+            .send(command)
             .map_err(|e| e.to_string())?;
         Ok(())
     }
