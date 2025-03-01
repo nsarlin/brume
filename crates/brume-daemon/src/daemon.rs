@@ -152,6 +152,36 @@ impl Display for SynchroState {
     }
 }
 
+/// The different commands that can be received from user applications
+pub enum UserCommand {
+    SynchroCreation(SynchroCreationRequest),
+    SynchroDeletion(SynchroDeletionRequest),
+    StateChange(StateChangeRequest),
+    ConflictResolution(ConflictResolutionRequest),
+}
+
+/// A command to create a new synchro
+pub struct SynchroCreationRequest {
+    info: AnySynchroCreationInfo,
+}
+
+impl SynchroCreationRequest {
+    pub fn new(info: AnySynchroCreationInfo) -> Self {
+        Self { info }
+    }
+}
+
+/// A command to delete an existing synchro
+pub struct SynchroDeletionRequest {
+    id: SynchroId,
+}
+
+impl SynchroDeletionRequest {
+    pub fn new(id: SynchroId) -> Self {
+        Self { id }
+    }
+}
+
 /// A user request to change the [`SynchroState`] of a synchro
 pub struct StateChangeRequest {
     id: SynchroId,
@@ -164,7 +194,7 @@ impl StateChangeRequest {
     }
 }
 
-/// A use request for a conflict resolution
+/// A user request for a conflict resolution
 pub struct ConflictResolutionRequest {
     id: SynchroId,
     path: VirtualPathBuf,
@@ -185,10 +215,7 @@ pub struct Daemon {
     rpc_listener: Listener,
     synchro_list: ReadWriteSynchroList,
     server: Server,
-    creation_chan: Arc<Mutex<UnboundedReceiver<AnySynchroCreationInfo>>>,
-    deletion_chan: Arc<Mutex<UnboundedReceiver<SynchroId>>>,
-    state_change_chan: Arc<Mutex<UnboundedReceiver<StateChangeRequest>>>,
-    conflict_resolution_chan: Arc<Mutex<UnboundedReceiver<ConflictResolutionRequest>>>,
+    commands_chan: Arc<Mutex<UnboundedReceiver<UserCommand>>>,
     is_running: AtomicBool,
     config: DaemonConfig,
 }
@@ -215,30 +242,18 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         info!("Server running at {BRUME_SOCK_NAME}");
 
         let codec_builder = LengthDelimitedCodec::builder();
-        let (creation_to_daemon, creation_from_server) = unbounded_channel();
-        let (deletion_to_daemon, deletion_from_server) = unbounded_channel();
-        let (state_change_to_daemon, state_change_from_server) = unbounded_channel();
-        let (resolution_to_daemon, resolution_from_server) = unbounded_channel();
+        let (commands_to_daemon, commands_from_server) = unbounded_channel();
 
         let synchro_list = ReadWriteSynchroList::new();
 
-        let server = Server::new(
-            creation_to_daemon,
-            deletion_to_daemon,
-            state_change_to_daemon,
-            resolution_to_daemon,
-            synchro_list.as_read_only(),
-        );
+        let server = Server::new(commands_to_daemon, synchro_list.as_read_only());
 
         Ok(Self {
             codec_builder,
             rpc_listener: listener,
             synchro_list,
             server,
-            creation_chan: Arc::new(Mutex::new(creation_from_server)),
-            deletion_chan: Arc::new(Mutex::new(deletion_from_server)),
-            state_change_chan: Arc::new(Mutex::new(state_change_from_server)),
-            conflict_resolution_chan: Arc::new(Mutex::new(resolution_from_server)),
+            commands_chan: Arc::new(Mutex::new(commands_from_server)),
             is_running: AtomicBool::new(false),
             config,
         })
@@ -278,7 +293,8 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             loop {
                 tokio::select! {
                     _ = interval.tick() => break,
-                    res = self.handle_user_commands() => {
+                    Some(command) = self.recv_user_commands() => {
+                        let res = self.handle_user_commands(command).await;
                         res.inspect_err(|_| {
                             self.is_running.store(false, Ordering::Relaxed);
                         })?
@@ -323,66 +339,54 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         self.synchro_list.clone()
     }
 
-    pub async fn recv_creations(&self) -> Option<AnySynchroCreationInfo> {
-        let mut receiver = self.creation_chan.lock().await;
+    /// Receive messages of client applications
+    pub async fn recv_user_commands(&self) -> Option<UserCommand> {
+        let mut receiver = self.commands_chan.lock().await;
         receiver.recv().await
     }
 
-    pub async fn recv_deletions(&self) -> Option<SynchroId> {
-        let mut receiver = self.deletion_chan.lock().await;
-        receiver.recv().await
-    }
-
-    pub async fn recv_state_changes(&self) -> Vec<StateChangeRequest> {
-        let mut list = Vec::new();
-        let mut receiver = self.state_change_chan.lock().await;
-        receiver.recv_many(&mut list, 100).await; // TODO: configure recv size ?
-        list
-    }
-
-    pub async fn recv_conflict_resolutions(&self) -> Option<ConflictResolutionRequest> {
-        let mut receiver = self.conflict_resolution_chan.lock().await;
-        receiver.recv().await
-    }
-
-    /// Handles messages of client applications
-    pub async fn handle_user_commands(&self) -> Result<()> {
-        tokio::select! {
-            Some(new_synchro) = self.recv_creations() => {
-                if let Err(err) = self.synchro_list.insert(new_synchro).await {
+    /// Handle messages of client applications
+    pub async fn handle_user_commands(&self, command: UserCommand) -> Result<()> {
+        match command {
+            UserCommand::SynchroCreation(new_synchro) => {
+                if let Err(err) = self.synchro_list.insert(new_synchro.info).await {
                     let wrapped_err = anyhow!(err);
-                    error!("Failed insert new synchro: {wrapped_err:?}");
+                    error!("Failed to insert new synchro: {wrapped_err:?}");
                     if self.config.error_mode == ErrorMode::Exit {
                         return Err(wrapped_err);
                     }
                 }
             }
-            Some(to_delete) = self.recv_deletions() => {
-                if let Err(err) = self.synchro_list.remove(to_delete).await {
+
+            UserCommand::SynchroDeletion(to_delete) => {
+                if let Err(err) = self.synchro_list.remove(to_delete.id).await {
                     let wrapped_err = anyhow!(err);
-                    error!("Failed delete synchro: {wrapped_err:?}");
+                    error!("Failed to delete synchro: {wrapped_err:?}");
                     if self.config.error_mode == ErrorMode::Exit {
                         return Err(wrapped_err);
                     }
                 }
             }
-                        states_to_change = self.recv_state_changes() => {
-                for state_request in states_to_change {
-                    if let Err(err) = self.synchro_list
-                                                .read()
-                                                .await
-                                                .set_state(state_request.id, state_request.state).await {
-                        let wrapped_err = anyhow!(err);
-                        error!("Failed to set synchro state: {wrapped_err:?}");
-                        if self.config.error_mode == ErrorMode::Exit {
-                            return Err(wrapped_err);
-                        }
-                                                                                                }
-                                }
-                        }
-            Some(conflict) = self.recv_conflict_resolutions() => {
-                let res = self.synchro_list.resolve_conflict(conflict.id, &conflict.path,
-                                                             conflict.side).await;
+            UserCommand::StateChange(state_request) => {
+                if let Err(err) = self
+                    .synchro_list
+                    .read()
+                    .await
+                    .set_state(state_request.id, state_request.state)
+                    .await
+                {
+                    let wrapped_err = anyhow!(err);
+                    error!("Failed to set synchro state: {wrapped_err:?}");
+                    if self.config.error_mode == ErrorMode::Exit {
+                        return Err(wrapped_err);
+                    }
+                }
+            }
+            UserCommand::ConflictResolution(conflict) => {
+                let res = self
+                    .synchro_list
+                    .resolve_conflict(conflict.id, &conflict.path, conflict.side)
+                    .await;
                 if let Err(err) = res {
                     let wrapped_err = anyhow!(err);
                     error!("Failed resolve conflict: {wrapped_err:?}");
