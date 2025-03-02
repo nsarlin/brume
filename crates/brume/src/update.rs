@@ -21,7 +21,7 @@
 //!
 //! [`VFS`]: crate::vfs::Vfs
 
-use std::{cmp::Ordering, collections::HashSet};
+use std::collections::HashSet;
 
 use futures::future::try_join_all;
 
@@ -357,51 +357,25 @@ impl VfsDiffList {
         local_vfs: &Vfs<SyncInfo>,
         remote_vfs: &Vfs<RemoteSyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
-        // Here we cannot use `iter_zip_map` or an async variant of it because it does not seem
-        // possible to express the lifetimes required by the async closures
+        let res = self.iter_zip_map(
+            &remote_updates,
+            |local_item| {
+                Ok(SortedVec::from_vec(vec![
+                    VirtualReconciledUpdate::applicable_remote(local_item),
+                ]))
+            },
+            |local_item, remote_item| local_item.reconcile(remote_item, local_vfs, remote_vfs),
+            |remote_item| {
+                Ok(SortedVec::from_vec(vec![
+                    VirtualReconciledUpdate::applicable_local(remote_item),
+                ]))
+            },
+        )?;
 
-        let mut ret = Vec::new();
-        let mut local_iter = self.iter();
-        let mut remote_iter = remote_updates.iter();
-
-        let mut local_item_opt = local_iter.next();
-        let mut remote_item_opt = remote_iter.next();
-
-        while let (Some(local_item), Some(remote_item)) = (local_item_opt, remote_item_opt) {
-            match local_item.key().cmp(remote_item.key()) {
-                Ordering::Less => {
-                    // Propagate the update from local to remote
-                    ret.push(VirtualReconciledUpdate::applicable_remote(local_item));
-                    local_item_opt = local_iter.next()
-                }
-
-                Ordering::Equal => {
-                    ret.extend(local_item.reconcile(remote_item, local_vfs, remote_vfs)?);
-                    local_item_opt = local_iter.next();
-                    remote_item_opt = remote_iter.next();
-                }
-                Ordering::Greater => {
-                    // Propagate the update from remote to local
-                    ret.push(VirtualReconciledUpdate::applicable_local(remote_item));
-                    remote_item_opt = remote_iter.next();
-                }
-            }
-        }
-
-        // Handle the remaining items that are present in an iterator and not the
-        // other one
-        while let Some(local_item) = local_item_opt {
-            ret.push(VirtualReconciledUpdate::applicable_remote(local_item));
-            local_item_opt = local_iter.next();
-        }
-
-        while let Some(remote_item) = remote_item_opt {
-            ret.push(VirtualReconciledUpdate::applicable_local(remote_item));
-            remote_item_opt = remote_iter.next();
-        }
-
-        // Ok to use unchecked since we iterate on ordered updates
-        Ok(SortedVec::unchecked_from_vec(ret))
+        // Updates that are only present on one target will be sorted because `iter_zip_map`
+        // iterates in order. Updates present on both targets will also be sorted relatively because
+        // reconcile returns a `SortedVec`
+        Ok(SortedVec::unchecked_flatten(res))
     }
 }
 
