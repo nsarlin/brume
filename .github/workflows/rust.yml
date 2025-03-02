@@ -23,11 +23,11 @@ jobs:
       env:
         RUSTDOCFLAGS: "-D warnings"
       run: cargo doc --no-deps
-    - name: Build
-      run: cargo build
     - name: Format
       run: cargo +nightly fmt --check --all
     - name: Clippy
       run: cargo clippy --all-targets -- -Dwarnings
+    - name: Find unused dependencies
+      uses: bnjbvr/cargo-machete@v0.8.0
     - name: Run tests
       run: cargo test
