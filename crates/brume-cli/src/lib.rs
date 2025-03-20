@@ -1,3 +1,5 @@
+pub mod commands;
+
 use std::collections::HashMap;
 
 use interprocess::local_socket::{
