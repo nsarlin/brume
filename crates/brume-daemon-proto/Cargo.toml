@@ -1,7 +1,15 @@
 [package]
 name = "brume-daemon-proto"
-version = "0.1.0"
 edition = "2021"
+description = "Common types used to communicates with the Brume daemon"
+
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
 
 [dependencies]
 tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
