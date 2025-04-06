@@ -39,12 +39,7 @@ async fn main() {
     let daemon = Daemon::new(config).unwrap();
     let daemon = Arc::new(daemon);
 
-    let daemon_task = {
-        let daemon = daemon.clone();
-        tokio::spawn(async move {
-            daemon.run().await.unwrap();
-        })
-    };
+    let daemon_task = daemon.spawn().await;
 
     // Create 2 folders that will be synchronized
     let dir_a = tempfile::tempdir().unwrap();
@@ -196,6 +191,6 @@ async fn main() {
     assert_eq!(sync_a.status(), SynchroStatus::Ok);
     assert_eq!(sync_b.status(), SynchroStatus::Ok);
 
-    daemon_task.abort();
-    daemon_task.await.unwrap_err();
+    daemon.stop();
+    daemon_task.await.unwrap().unwrap();
 }

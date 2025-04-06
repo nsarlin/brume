@@ -25,13 +25,17 @@ use tarpc::{
     serde_transport,
     server::{BaseChannel, Channel},
     tokio_serde::formats::Bincode,
-    tokio_util::codec::{length_delimited::Builder, LengthDelimitedCodec},
+    tokio_util::{
+        codec::{length_delimited::Builder, LengthDelimitedCodec},
+        sync::CancellationToken,
+    },
 };
 use tokio::{
     sync::{
         mpsc::{unbounded_channel, UnboundedReceiver},
         Mutex,
     },
+    task::JoinHandle,
     time,
 };
 
@@ -160,6 +164,7 @@ pub struct Daemon {
     server: Server,
     commands_chan: Mutex<UnboundedReceiver<UserCommand>>,
     is_running: AtomicBool,
+    cancellation_token: CancellationToken,
     config: DaemonConfig,
 }
 
@@ -198,13 +203,31 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             server,
             commands_chan: Mutex::new(commands_from_server),
             is_running: AtomicBool::new(false),
+            cancellation_token: CancellationToken::new(),
             config,
         })
     }
 
-    /// Handle client connections and periodically synchronize filesystems
+    /// Requests to stop the running daemon
+    pub fn stop(&self) {
+        self.cancellation_token.cancel()
+    }
+
+    /// Spawns a new tokio task and runs the daemon inside it
+    pub async fn spawn(self: &Arc<Self>) -> JoinHandle<Result<()>> {
+        let daemon = self.clone();
+        tokio::spawn(async move { daemon.run().await })
+    }
+
+    /// Handles client connections and periodically synchronize filesystems
     pub async fn run(self: Arc<Self>) -> Result<()> {
-        self.is_running.store(true, Ordering::Relaxed);
+        if self
+            .is_running
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(anyhow!("Daemon is already running"));
+        }
         // Handle connections from client apps
         {
             let server = self.clone();
@@ -242,6 +265,10 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                             self.is_running.store(false, Ordering::Relaxed);
                         })?
                     }
+                    _ = self.cancellation_token.cancelled() => {
+                        self.is_running.store(false, Ordering::Relaxed);
+                        return Ok(())
+                    }
                 }
             }
         }
@@ -254,7 +281,14 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         }
 
         loop {
-            let conn = match self.rpc_listener.accept().await {
+            let res = tokio::select! {
+                res = self.rpc_listener.accept() => res,
+                _ = self.cancellation_token.cancelled() => {
+                    return
+                }
+            };
+
+            let conn = match res {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("There was an error with an incoming connection: {e}");
@@ -268,7 +302,14 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             let fut = BaseChannel::with_defaults(transport)
                 .execute(self.server.clone().serve())
                 .for_each(spawn);
-            tokio::spawn(fut);
+
+            let token = self.cancellation_token.child_token();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = fut => {},
+                    _ = token.cancelled() => {}
+                }
+            });
         }
     }
 
@@ -282,13 +323,13 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         self.synchro_list.clone()
     }
 
-    /// Receive messages of client applications
+    /// Receives messages of client applications
     pub async fn recv_user_commands(&self) -> Option<UserCommand> {
         let mut receiver = self.commands_chan.lock().await;
         receiver.recv().await
     }
 
-    /// Handle messages of client applications
+    /// Handles messages of client applications
     pub async fn handle_user_commands(&self, command: UserCommand) -> Result<()> {
         match command {
             UserCommand::SynchroCreation(new_synchro) => {
