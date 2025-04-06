@@ -158,7 +158,7 @@ pub struct Daemon {
     rpc_listener: Listener,
     synchro_list: ReadWriteSynchroList,
     server: Server,
-    commands_chan: Arc<Mutex<UnboundedReceiver<UserCommand>>>,
+    commands_chan: Mutex<UnboundedReceiver<UserCommand>>,
     is_running: AtomicBool,
     config: DaemonConfig,
 }
@@ -196,7 +196,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             rpc_listener: listener,
             synchro_list,
             server,
-            commands_chan: Arc::new(Mutex::new(commands_from_server)),
+            commands_chan: Mutex::new(commands_from_server),
             is_running: AtomicBool::new(false),
             config,
         })
