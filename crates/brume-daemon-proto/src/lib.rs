@@ -27,6 +27,12 @@ impl Default for SynchroId {
     }
 }
 
+impl From<Uuid> for SynchroId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
 impl SynchroId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -36,13 +42,17 @@ impl SynchroId {
         self.0
     }
 
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
     pub fn short(&self) -> u32 {
         self.0.as_fields().0
     }
 }
 
 /// A reference to a filesystem in the SynchroList handled by the brume daemon.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AnyFsRef {
     id: Uuid,
     description: AnyFsDescription,
@@ -64,6 +74,10 @@ impl From<AnyFsCreationInfo> for AnyFsRef {
 }
 
 impl AnyFsRef {
+    pub fn new(id: Uuid, description: AnyFsDescription) -> Self {
+        Self { id, description }
+    }
+
     pub fn description(&self) -> &AnyFsDescription {
         &self.description
     }
@@ -105,6 +119,21 @@ impl Display for SynchroStatus {
     }
 }
 
+impl TryFrom<&str> for SynchroStatus {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, <SynchroStatus as TryFrom<&str>>::Error> {
+        match value {
+            "Ok" => Ok(Self::Ok),
+            "Conflict" => Ok(Self::Conflict),
+            "Error" => Ok(Self::Error),
+            "Desync" => Ok(Self::Desync),
+            "SyncInProgress" => Ok(Self::SyncInProgress),
+            _ => Err(()),
+        }
+    }
+}
+
 impl From<FullSyncStatus> for SynchroStatus {
     fn from(value: FullSyncStatus) -> Self {
         match value {
@@ -124,7 +153,7 @@ impl SynchroStatus {
 }
 
 /// User controlled state of the synchro
-#[derive(Default, Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, PartialEq, Eq, Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum SynchroState {
     #[default]
     Running,
@@ -137,6 +166,18 @@ impl Display for SynchroState {
     }
 }
 
+impl TryFrom<&str> for SynchroState {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Running" => Ok(Self::Running),
+            "Paused" => Ok(Self::Paused),
+            _ => Err(()),
+        }
+    }
+}
+
 /// A [`Synchro`] where the [`Backend`] filesystems are only known at runtime.
 ///
 /// This type represents only an index and needs a valid SynchroList, to actually be used. It
@@ -144,7 +185,7 @@ impl Display for SynchroState {
 ///
 /// [`Backend`]: FSBackend
 /// [`Synchro`]: brume::synchro::Synchro
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AnySynchroRef {
     local: AnyFsRef,
     remote: AnyFsRef,

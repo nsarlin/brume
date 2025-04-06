@@ -377,9 +377,9 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     /// them.
     pub fn apply_updates_list_vfs(
         &mut self,
-        updates: SortedVec<VfsUpdate<Backend::SyncInfo>>,
+        updates: &SortedVec<VfsUpdate<Backend::SyncInfo>>,
     ) -> Result<(), VfsUpdateApplicationError> {
-        for update in updates.into_iter() {
+        for update in updates.iter() {
             self.apply_update_vfs(update)?;
         }
         Ok(())
@@ -388,7 +388,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     /// Applies an update to the [`Vfs`] of this filesystem.
     pub fn apply_update_vfs(
         &mut self,
-        update: VfsUpdate<Backend::SyncInfo>,
+        update: &VfsUpdate<Backend::SyncInfo>,
     ) -> Result<(), VfsUpdateApplicationError> {
         self.status_vfs.apply_update(update, &self.loaded_vfs)
     }

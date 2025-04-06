@@ -1,16 +1,14 @@
 use std::{process::exit, sync::Arc, time::Duration};
 
-use brume::{
-    concrete::local::LocalDir, filesystem::FileSystem, synchro::SynchroSide, vfs::VirtualPathBuf,
-};
 use env_logger::Builder;
+
+use brume_daemon_proto::{
+    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroState, SynchroStatus,
+};
 
 use brume_daemon::{
     daemon::{Daemon, DaemonConfig, ErrorMode},
     db::DatabaseConfig,
-};
-use brume_daemon_proto::{
-    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroStatus,
 };
 use log::{info, LevelFilter};
 use tarpc::context;
@@ -35,15 +33,17 @@ async fn main() {
     let sock_name = get_random_sock_name();
     info!("using sock name {sock_name}");
     let sync_interval = Duration::from_secs(2);
+    let dir_db = tempfile::tempdir().unwrap();
+
     let config = DaemonConfig::default()
         .with_sync_interval(sync_interval)
         .with_error_mode(ErrorMode::Exit)
-        .with_db_config(DatabaseConfig::InMemory)
+        .with_db_config(DatabaseConfig::OnDisk(dir_db.path().join("db.sqlite")))
         .with_sock_name(&sock_name);
-    let daemon = Daemon::new(config).await.unwrap();
+    let daemon = Daemon::new(config.clone()).await.unwrap();
     let daemon = Arc::new(daemon);
 
-    let daemon_task = daemon.spawn().await;
+    daemon.spawn().await;
 
     // Create 2 folders that will be synchronized
     let dir_a = tempfile::tempdir().unwrap();
@@ -78,14 +78,13 @@ async fn main() {
 
     // Wait a full sync
     wait_full_sync(sync_interval, &rpc).await;
+
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
     }
 
     let list = rpc.list_synchros(context::current()).await.unwrap();
-    assert_eq!(list.len(), 1);
-
     let sync_id_a = *list.keys().next().unwrap();
 
     // Initiate the second synchro
@@ -96,7 +95,32 @@ async fn main() {
         .unwrap()
         .unwrap();
 
-    // Wait a full sync
+    wait_full_sync(sync_interval, &rpc).await;
+
+    // Pause the first synchro
+    rpc.pause_synchro(context::current(), sync_id_a)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Wait for change to be effective
+    wait_full_sync(sync_interval, &rpc).await;
+
+    // Stop the daemon
+    daemon.stop();
+
+    let sock_name = get_random_sock_name();
+    info!("using sock name {sock_name}");
+
+    // Restart the daemon with the same db
+    let daemon = Daemon::new(config.clone().with_sock_name(&sock_name))
+        .await
+        .unwrap();
+    let daemon = Arc::new(daemon);
+
+    daemon.spawn().await;
+    let rpc = connect_to_daemon(&sock_name).await.unwrap();
+
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
@@ -105,27 +129,14 @@ async fn main() {
 
     let list = rpc.list_synchros(context::current()).await.unwrap();
     assert_eq!(list.len(), 2);
-
     let sync_id_b = *list.keys().find(|k| **k != sync_id_a).unwrap();
 
-    // Check filesystem content
-    let concrete_a: LocalDir = LocalDirCreationInfo::new(dir_a.path()).try_into().unwrap();
-    let mut fs_a = FileSystem::new(concrete_a);
+    let sync_a = list.get(&sync_id_a).unwrap();
+    assert_eq!(sync_a.state(), SynchroState::Paused);
+    let sync_b = list.get(&sync_id_b).unwrap();
+    assert_eq!(sync_b.state(), SynchroState::Running);
 
-    let concrete_b: LocalDir = LocalDirCreationInfo::new(dir_b.path()).try_into().unwrap();
-    let mut fs_b = FileSystem::new(concrete_b);
-
-    fs_a.diff_vfs().await.unwrap();
-    fs_b.diff_vfs().await.unwrap();
-    assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
-
-    // Pause the first synchro
-    rpc.pause_synchro(context::current(), sync_id_a)
-        .await
-        .unwrap()
-        .unwrap();
-
-    // Modify a file on both side
+    // Create a conflict to check status storage in db
     let content_a = b"This is a test";
     std::fs::write(
         dir_a.path().to_path_buf().join("Templates/Readme.md"),
@@ -140,7 +151,6 @@ async fn main() {
     )
     .unwrap();
 
-    // Wait for propagation on the first fs
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
@@ -153,7 +163,27 @@ async fn main() {
         .unwrap()
         .unwrap();
 
-    // Wait for another propagation
+    wait_full_sync(sync_interval, &rpc).await;
+    if !daemon.is_running() {
+        stop_nextcloud(container).await;
+        exit(1)
+    }
+
+    // Stop the daemon
+    daemon.stop();
+
+    let sock_name = get_random_sock_name();
+    info!("using sock name {sock_name}");
+
+    // Restart the daemon with the same db
+    let daemon = Daemon::new(config.with_sock_name(&sock_name))
+        .await
+        .unwrap();
+    let daemon = Arc::new(daemon);
+    daemon.spawn().await;
+
+    let rpc = connect_to_daemon(&sock_name).await.unwrap();
+
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
@@ -166,35 +196,5 @@ async fn main() {
     assert_eq!(sync_a.status(), SynchroStatus::Conflict);
     assert_eq!(sync_b.status(), SynchroStatus::Ok);
 
-    rpc.resolve_conflict(
-        context::current(),
-        sync_id_a,
-        VirtualPathBuf::new("/Templates/Readme.md").unwrap(),
-        SynchroSide::Local,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    // Wait for a full propagation
-    wait_full_sync(sync_interval, &rpc).await;
-    if !daemon.is_running() {
-        stop_nextcloud(container).await;
-        exit(1)
-    }
-
-    fs_a.diff_vfs().await.unwrap();
-    fs_b.diff_vfs().await.unwrap();
-    assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
-    let content_b = std::fs::read(dir_a.path().to_path_buf().join("Templates/Readme.md")).unwrap();
-    assert_eq!(content_a, content_b.as_slice());
-
-    let list = rpc.list_synchros(context::current()).await.unwrap();
-    let sync_a = list.get(&sync_id_a).unwrap();
-    let sync_b = list.get(&sync_id_b).unwrap();
-    assert_eq!(sync_a.status(), SynchroStatus::Ok);
-    assert_eq!(sync_b.status(), SynchroStatus::Ok);
-
-    daemon.stop();
-    daemon_task.await.unwrap().unwrap();
+    daemon.stop()
 }

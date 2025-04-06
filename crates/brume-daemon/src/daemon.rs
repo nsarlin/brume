@@ -6,6 +6,7 @@
 use std::{
     future::Future,
     io,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -43,7 +44,11 @@ use brume_daemon_proto::{
     AnySynchroCreationInfo, BrumeService, SynchroId, SynchroSide, SynchroState, BRUME_SOCK_NAME,
 };
 
-use crate::{server::Server, synchro_list::ReadWriteSynchroList};
+use crate::{
+    db::{Database, DatabaseConfig},
+    server::Server,
+    synchro_list::ReadWriteSynchroList,
+};
 
 /// Configuration of a [`Daemon`]
 #[derive(Clone)]
@@ -54,6 +59,8 @@ pub struct DaemonConfig {
     error_mode: ErrorMode,
     /// Name of the unix socket used to communicate with the daemon
     sock_name: String,
+    /// Config of the sqlite database
+    db: DatabaseConfig,
 }
 
 impl Default for DaemonConfig {
@@ -62,6 +69,7 @@ impl Default for DaemonConfig {
             sync_interval: Duration::from_secs(10),
             error_mode: ErrorMode::default(),
             sock_name: BRUME_SOCK_NAME.to_string(),
+            db: DatabaseConfig::OnDisk(PathBuf::from("./dev.db")), // TODO: change this
         }
     }
 }
@@ -81,6 +89,13 @@ impl DaemonConfig {
     pub fn with_sock_name(self, sock_name: &str) -> Self {
         Self {
             sock_name: sock_name.to_string(),
+            ..self
+        }
+    }
+
+    pub fn with_db_config(self, db_config: DatabaseConfig) -> Self {
+        Self {
+            db: db_config,
             ..self
         }
     }
@@ -165,11 +180,12 @@ pub struct Daemon {
     commands_chan: Mutex<UnboundedReceiver<UserCommand>>,
     is_running: AtomicBool,
     cancellation_token: CancellationToken,
+    database: Database,
     config: DaemonConfig,
 }
 
 impl Daemon {
-    pub fn new(config: DaemonConfig) -> Result<Self> {
+    pub async fn new(config: DaemonConfig) -> Result<Self> {
         let name = config
             .sock_name
             .as_str()
@@ -180,20 +196,23 @@ impl Daemon {
             Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
                 error!(
                     "Error: could not start server because the socket file is occupied. \
-Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
+Please check if {} is in use by another process and try again.",
+                    config.sock_name
                 );
                 return Err(e).context("Failed to start server");
             }
             x => x?,
         };
 
-        info!("Server running at {BRUME_SOCK_NAME}");
-
         let codec_builder = LengthDelimitedCodec::builder();
         let (commands_to_daemon, commands_from_server) = unbounded_channel();
 
-        let synchro_list = ReadWriteSynchroList::new();
+        info!("Loading db: {}", config.db.as_str().unwrap());
+        let database = Database::new(&config.db).await?;
 
+        let synchro_list = ReadWriteSynchroList::from(database.load_all_synchros().await.unwrap());
+
+        info!("Server running at {}", config.sock_name);
         let server = Server::new(commands_to_daemon, synchro_list.as_read_only());
 
         Ok(Self {
@@ -205,6 +224,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             is_running: AtomicBool::new(false),
             cancellation_token: CancellationToken::new(),
             config,
+            database,
         })
     }
 
@@ -242,7 +262,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             info!("Starting full sync for all filesystems");
             let synchro_list = self.synchro_list();
 
-            let results = synchro_list.sync_all().await;
+            let results = synchro_list.sync_all(&self.database).await;
 
             for res in results {
                 if let Err(err) = res {
@@ -329,11 +349,42 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
         receiver.recv().await
     }
 
+    /// Creates a new synchro
+    pub async fn create_synchro(&self, synchro: SynchroCreationRequest) -> Result<()> {
+        let info = synchro.info;
+        let created = self.synchro_list.insert(info.clone()).await?;
+
+        self.database.insert_synchro(created, info).await?;
+
+        Ok(())
+    }
+
+    /// Deletes a synchro
+    pub async fn delete_synchro(&self, synchro: SynchroDeletionRequest) -> Result<()> {
+        self.synchro_list.remove(synchro.id).await?;
+        self.database.delete_synchro(synchro.id).await?;
+
+        Ok(())
+    }
+
+    pub async fn update_synchro_state(&self, state_request: StateChangeRequest) -> Result<()> {
+        self.synchro_list
+            .read()
+            .await
+            .set_state(state_request.id, state_request.state)
+            .await?;
+        self.database
+            .set_synchro_state(state_request.id, state_request.state)
+            .await?;
+
+        Ok(())
+    }
+
     /// Handles messages of client applications
     pub async fn handle_user_commands(&self, command: UserCommand) -> Result<()> {
         match command {
             UserCommand::SynchroCreation(new_synchro) => {
-                if let Err(err) = self.synchro_list.insert(new_synchro.info).await {
+                if let Err(err) = self.create_synchro(new_synchro).await {
                     let wrapped_err = anyhow!(err);
                     error!("Failed to insert new synchro: {wrapped_err:?}");
                     if self.config.error_mode == ErrorMode::Exit {
@@ -343,7 +394,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
             }
 
             UserCommand::SynchroDeletion(to_delete) => {
-                if let Err(err) = self.synchro_list.remove(to_delete.id).await {
+                if let Err(err) = self.delete_synchro(to_delete).await {
                     let wrapped_err = anyhow!(err);
                     error!("Failed to delete synchro: {wrapped_err:?}");
                     if self.config.error_mode == ErrorMode::Exit {
@@ -352,13 +403,7 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                 }
             }
             UserCommand::StateChange(state_request) => {
-                if let Err(err) = self
-                    .synchro_list
-                    .read()
-                    .await
-                    .set_state(state_request.id, state_request.state)
-                    .await
-                {
+                if let Err(err) = self.update_synchro_state(state_request).await {
                     let wrapped_err = anyhow!(err);
                     error!("Failed to set synchro state: {wrapped_err:?}");
                     if self.config.error_mode == ErrorMode::Exit {
@@ -367,9 +412,11 @@ Please check if {BRUME_SOCK_NAME} is in use by another process and try again."
                 }
             }
             UserCommand::ConflictResolution(conflict) => {
+                // TODO: resolve conflict can be slow and should be performed in another task
+                // to not block the receiver thread
                 let res = self
                     .synchro_list
-                    .resolve_conflict(conflict.id, &conflict.path, conflict.side)
+                    .resolve_conflict(conflict.id, &conflict.path, conflict.side, &self.database)
                     .await;
                 if let Err(err) = res {
                     let wrapped_err = anyhow!(err);

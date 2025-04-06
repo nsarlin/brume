@@ -43,14 +43,14 @@ pub enum LocalDirError {
 }
 
 impl LocalDirError {
-    fn io<P: Debug>(path: &P, source: io::Error) -> Self {
+    pub fn io<P: Debug>(path: &P, source: io::Error) -> Self {
         Self::IoError {
             path: format!("{:?}", path),
             source,
         }
     }
 
-    fn invalid_path<P: Debug>(path: &P) -> Self {
+    pub fn invalid_path<P: Debug>(path: &P) -> Self {
         Self::InvalidPath(format!("{:?}", path))
     }
 }
@@ -259,7 +259,7 @@ impl From<io::Error> for FsBackendError {
 ///
 /// It is based on the modification time which is not recursive for directories, so we have to
 /// handle the recursion ourselves.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalSyncInfo {
     last_modified: DateTime<Utc>,
 }
@@ -302,10 +302,11 @@ pub struct LocalDirDescription {
 }
 
 impl LocalDirDescription {
-    pub fn new(path: &Path) -> Self {
+    pub fn new<P: AsRef<Path>>(path: &P) -> Self {
         Self {
-            path: path.to_path_buf(),
+            path: path.as_ref().to_path_buf(),
             name: path
+                .as_ref()
                 .canonicalize()
                 .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
                 .unwrap_or("<anonymous>".to_string()),

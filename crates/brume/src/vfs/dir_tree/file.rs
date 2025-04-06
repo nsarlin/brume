@@ -27,6 +27,14 @@ impl<SyncInfo> FileMeta<SyncInfo> {
         }
     }
 
+    pub fn new_with_state(name: &str, size: u64, state: NodeState<SyncInfo>) -> Self {
+        Self {
+            name: name.to_string(),
+            size,
+            state,
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

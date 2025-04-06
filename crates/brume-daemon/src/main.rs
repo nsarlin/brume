@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
         .filter(Some("brume_daemon"), LevelFilter::Debug)
         .init();
 
-    let daemon = Arc::new(Daemon::new(DaemonConfig::default())?);
+    let daemon = Arc::new(Daemon::new(DaemonConfig::default()).await?);
 
     daemon.run().await
 }

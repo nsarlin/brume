@@ -24,6 +24,7 @@
 use std::collections::HashSet;
 
 use futures::future::try_join_all;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     concrete::{ConcreteFS, ConcreteFileCloneResult, FSBackend, FsBackendError, Named},
@@ -146,13 +147,14 @@ impl<SyncInfo: IsModified> IsModified for NodeState<SyncInfo> {
 }
 
 /// The kinds of fs modifications that can be represented in an update
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum UpdateKind {
     DirCreated,
     DirRemoved,
     FileCreated,
     FileRemoved,
     FileModified,
+    //TODO: add DirModified to update the syncinfo of a dir
     //TODO: detect moves
 }
 
@@ -198,7 +200,7 @@ impl UpdateTarget {
 }
 
 /// A single diff on a vfs node, returned by [`Vfs::diff`]
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VfsDiff {
     path: VirtualPathBuf, // Field order is important for the "Ord" impl
     kind: UpdateKind,
@@ -963,15 +965,18 @@ impl<SrcSyncInfo, DstSyncInfo> AppliedUpdate<SrcSyncInfo, DstSyncInfo> {
 }
 
 /// An update that failed because an error occurred on one of the concrete fs
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FailedUpdateApplication {
-    error: FsBackendError,
+    error: String,
     update: VfsDiff,
 }
 
 impl FailedUpdateApplication {
     pub fn new(update: VfsDiff, error: FsBackendError) -> Self {
-        Self { update, error }
+        Self {
+            update,
+            error: format!("{error}"),
+        }
     }
 
     pub fn path(&self) -> &VirtualPath {
@@ -982,7 +987,7 @@ impl FailedUpdateApplication {
         &self.update
     }
 
-    pub fn error(&self) -> &FsBackendError {
+    pub fn error(&self) -> &str {
         &self.error
     }
 }
@@ -1013,6 +1018,10 @@ impl<SyncInfo> VfsDirCreation<SyncInfo> {
 
     pub fn path(&self) -> &VirtualPath {
         &self.path
+    }
+
+    pub fn dir(&self) -> &DirTree<SyncInfo> {
+        &self.dir
     }
 }
 
@@ -1048,8 +1057,8 @@ impl<SyncInfo> VfsFileUpdate<SyncInfo> {
         self.file_size
     }
 
-    pub fn into_sync_info(self) -> SyncInfo {
-        self.file_info
+    pub fn sync_info(&self) -> &SyncInfo {
+        &self.file_info
     }
 }
 

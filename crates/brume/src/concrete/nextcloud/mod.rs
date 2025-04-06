@@ -208,7 +208,7 @@ impl FSBackend for NextcloudFs {
 /// server if a node or its content is modified.
 ///
 /// [etag]: https://docs.nextcloud.com/desktop/3.13/architecture.html#synchronization-by-time-versus-etag
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextcloudSyncInfo {
     tag: u128,
 }

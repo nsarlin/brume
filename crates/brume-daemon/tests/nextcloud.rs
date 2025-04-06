@@ -5,7 +5,10 @@ use env_logger::Builder;
 
 use brume_daemon_proto::{AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo};
 
-use brume_daemon::daemon::{Daemon, DaemonConfig, ErrorMode};
+use brume_daemon::{
+    daemon::{Daemon, DaemonConfig, ErrorMode},
+    db::DatabaseConfig,
+};
 use log::{info, LevelFilter};
 use tarpc::context;
 
@@ -32,8 +35,9 @@ async fn main() {
     let config = DaemonConfig::default()
         .with_sync_interval(sync_interval)
         .with_error_mode(ErrorMode::Exit)
+        .with_db_config(DatabaseConfig::InMemory)
         .with_sock_name(&sock_name);
-    let daemon = Daemon::new(config).unwrap();
+    let daemon = Daemon::new(config).await.unwrap();
     let daemon = Arc::new(daemon);
 
     let daemon_task = daemon.spawn().await;
