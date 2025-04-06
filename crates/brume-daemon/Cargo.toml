@@ -1,7 +1,8 @@
 [package]
 name = "brume-daemon"
-edition = "2021"
 description = "A daemon that synchronizes files in the background using Brume"
+edition = "2024"
+rust-version = "1.85"
 
 version.workspace = true
 authors.workspace = true

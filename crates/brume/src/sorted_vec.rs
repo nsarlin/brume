@@ -308,11 +308,12 @@ mod test {
             .map(|val| val.into_node())
             .collect();
 
-        assert!(vec
-            .0
-            .iter()
-            .zip(reference.iter())
-            .all(|(a, b)| a.structural_eq(b)))
+        assert!(
+            vec.0
+                .iter()
+                .zip(reference.iter())
+                .all(|(a, b)| a.structural_eq(b))
+        )
     }
 
     #[test]
@@ -341,11 +342,12 @@ mod test {
         .map(|val| val.into_node())
         .collect();
 
-        assert!(vec
-            .0
-            .iter()
-            .zip(reference.iter())
-            .all(|(a, b)| a.structural_eq(b)))
+        assert!(
+            vec.0
+                .iter()
+                .zip(reference.iter())
+                .all(|(a, b)| a.structural_eq(b))
+        )
     }
 
     #[test]
@@ -374,11 +376,12 @@ mod test {
         .map(|val| val.into_node())
         .collect();
 
-        assert!(vec
-            .0
-            .iter()
-            .zip(reference.iter())
-            .all(|(a, b)| a.structural_eq(b)))
+        assert!(
+            vec.0
+                .iter()
+                .zip(reference.iter())
+                .all(|(a, b)| a.structural_eq(b))
+        )
     }
 
     #[test]
@@ -400,9 +403,10 @@ mod test {
         assert!(vec.remove("e"));
         assert!(!vec.remove("j"));
         assert!(!vec.remove("e"));
-        assert!(vec
-            .remove_if("f3", |node| node.kind() == NodeKind::File)
-            .unwrap());
+        assert!(
+            vec.remove_if("f3", |node| node.kind() == NodeKind::File)
+                .unwrap()
+        );
         assert_eq!(
             vec.remove_if("a", |node| node.kind() == NodeKind::File),
             Some(false)
@@ -413,11 +417,12 @@ mod test {
             .map(|val| val.into_node())
             .collect();
 
-        assert!(vec
-            .0
-            .iter()
-            .zip(reference.iter())
-            .all(|(a, b)| a.structural_eq(b)))
+        assert!(
+            vec.0
+                .iter()
+                .zip(reference.iter())
+                .all(|(a, b)| a.structural_eq(b))
+        )
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::{
     vfs::{DirTree, FileMeta, VfsNode, VirtualPath, VirtualPathBuf, VirtualPathError},
 };
 
-use super::{NextcloudFsError, NextcloudSyncInfo, NC_DAV_PATH_STR};
+use super::{NC_DAV_PATH_STR, NextcloudFsError, NextcloudSyncInfo};
 
 /// Error encountered when parsing a tag in the WebDAV response
 #[derive(Error, Debug)]

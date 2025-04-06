@@ -1,19 +1,19 @@
 use std::{net::TcpListener, time::Duration};
 
 use interprocess::local_socket::{
-    tokio::{prelude::*, Stream},
     GenericNamespaced, ToNsName,
+    tokio::{Stream, prelude::*},
 };
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 
 use tarpc::{
     context, serde_transport, tokio_serde::formats::Bincode,
     tokio_util::codec::LengthDelimitedCodec,
 };
 use testcontainers::{
-    core::{wait::HttpWaitStrategy, IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
     ContainerAsync, GenericImage, ImageExt,
+    core::{IntoContainerPort, WaitFor, wait::HttpWaitStrategy},
+    runners::AsyncRunner,
 };
 
 use brume_daemon_proto::{BrumeServiceClient, SynchroStatus};

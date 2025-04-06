@@ -1,7 +1,8 @@
 [package]
 name = "brume-gui"
-edition = "2021"
 description = "WIP - A GUI to interract with the Brume daemon"
+edition = "2024"
+rust-version = "1.85"
 
 version.workspace = true
 authors.workspace = true

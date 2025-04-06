@@ -13,11 +13,11 @@ pub use dir_tree::*;
 pub use virtual_path::*;
 
 use crate::{
+    NameMismatchError,
     update::{
         DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList, VfsUpdate,
         VfsUpdateApplicationError,
     },
-    NameMismatchError,
 };
 
 /// The virtual in-memory representation of a file system.

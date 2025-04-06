@@ -22,7 +22,7 @@ use crate::{
     vfs::{Vfs, VirtualPath, VirtualPathError},
 };
 
-use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
+use dav::{TagError, dav_parse_entity_tag, dav_parse_vfs};
 
 use super::{FSBackend, FsBackendError, FsInstanceDescription, Named};
 

@@ -1,9 +1,9 @@
 use bytes::Bytes;
-use futures::stream::{Stream, TryStreamExt};
 use futures::TryStream;
+use futures::stream::{Stream, TryStreamExt};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 /// A stream that counts the number of bytes that goes through it

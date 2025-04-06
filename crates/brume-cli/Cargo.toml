@@ -1,7 +1,8 @@
 [package]
 name = "brume-cli"
-edition = "2021"
 description = "CLI to manage folders synchronized with brume"
+edition = "2024"
+rust-version = "1.85"
 
 version.workspace = true
 authors.workspace = true

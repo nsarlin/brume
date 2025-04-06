@@ -5,6 +5,7 @@ use log::{debug, error, info};
 use futures::future::join_all;
 
 use crate::{
+    Error,
     concrete::{ConcreteFS, ConcreteUpdateApplicationError, FSBackend, FsBackendError},
     sorted_vec::SortedVec,
     update::{
@@ -12,7 +13,6 @@ use crate::{
         UpdateKind, VfsDiff, VfsDiffList, VfsUpdate, VfsUpdateApplicationError,
     },
     vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
-    Error,
 };
 
 #[derive(Error, Debug)]

@@ -3,7 +3,7 @@ use std::fmt::Debug;
 
 use diesel::prelude::*;
 use futures::future::Either;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use brume::{
