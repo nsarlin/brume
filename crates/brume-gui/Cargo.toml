@@ -1,6 +1,14 @@
 [package]
 name = "brume-gui"
-version = "0.1.0"
 edition = "2021"
+description = "WIP - A GUI to interract with the Brume daemon"
+
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
 
 [dependencies]

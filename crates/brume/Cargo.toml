@@ -1,8 +1,16 @@
 [package]
 name = "brume"
-version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
+description = "A library for bidirectional file synchronization"
+
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

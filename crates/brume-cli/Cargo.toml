@@ -1,8 +1,15 @@
 [package]
 name = "brume-cli"
-version = "0.1.0"
 edition = "2021"
 description = "CLI to manage folders synchronized with brume"
+
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
 
 [dependencies]
 interprocess = { version = "2.2", features = ["tokio"] }
