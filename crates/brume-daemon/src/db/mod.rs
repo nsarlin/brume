@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 
 use deadpool_diesel::PoolError;
 use deadpool_diesel::{
-    sqlite::{Manager, Pool},
     Runtime,
+    sqlite::{Manager, Pool},
 };
 use diesel::prelude::*;
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use futures::future::try_join;
 use thiserror::Error;
 use tokio::sync::RwLock;

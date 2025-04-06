@@ -12,7 +12,7 @@ use brume_daemon::{
 use brume_daemon_proto::{
     AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroStatus,
 };
-use log::{info, LevelFilter};
+use log::{LevelFilter, info};
 use tarpc::context;
 
 #[path = "utils.rs"]

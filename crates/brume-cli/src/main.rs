@@ -4,7 +4,7 @@ use brume_cli::{connect_to_daemon, get_synchro, get_synchro_id};
 use comfy_table::Table;
 use tarpc::context;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 use url::Url;
 

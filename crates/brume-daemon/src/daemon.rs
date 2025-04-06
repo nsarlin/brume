@@ -8,18 +8,18 @@ use std::{
     io,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use brume::vfs::VirtualPathBuf;
 use futures::StreamExt;
 use interprocess::local_socket::{
-    tokio::Listener, traits::tokio::Listener as _, GenericNamespaced, ListenerOptions, ToNsName,
+    GenericNamespaced, ListenerOptions, ToNsName, tokio::Listener, traits::tokio::Listener as _,
 };
 use log::{error, info, warn};
 use tarpc::{
@@ -27,21 +27,21 @@ use tarpc::{
     server::{BaseChannel, Channel},
     tokio_serde::formats::Bincode,
     tokio_util::{
-        codec::{length_delimited::Builder, LengthDelimitedCodec},
+        codec::{LengthDelimitedCodec, length_delimited::Builder},
         sync::CancellationToken,
     },
 };
 use tokio::{
     sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver},
         Mutex,
+        mpsc::{UnboundedReceiver, unbounded_channel},
     },
     task::JoinHandle,
     time,
 };
 
 use brume_daemon_proto::{
-    AnySynchroCreationInfo, BrumeService, SynchroId, SynchroSide, SynchroState, BRUME_SOCK_NAME,
+    AnySynchroCreationInfo, BRUME_SOCK_NAME, BrumeService, SynchroId, SynchroSide, SynchroState,
 };
 
 use crate::{

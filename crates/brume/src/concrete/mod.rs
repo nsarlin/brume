@@ -9,8 +9,8 @@ use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::hash::Hash;
 use std::io::{self, ErrorKind};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use byte_counter::ByteCounterExt;
 use bytes::Bytes;

@@ -2,15 +2,15 @@ use std::{any::Any, collections::HashMap, sync::Arc, thread::sleep, time::Durati
 
 use brume::{
     concrete::{
+        FSBackend, FsBackendError, Named,
         local::{LocalDir, LocalSyncInfo},
         nextcloud::{NextcloudFs, NextcloudSyncInfo},
-        FSBackend, FsBackendError, Named,
     },
     filesystem::FileSystem,
     synchro::{ConflictResolutionState, FullSyncStatus, Synchro, SynchroSide},
     vfs::{Vfs, VirtualPath},
 };
-use futures::{future::join_all, stream, StreamExt};
+use futures::{StreamExt, future::join_all, stream};
 use log::{debug, error, info};
 use serde::Serialize;
 use thiserror::Error;

@@ -27,12 +27,12 @@ use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Error, NameMismatchError,
     concrete::{ConcreteFS, ConcreteFileCloneResult, FSBackend, FsBackendError, Named},
     sorted_vec::{Sortable, SortedVec},
     vfs::{
         DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
     },
-    Error, NameMismatchError,
 };
 
 /// Error encountered during a diff operation

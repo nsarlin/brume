@@ -1,14 +1,14 @@
 use std::{cell::RefCell, ffi::OsStr, fmt::Display, io::ErrorKind, ops::Deref, time::SystemTime};
 
 use bytes::Bytes;
-use futures::{stream, Stream, TryStream, TryStreamExt};
+use futures::{Stream, TryStream, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    concrete::{local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription, Named},
+    concrete::{FSBackend, FsBackendError, FsInstanceDescription, Named, local::path::LocalPath},
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},
     vfs::{DirTree, FileMeta, NodeState, Vfs, VfsNode, VirtualPath, VirtualPathBuf},
