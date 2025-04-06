@@ -5,6 +5,7 @@ mod file;
 
 pub use dir::*;
 pub use file::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     sorted_vec::{Sortable, SortedVec},
@@ -27,7 +28,7 @@ pub enum DeleteNodeError {
 type SortedNodeList<SyncInfo> = SortedVec<VfsNode<SyncInfo>>;
 
 /// The synchronization state of a node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeState<SyncInfo> {
     /// The node has been correctly synchronized
     Ok(SyncInfo),
@@ -84,6 +85,16 @@ impl<SyncInfo> DirTree<SyncInfo> {
     pub fn new_force_resync(name: &str) -> Self {
         Self {
             metadata: DirMeta::new_force_resync(name),
+            children: SortedNodeList::new(),
+        }
+    }
+
+    /// Creates a new directory with the provided [`state`]
+    ///
+    /// [`state`]: NodeState
+    pub fn new_with_state(name: &str, state: NodeState<SyncInfo>) -> Self {
+        Self {
+            metadata: DirMeta::new_with_state(name, state),
             children: SortedNodeList::new(),
         }
     }
@@ -507,6 +518,27 @@ impl<SyncInfo> From<&DirTree<SyncInfo>> for DirTree<()> {
 pub enum NodeKind {
     Dir,
     File,
+}
+
+impl NodeKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            NodeKind::Dir => "Dir",
+            NodeKind::File => "File",
+        }
+    }
+}
+
+impl TryFrom<&str> for NodeKind {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Dir" => Ok(NodeKind::Dir),
+            "File" => Ok(NodeKind::File),
+            _ => Err(()),
+        }
+    }
 }
 
 /// A node in a File System tree. Can represent a directory or a file.

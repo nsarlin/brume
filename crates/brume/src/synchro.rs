@@ -14,6 +14,66 @@ use crate::{
     Error,
 };
 
+#[derive(Debug)]
+pub struct FullSyncResult<LocalSyncInfo, RemoteSyncInfo> {
+    local_updates: Vec<VfsUpdate<LocalSyncInfo>>,
+    remote_updates: Vec<VfsUpdate<RemoteSyncInfo>>,
+    status: FullSyncStatus,
+}
+
+impl<LocalSyncInfo, RemoteSyncInfo> FullSyncResult<LocalSyncInfo, RemoteSyncInfo> {
+    pub fn status(&self) -> FullSyncStatus {
+        self.status
+    }
+
+    pub fn local_updates(&self) -> &[VfsUpdate<LocalSyncInfo>] {
+        &self.local_updates
+    }
+
+    pub fn remote_updates(&self) -> &[VfsUpdate<RemoteSyncInfo>] {
+        &self.remote_updates
+    }
+}
+
+#[derive(Debug)]
+pub enum ConflictResolutionState<LocalSyncInfo, RemoteSyncInfo> {
+    Local(NodeState<LocalSyncInfo>),
+    Remote(NodeState<RemoteSyncInfo>),
+    /// The conflict was a node removal, so no sync info are provided
+    None,
+}
+
+impl<LocalSyncInfo, RemoteSyncInfo> ConflictResolutionState<LocalSyncInfo, RemoteSyncInfo> {
+    fn new_local(info: Option<NodeState<LocalSyncInfo>>) -> Self {
+        match info {
+            Some(info) => Self::Local(info),
+            None => Self::None,
+        }
+    }
+
+    fn new_remote(info: Option<NodeState<RemoteSyncInfo>>) -> Self {
+        match info {
+            Some(info) => Self::Remote(info),
+            None => Self::None,
+        }
+    }
+}
+
+pub struct ConflictResolutionResult<LocalSyncInfo, RemoteSyncInfo> {
+    state: ConflictResolutionState<LocalSyncInfo, RemoteSyncInfo>,
+    status: FullSyncStatus,
+}
+
+impl<LocalSyncInfo, RemoteSyncInfo> ConflictResolutionResult<LocalSyncInfo, RemoteSyncInfo> {
+    pub fn state(&self) -> &ConflictResolutionState<LocalSyncInfo, RemoteSyncInfo> {
+        &self.state
+    }
+
+    pub fn status(&self) -> FullSyncStatus {
+        self.status
+    }
+}
+
 /// Status in which the [`Synchro`] can be after a call to [`full_sync`]
 ///
 /// In case of successful sync, this is returned by `full_sync`. In that case, "Error" means
@@ -103,7 +163,9 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     ///   accordingly.
     ///
     /// See [`crate::update`] for more information about the update process.
-    pub async fn full_sync(&mut self) -> Result<FullSyncStatus, Error> {
+    pub async fn full_sync(
+        &mut self,
+    ) -> Result<FullSyncResult<LocalBackend::SyncInfo, RemoteBackend::SyncInfo>, Error> {
         let (local_diff, remote_diff) = self.diff_vfs().await?;
 
         let reconciled = self.reconcile(local_diff, remote_diff).await?;
@@ -114,13 +176,17 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
             .map_err(|(e, name)| Error::concrete_application(name, e))?;
 
         self.local
-            .apply_updates_list_vfs(local_applied)
+            .apply_updates_list_vfs(&local_applied)
             .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))?;
         self.remote
-            .apply_updates_list_vfs(remote_applied)
+            .apply_updates_list_vfs(&remote_applied)
             .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
 
-        Ok(self.get_status())
+        Ok(FullSyncResult {
+            local_updates: local_applied.into(),
+            remote_updates: remote_applied.into(),
+            status: self.get_status(),
+        })
     }
 
     pub fn get_status(&self) -> FullSyncStatus {
@@ -261,64 +327,31 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
     }
 
     /// Applies an update to the concrete FS and update the VFS accordingly
-    pub async fn apply_update(&mut self, side: SynchroSide, update: VfsDiff) -> Result<(), Error> {
+    pub async fn apply_update(
+        &mut self,
+        side: SynchroSide,
+        update: VfsDiff,
+    ) -> Result<FullSyncResult<LocalBackend::SyncInfo, RemoteBackend::SyncInfo>, Error> {
         match side {
             SynchroSide::Local => {
-                let applied = self
-                    .local
-                    .apply_update_concrete(self.remote, update)
-                    .await
-                    .map_err(|e| Error::concrete_application(LocalBackend::TYPE_NAME, e))?;
+                let (local_applied, remote_applied) =
+                    apply_to_fs(update, self.local, self.remote).await?;
 
-                for update in applied {
-                    // Errors are applied on the source Vfs to make them trigger a resync, but they
-                    // are detected on the target side. So we need to move them
-                    // from one fs to the other.
-                    if let AppliedUpdate::FailedApplication(failed_update) = update {
-                        self.remote
-                            .apply_update_vfs(VfsUpdate::FailedApplication(failed_update))
-                    } else {
-                        let (remote, local) = update.into();
-                        self.remote.apply_update_vfs(remote).and_then(|_| {
-                            if let Some(local) = local {
-                                self.local.apply_update_vfs(local)
-                            } else {
-                                Ok(())
-                            }
-                        })
-                    }
-                    .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))?;
-                }
-                Ok(())
+                Ok(FullSyncResult {
+                    local_updates: local_applied,
+                    remote_updates: remote_applied,
+                    status: self.get_status(),
+                })
             }
             SynchroSide::Remote => {
-                let applied = self
-                    .remote
-                    .apply_update_concrete(self.local, update)
-                    .await
-                    .map_err(|e| Error::concrete_application(RemoteBackend::TYPE_NAME, e))?;
+                let (remote_applied, local_applied) =
+                    apply_to_fs(update, self.remote, self.local).await?;
 
-                for update in applied {
-                    // Errors are applied on the source Vfs to make them trigger a resync, but they
-                    // are detected on the target side. So we need to move them
-                    // from one fs to the other.
-                    if let AppliedUpdate::FailedApplication(failed_update) = update {
-                        self.local
-                            .apply_update_vfs(VfsUpdate::FailedApplication(failed_update))
-                    } else {
-                        let (local, remote) = update.into();
-                        self.local.apply_update_vfs(local).and_then(|_| {
-                            if let Some(remote) = remote {
-                                self.remote.apply_update_vfs(remote)
-                            } else {
-                                Ok(())
-                            }
-                        })
-                    }
-                    .map_err(|e| Error::vfs_update_application(RemoteBackend::TYPE_NAME, e))?;
-                }
-
-                Ok(())
+                Ok(FullSyncResult {
+                    local_updates: local_applied,
+                    remote_updates: remote_applied,
+                    status: self.get_status(),
+                })
             }
         }
     }
@@ -342,7 +375,8 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         &mut self,
         path: &VirtualPath,
         side: SynchroSide,
-    ) -> Result<FullSyncStatus, Error> {
+    ) -> Result<ConflictResolutionResult<LocalBackend::SyncInfo, RemoteBackend::SyncInfo>, Error>
+    {
         if let Some(update) = self.get_conflict_update(path, side) {
             self.apply_update(side.invert(), update).await?;
         } else {
@@ -351,8 +385,12 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
             warn!("conflict not found on node {path:?}");
         }
 
-        self.mark_conflict_resolved(path, side).await?;
-        Ok(self.get_status())
+        let state = self.mark_conflict_resolved(path, side).await?;
+
+        Ok(ConflictResolutionResult {
+            state,
+            status: self.get_status(),
+        })
     }
 
     fn get_conflict_update(&self, path: &VirtualPath, side: SynchroSide) -> Option<VfsDiff> {
@@ -367,40 +405,86 @@ impl<'local, 'remote, LocalBackend: FSBackend, RemoteBackend: FSBackend>
         &mut self,
         path: &VirtualPath,
         side: SynchroSide,
-    ) -> Result<(), Error> {
+    ) -> Result<ConflictResolutionState<LocalBackend::SyncInfo, RemoteBackend::SyncInfo>, Error>
+    {
         match side {
-            SynchroSide::Local => {
-                // Skip if the node does not exist, meaning it was a removal
-                if self.local.vfs().find_node(path).is_some() {
-                    let state = match self.local.concrete().backend().get_sync_info(path).await {
-                        Ok(info) => NodeState::Ok(info),
-                        // If we can reach the concrete FS, we delay until the next full_sync
-                        Err(_) => NodeState::NeedResync,
-                    };
-                    self.local
-                        .vfs_mut()
-                        .update_node_state(path, state)
-                        .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))
-                } else {
-                    Ok(())
-                }
-            }
-            SynchroSide::Remote => {
-                if self.remote.vfs().find_node(path).is_some() {
-                    let state = match self.remote.concrete().backend().get_sync_info(path).await {
-                        Ok(info) => NodeState::Ok(info),
-                        Err(_) => NodeState::NeedResync,
-                    };
-                    self.remote
-                        .vfs_mut()
-                        .update_node_state(path, state)
-                        .map_err(|e| Error::vfs_update_application(LocalBackend::TYPE_NAME, e))
-                } else {
-                    Ok(())
-                }
-            }
+            SynchroSide::Local => resolve_conflict_vfs(path, self.local)
+                .await
+                .map(ConflictResolutionState::new_local),
+            SynchroSide::Remote => resolve_conflict_vfs(path, self.remote)
+                .await
+                .map(ConflictResolutionState::new_remote),
         }
     }
+}
+
+async fn resolve_conflict_vfs<TargetBackend: FSBackend>(
+    path: &VirtualPath,
+    target_fs: &mut FileSystem<TargetBackend>,
+) -> Result<Option<NodeState<TargetBackend::SyncInfo>>, Error> {
+    // Skip if the node does not exist, meaning it was a removal
+    if target_fs.vfs().find_node(path).is_some() {
+        let state = match target_fs.concrete().backend().get_sync_info(path).await {
+            Ok(info) => NodeState::Ok(info),
+            // If we can reach the concrete FS, we delay until the next full_sync
+            Err(_) => NodeState::NeedResync,
+        };
+        target_fs
+            .vfs_mut()
+            .update_node_state(path, state.clone())
+            .map_err(|e| Error::vfs_update_application(TargetBackend::TYPE_NAME, e))
+            .map(|_| Some(state))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn apply_to_fs<TargetBackend: FSBackend, RefBackend: FSBackend>(
+    update: VfsDiff,
+    target_fs: &mut FileSystem<TargetBackend>,
+    ref_fs: &mut FileSystem<RefBackend>,
+) -> Result<
+    (
+        Vec<VfsUpdate<TargetBackend::SyncInfo>>,
+        Vec<VfsUpdate<RefBackend::SyncInfo>>,
+    ),
+    Error,
+> {
+    let mut target_updates = Vec::new();
+    let mut ref_updates = Vec::new();
+
+    let applied = target_fs
+        .apply_update_concrete(ref_fs, update)
+        .await
+        .map_err(|e| Error::concrete_application(TargetBackend::TYPE_NAME, e))?;
+
+    for update in applied {
+        // Errors are applied on the source Vfs to make them trigger a resync, but they
+        // are detected on the target side. So we need to move them
+        // from one fs to the other.
+        if let AppliedUpdate::FailedApplication(failed_update) = update {
+            let failed = VfsUpdate::FailedApplication(failed_update);
+            ref_fs
+                .apply_update_vfs(&failed)
+                .inspect(|_| ref_updates.push(failed))
+        } else {
+            let (ref_update, target_update) = update.into();
+            ref_fs
+                .apply_update_vfs(&ref_update)
+                .inspect(|_| ref_updates.push(ref_update))
+                .and_then(|_| {
+                    if let Some(target) = target_update {
+                        target_fs
+                            .apply_update_vfs(&target)
+                            .inspect(|_| target_updates.push(target))
+                    } else {
+                        Ok(())
+                    }
+                })
+        }
+        .map_err(|e| Error::vfs_update_application(TargetBackend::TYPE_NAME, e))?;
+    }
+    Ok((target_updates, ref_updates))
 }
 
 #[cfg(test)]
@@ -644,7 +728,10 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         assert!(synchro
             .local
@@ -673,7 +760,10 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         // Then do a modification on both sides
         let local_modif = D(
@@ -706,7 +796,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_modif));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Conflict);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
         assert!(synchro
@@ -729,7 +822,8 @@ mod test {
             synchro
                 .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Local)
                 .await
-                .unwrap(),
+                .unwrap()
+                .status(),
             FullSyncStatus::Ok
         );
         assert!(synchro
@@ -760,7 +854,10 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         // Then do a modification on both sides
         let local_modif = D(
@@ -790,7 +887,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_modif));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Conflict);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
 
         assert!(synchro
             .local
@@ -812,7 +912,8 @@ mod test {
             synchro
                 .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Remote)
                 .await
-                .unwrap(),
+                .unwrap()
+                .status(),
             FullSyncStatus::Ok
         );
 
@@ -843,8 +944,14 @@ mod test {
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
         // Check 2 sync with an Io error on a file
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Error
+        );
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Error
+        );
 
         // Everything should have been transferred except the file in error
         let expected_local = D(
@@ -882,7 +989,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         // Both filesystems should be perfectly in sync
         assert!(synchro
@@ -911,7 +1021,10 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         // First do a normal sync
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         // Then put the file in error.
         // The next `update_vfs` will consider the node as "changed" because by default error test
@@ -927,7 +1040,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Error
+        );
 
         // Everything should have been transferred except the file in error
         let expected_local = D(
@@ -968,7 +1084,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         assert!(synchro
             .local
@@ -998,7 +1117,10 @@ mod test {
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
         // sync with an Io error on a file
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Error
+        );
 
         // Everything should have been transferred except the file in error
         let expected_local = D(
@@ -1037,7 +1159,10 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         // Both filesystems should be perfectly in sync
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
@@ -1061,7 +1186,10 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         // First do a normal sync
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         // Then put the file in error.
         // The next `update_vfs` will consider the node as "changed" because by default error test
@@ -1077,7 +1205,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Error
+        );
 
         // Nothing should be changed on the local side because of the error
         let expected_local = D(
@@ -1115,7 +1246,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         assert!(synchro
             .local
@@ -1144,7 +1278,10 @@ mod test {
 
         let mut synchro = Synchro::new(&mut local_fs, &mut remote_fs);
         // First do a normal sync
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Ok);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
 
         // Then put the file in error.
         // The next `update_vfs` will consider the node as "changed" because by default error test
@@ -1160,7 +1297,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_error.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Error);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Error
+        );
 
         // Nothing should be changed on the local side because of the error
         let expected_local = D(
@@ -1217,7 +1357,10 @@ mod test {
             .remote
             .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
 
-        assert_eq!(synchro.full_sync().await.unwrap(), FullSyncStatus::Conflict);
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
 
         // This should create a conflict
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));

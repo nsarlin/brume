@@ -31,6 +31,13 @@ impl<SyncInfo> DirMeta<SyncInfo> {
         }
     }
 
+    pub fn new_with_state(name: &str, state: NodeState<SyncInfo>) -> Self {
+        Self {
+            name: name.to_string(),
+            state,
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
