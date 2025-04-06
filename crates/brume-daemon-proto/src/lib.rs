@@ -238,6 +238,7 @@ impl AnyFsCreationInfo {
 }
 
 /// The information needed to create a new synchro between filesystems
+#[derive(Debug, Clone)]
 pub struct AnySynchroCreationInfo {
     local: AnyFsCreationInfo,
     remote: AnyFsCreationInfo,
