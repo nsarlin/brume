@@ -91,6 +91,7 @@ pub enum ErrorMode {
 }
 
 /// The different commands that can be received from user applications
+#[derive(Debug)]
 pub enum UserCommand {
     SynchroCreation(SynchroCreationRequest),
     SynchroDeletion(SynchroDeletionRequest),
@@ -99,6 +100,7 @@ pub enum UserCommand {
 }
 
 /// A command to create a new synchro
+#[derive(Debug)]
 pub struct SynchroCreationRequest {
     info: AnySynchroCreationInfo,
 }
@@ -110,6 +112,7 @@ impl SynchroCreationRequest {
 }
 
 /// A command to delete an existing synchro
+#[derive(Debug)]
 pub struct SynchroDeletionRequest {
     id: SynchroId,
 }
@@ -121,6 +124,7 @@ impl SynchroDeletionRequest {
 }
 
 /// A user request to change the [`SynchroState`] of a synchro
+#[derive(Debug)]
 pub struct StateChangeRequest {
     id: SynchroId,
     state: SynchroState,
@@ -133,6 +137,7 @@ impl StateChangeRequest {
 }
 
 /// A user request for a conflict resolution
+#[derive(Debug)]
 pub struct ConflictResolutionRequest {
     id: SynchroId,
     path: VirtualPathBuf,
