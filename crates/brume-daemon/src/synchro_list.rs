@@ -2,17 +2,16 @@ use std::{any::Any, collections::HashMap, sync::Arc, thread::sleep, time::Durati
 
 use brume::{
     concrete::{
-        FSBackend, FsBackendError, Named,
         local::{LocalDir, LocalSyncInfo},
         nextcloud::{NextcloudFs, NextcloudSyncInfo},
+        FSBackend, FsBackendError, Named, ToBytes,
     },
     filesystem::FileSystem,
     synchro::{ConflictResolutionState, FullSyncStatus, Synchro, SynchroSide},
     vfs::{Vfs, VirtualPath},
 };
-use futures::{StreamExt, future::join_all, stream};
+use futures::{future::join_all, stream, StreamExt};
 use log::{debug, error, info};
-use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use uuid::Uuid;
@@ -450,7 +449,7 @@ impl SynchroList {
         Some(SynchroMutex { local, remote })
     }
 
-    /// Resolves a conflict on a synchro in the list by applying the update from the chose side
+    /// Resolves a conflict on a synchro in the list by applying the update from the chosen side
     pub async fn resolve_conflict_sync<
         LocalBackend: FSBackend + 'static,
         RemoteBackend: FSBackend + 'static,
@@ -463,8 +462,8 @@ impl SynchroList {
         db: &Database,
     ) -> Result<(), SyncError>
     where
-        LocalBackend::SyncInfo: Serialize,
-        RemoteBackend::SyncInfo: Serialize,
+        LocalBackend::SyncInfo: ToBytes,
+        RemoteBackend::SyncInfo: ToBytes,
     {
         // Wait for synchro to be ready
         loop {
@@ -552,8 +551,8 @@ impl SynchroList {
         db: &Database,
     ) -> Result<(), SyncError>
     where
-        LocalBackend::SyncInfo: Serialize,
-        RemoteBackend::SyncInfo: Serialize,
+        LocalBackend::SyncInfo: ToBytes,
+        RemoteBackend::SyncInfo: ToBytes,
     {
         {
             let mut synchro = synchro_lock.write().await;

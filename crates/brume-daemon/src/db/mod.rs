@@ -3,13 +3,14 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+use brume::concrete::InvalidByteSyncInfo;
 use deadpool_diesel::PoolError;
 use deadpool_diesel::{
-    Runtime,
     sqlite::{Manager, Pool},
+    Runtime,
 };
 use diesel::prelude::*;
-use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use futures::future::try_join;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -169,6 +170,16 @@ impl DatabaseError {
             table: table.to_string(),
             column: column.to_string(),
             source,
+        }
+    }
+}
+
+impl From<InvalidByteSyncInfo> for DatabaseError {
+    fn from(value: InvalidByteSyncInfo) -> Self {
+        Self::InvalidData {
+            column: "state".to_string(),
+            table: "nodes".to_string(),
+            source: Some(Box::new(value)),
         }
     }
 }
@@ -346,17 +357,21 @@ impl Database {
         synchro_list: &mut SynchroList,
     ) -> Result<(), DatabaseError> {
         let fs_info: AnyFsCreationInfo = fs.clone().into();
+        let vfs_bytes = self.load_vfs(fs.uuid).await?;
+
         match fs_info {
             AnyFsCreationInfo::LocalDir(_) => {
-                let vfs = self.load_vfs::<LocalSyncInfo>(fs.uuid).await?;
+                let vfs = vfs_bytes.try_into()?;
+
                 synchro_list
-                    .insert_existing_fs(fs_info, &vfs, fs.uuid)
+                    .insert_existing_fs::<LocalSyncInfo>(fs_info, &vfs, fs.uuid)
                     .map_err(|e| DatabaseError::invalid_data("nodes", "*", Some(Box::new(e))))
             }
             AnyFsCreationInfo::Nextcloud(_) => {
-                let vfs = self.load_vfs::<NextcloudSyncInfo>(fs.uuid).await?;
+                let vfs = vfs_bytes.try_into()?;
+
                 synchro_list
-                    .insert_existing_fs(fs_info, &vfs, fs.uuid)
+                    .insert_existing_fs::<NextcloudSyncInfo>(fs_info, &vfs, fs.uuid)
                     .map_err(|e| DatabaseError::invalid_data("nodes", "*", Some(Box::new(e))))
             }
         }

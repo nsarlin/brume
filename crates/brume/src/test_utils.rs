@@ -1,14 +1,16 @@
 use std::{cell::RefCell, ffi::OsStr, fmt::Display, io::ErrorKind, ops::Deref, time::SystemTime};
 
 use bytes::Bytes;
-use futures::{Stream, TryStream, TryStreamExt, stream};
+use futures::{stream, Stream, TryStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
-    concrete::{FSBackend, FsBackendError, FsInstanceDescription, Named, local::path::LocalPath},
+    concrete::{
+        local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription, Named, ToBytes,
+    },
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},
     vfs::{DirTree, FileMeta, NodeState, Vfs, VfsNode, VirtualPath, VirtualPathBuf},
@@ -811,6 +813,12 @@ impl RecursiveTestSyncInfo {
     }
 }
 
+impl ToBytes for RecursiveTestSyncInfo {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.hash.to_le_bytes().to_vec()
+    }
+}
+
 impl IsModified for RecursiveTestSyncInfo {
     fn modification_state(&self, reference: &Self) -> ModificationState {
         if self.hash == reference.hash {
@@ -839,6 +847,12 @@ pub(crate) struct ShallowTestSyncInfo {
 impl ShallowTestSyncInfo {
     pub(crate) fn new(hash: u64) -> Self {
         Self { hash }
+    }
+}
+
+impl ToBytes for ShallowTestSyncInfo {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.hash.to_le_bytes().to_vec()
     }
 }
 

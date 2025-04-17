@@ -27,12 +27,12 @@ use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, NameMismatchError,
-    concrete::{ConcreteFS, ConcreteFileCloneResult, FSBackend, FsBackendError, Named},
+    concrete::{ConcreteFS, ConcreteFileCloneResult, FSBackend, FsBackendError, Named, ToBytes},
     sorted_vec::{Sortable, SortedVec},
     vfs::{
         DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
     },
+    Error, NameMismatchError,
 };
 
 /// Error encountered during a diff operation
@@ -1031,6 +1031,15 @@ impl<SyncInfo> From<VfsDirCreation<SyncInfo>> for DirTree<SyncInfo> {
     }
 }
 
+impl<SyncInfo: ToBytes> From<VfsDirCreation<SyncInfo>> for VfsDirCreation<Vec<u8>> {
+    fn from(value: VfsDirCreation<SyncInfo>) -> Self {
+        Self {
+            path: value.path,
+            dir: (&value.dir).into(),
+        }
+    }
+}
+
 /// Represents a File creation or modification update that has been successfully applied on the
 /// [`FSBackend`] and can be applied to a VFS.
 #[derive(Clone, Debug)]
@@ -1059,6 +1068,16 @@ impl<SyncInfo> VfsFileUpdate<SyncInfo> {
 
     pub fn sync_info(&self) -> &SyncInfo {
         &self.file_info
+    }
+}
+
+impl<SyncInfo: ToBytes> From<VfsFileUpdate<SyncInfo>> for VfsFileUpdate<Vec<u8>> {
+    fn from(value: VfsFileUpdate<SyncInfo>) -> Self {
+        Self {
+            path: value.path,
+            file_size: value.file_size,
+            file_info: value.file_info.to_bytes(),
+        }
     }
 }
 
@@ -1096,6 +1115,22 @@ impl<SyncInfo> VfsUpdate<SyncInfo> {
 
     pub fn is_creation(&self) -> bool {
         matches!(self, Self::DirCreated(_) | Self::FileCreated(_))
+    }
+}
+
+impl<SyncInfo: ToBytes> From<VfsUpdate<SyncInfo>> for VfsUpdate<Vec<u8>> {
+    fn from(value: VfsUpdate<SyncInfo>) -> Self {
+        match value {
+            VfsUpdate::DirCreated(update) => VfsUpdate::DirCreated(update.into()),
+            VfsUpdate::DirRemoved(path) => VfsUpdate::DirRemoved(path),
+            VfsUpdate::FileCreated(update) => VfsUpdate::FileCreated(update.into()),
+            VfsUpdate::FileModified(update) => VfsUpdate::FileModified(update.into()),
+            VfsUpdate::FileRemoved(path) => VfsUpdate::FileRemoved(path),
+            VfsUpdate::FailedApplication(failed_update) => {
+                VfsUpdate::FailedApplication(failed_update)
+            }
+            VfsUpdate::Conflict(vfs_diff) => VfsUpdate::Conflict(vfs_diff),
+        }
     }
 }
 

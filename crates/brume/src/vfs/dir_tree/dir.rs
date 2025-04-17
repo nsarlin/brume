@@ -1,4 +1,7 @@
-use crate::update::FailedUpdateApplication;
+use crate::{
+    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
+    update::FailedUpdateApplication,
+};
 
 use super::NodeState;
 
@@ -62,5 +65,25 @@ impl<SyncInfo> From<&DirMeta<SyncInfo>> for DirMeta<()> {
             name: value.name.clone(),
             state: (&value.state).into(),
         }
+    }
+}
+
+impl<SyncInfo: ToBytes> From<&DirMeta<SyncInfo>> for DirMeta<Vec<u8>> {
+    fn from(value: &DirMeta<SyncInfo>) -> Self {
+        Self {
+            name: value.name.clone(),
+            state: (&value.state).into(),
+        }
+    }
+}
+
+impl<SyncInfo: TryFromBytes> TryFrom<DirMeta<Vec<u8>>> for DirMeta<SyncInfo> {
+    type Error = InvalidByteSyncInfo;
+
+    fn try_from(value: DirMeta<Vec<u8>>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: value.name.clone(),
+            state: value.state.try_into()?,
+        })
     }
 }

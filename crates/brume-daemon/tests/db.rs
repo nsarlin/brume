@@ -10,7 +10,7 @@ use brume_daemon::{
     daemon::{Daemon, DaemonConfig, ErrorMode},
     db::DatabaseConfig,
 };
-use log::{LevelFilter, info};
+use log::{info, LevelFilter};
 use tarpc::context;
 
 #[path = "utils.rs"]
