@@ -3,14 +3,18 @@
 mod dir;
 mod file;
 
+use std::fmt::Debug;
+
 pub use dir::*;
 pub use file::*;
+use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, NameMismatchError,
+    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
     sorted_vec::{Sortable, SortedVec},
     update::{FailedUpdateApplication, ModificationState, VirtualReconciledUpdate},
+    Error, NameMismatchError,
 };
 
 use super::{
@@ -59,6 +63,30 @@ impl<SyncInfo> From<&NodeState<SyncInfo>> for NodeState<()> {
             NodeState::Error(failed_update) => NodeState::Error(failed_update.clone()),
             NodeState::Conflict(update) => NodeState::Conflict(update.clone()),
         }
+    }
+}
+
+impl<SyncInfo: ToBytes> From<&NodeState<SyncInfo>> for NodeState<Vec<u8>> {
+    fn from(value: &NodeState<SyncInfo>) -> Self {
+        match value {
+            NodeState::Ok(syncinfo) => NodeState::Ok(syncinfo.to_bytes()),
+            NodeState::NeedResync => NodeState::NeedResync,
+            NodeState::Error(failed_update) => NodeState::Error(failed_update.clone()),
+            NodeState::Conflict(update) => NodeState::Conflict(update.clone()),
+        }
+    }
+}
+
+impl<SyncInfo: TryFromBytes> TryFrom<NodeState<Vec<u8>>> for NodeState<SyncInfo> {
+    type Error = InvalidByteSyncInfo;
+
+    fn try_from(value: NodeState<Vec<u8>>) -> Result<Self, InvalidByteSyncInfo> {
+        Ok(match value {
+            NodeState::Ok(syncinfo) => NodeState::Ok(SyncInfo::try_from_bytes(syncinfo)?),
+            NodeState::NeedResync => NodeState::NeedResync,
+            NodeState::Error(failed_update) => NodeState::Error(failed_update.clone()),
+            NodeState::Conflict(update) => NodeState::Conflict(update.clone()),
+        })
     }
 }
 
@@ -428,7 +456,7 @@ impl<SyncInfo: Clone> DirTree<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified> DirTree<SyncInfo> {
+impl<SyncInfo: IsModified + Debug> DirTree<SyncInfo> {
     /// Diff two directories based on their content.
     pub fn diff(
         &self,
@@ -510,6 +538,35 @@ impl<SyncInfo> From<&DirTree<SyncInfo>> for DirTree<()> {
                 value.children.iter().map(|child| child.into()).collect(),
             ),
         }
+    }
+}
+
+impl<SyncInfo: ToBytes> From<&DirTree<SyncInfo>> for DirTree<Vec<u8>> {
+    fn from(value: &DirTree<SyncInfo>) -> Self {
+        Self {
+            metadata: (&value.metadata).into(),
+            // Ok to use unchecked because the input list is sorted
+            children: SortedVec::unchecked_from_vec(
+                value.children.iter().map(|child| child.into()).collect(),
+            ),
+        }
+    }
+}
+
+impl<SyncInfo: TryFromBytes> TryFrom<DirTree<Vec<u8>>> for DirTree<SyncInfo> {
+    type Error = InvalidByteSyncInfo;
+
+    fn try_from(value: DirTree<Vec<u8>>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            metadata: value.metadata.try_into()?,
+            children: SortedVec::unchecked_from_vec(
+                value
+                    .children
+                    .into_iter()
+                    .map(VfsNode::<SyncInfo>::try_from)
+                    .collect::<Result<_, _>>()?,
+            ),
+        })
     }
 }
 
@@ -826,7 +883,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified> VfsNode<SyncInfo> {
+impl<SyncInfo: IsModified + Debug> VfsNode<SyncInfo> {
     /// Diff two nodes based on their content.
     ///
     /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem.g
@@ -853,6 +910,7 @@ impl<SyncInfo: IsModified> VfsNode<SyncInfo> {
             (VfsNode::File(fself), VfsNode::File(fother)) => {
                 // Diff the file based on their sync info
                 if fself.state().is_modified(fother.state()) {
+                    info!("self {:?} != other {:?}", fself.state(), fother.state());
                     let mut file_path = parent_path.to_owned();
                     file_path.push(fself.name());
 
@@ -880,6 +938,26 @@ impl<SyncInfo> From<&VfsNode<SyncInfo>> for VfsNode<()> {
     }
 }
 
+impl<SyncInfo: ToBytes> From<&VfsNode<SyncInfo>> for VfsNode<Vec<u8>> {
+    fn from(value: &VfsNode<SyncInfo>) -> Self {
+        match value {
+            VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.into()),
+            VfsNode::File(file_meta) => VfsNode::File(file_meta.into()),
+        }
+    }
+}
+
+impl<SyncInfo: TryFromBytes> TryFrom<VfsNode<Vec<u8>>> for VfsNode<SyncInfo> {
+    type Error = InvalidByteSyncInfo;
+
+    fn try_from(value: VfsNode<Vec<u8>>) -> Result<Self, Self::Error> {
+        Ok(match value {
+            VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.try_into()?),
+            VfsNode::File(file_meta) => VfsNode::File(file_meta.try_into()?),
+        })
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -899,16 +977,14 @@ mod test {
 
         let node_ref = F("f1.md").into_node();
 
-        assert!(
-            base.find_node(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
-        assert!(
-            base.find_node_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
+        assert!(base
+            .find_node(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
+        assert!(base
+            .find_node_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
         assert_eq!(
             base.find_file(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
                 .unwrap()
@@ -921,71 +997,57 @@ mod test {
                 .name(),
             "f1.md"
         );
-        assert!(
-            base.find_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .is_err()
-        );
+        assert!(base
+            .find_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .is_err());
 
         let node_ref = D("b", vec![D("c", vec![])]).into_node();
         let dir_ref = D("b", vec![D("c", vec![])]).into_dir();
 
-        assert!(
-            base.find_node(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
-        assert!(
-            base.find_node_mut(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
-        assert!(
-            base.find_file(&VirtualPathBuf::new("/a/b").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_file_mut(&VirtualPathBuf::new("/a/b").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&dir_ref)
-        );
-        assert!(
-            base.find_dir_mut(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&dir_ref)
-        );
+        assert!(base
+            .find_node(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
+        assert!(base
+            .find_node_mut(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
+        assert!(base
+            .find_file(&VirtualPathBuf::new("/a/b").unwrap())
+            .is_err());
+        assert!(base
+            .find_file_mut(&VirtualPathBuf::new("/a/b").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&dir_ref));
+        assert!(base
+            .find_dir_mut(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&dir_ref));
 
-        assert!(
-            base.find_node(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_none()
-        );
-        assert!(
-            base.find_node_mut(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_none()
-        );
-        assert!(
-            base.find_file(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_file_mut(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir_mut(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(base
+            .find_node(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_none());
+        assert!(base
+            .find_node_mut(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_none());
+        assert!(base
+            .find_file(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
+        assert!(base
+            .find_file_mut(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir_mut(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
     }
 
     #[test]
@@ -1037,11 +1099,9 @@ mod test {
         assert!(without_f1.structural_eq(&without_f1_ref));
 
         let mut without_f1 = base.clone();
-        assert!(
-            without_f1
-                .delete_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .is_err()
-        );
+        assert!(without_f1
+            .delete_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .is_err());
         assert!(without_f1.structural_eq(&base));
 
         let mut without_b = base.clone();
@@ -1059,35 +1119,27 @@ mod test {
         assert!(without_b.structural_eq(&without_b_ref));
 
         let mut without_b = base.clone();
-        assert!(
-            without_b
-                .delete_file(&VirtualPathBuf::new("/a/b").unwrap())
-                .is_err()
-        );
+        assert!(without_b
+            .delete_file(&VirtualPathBuf::new("/a/b").unwrap())
+            .is_err());
         assert!(without_b.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(
-            identical
-                .delete_node(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(identical
+            .delete_node(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
         assert!(identical.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(
-            identical
-                .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(identical
+            .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
         assert!(identical.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(
-            identical
-                .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(identical
+            .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
         assert!(identical.structural_eq(&base));
 
         let mut empty = base.clone();
@@ -1105,11 +1157,9 @@ mod test {
         assert!(empty.structural_eq(&empty_ref));
 
         let mut empty = base.clone();
-        assert!(
-            empty
-                .delete_file(&VirtualPathBuf::new("/").unwrap())
-                .is_err()
-        );
+        assert!(empty
+            .delete_file(&VirtualPathBuf::new("/").unwrap())
+            .is_err());
         assert!(empty.structural_eq(&base));
     }
 

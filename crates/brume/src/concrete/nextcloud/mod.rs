@@ -22,9 +22,12 @@ use crate::{
     vfs::{Vfs, VirtualPath, VirtualPathError},
 };
 
-use dav::{TagError, dav_parse_entity_tag, dav_parse_vfs};
+use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
 
-use super::{FSBackend, FsBackendError, FsInstanceDescription, Named};
+use super::{
+    FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
+    TryFromBytes,
+};
 
 const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
@@ -241,6 +244,21 @@ impl<'a> From<&'a NextcloudSyncInfo> for NextcloudSyncInfo {
 
 impl<'a> From<&'a NextcloudSyncInfo> for () {
     fn from(_value: &'a NextcloudSyncInfo) -> Self {}
+}
+
+impl ToBytes for NextcloudSyncInfo {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.tag.to_le_bytes().to_vec()
+    }
+}
+
+impl TryFromBytes for NextcloudSyncInfo {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+        let byte_array: [u8; 16] = bytes.try_into().map_err(|_| InvalidByteSyncInfo)?;
+        let tag = u128::from_le_bytes(byte_array);
+
+        Ok(Self { tag })
+    }
 }
 
 /// Description of a connection to a nextcloud instance

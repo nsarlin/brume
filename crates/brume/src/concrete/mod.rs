@@ -9,8 +9,8 @@ use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::hash::Hash;
 use std::io::{self, ErrorKind};
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use byte_counter::ByteCounterExt;
 use bytes::Bytes;
@@ -24,6 +24,41 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::update::IsModified;
 use crate::vfs::{InvalidPathError, Vfs, VirtualPath};
+
+/// The sync info stored in bytes is invalid
+#[derive(Error, Debug)]
+#[error("Failed to load SyncInfo from raw bytes")]
+pub struct InvalidByteSyncInfo;
+
+/// A SyncInfo that can be converted to bytes
+///
+/// This allows application to store it regardless of its concrete type
+pub trait ToBytes {
+    fn to_bytes(&self) -> Vec<u8>;
+}
+
+impl ToBytes for () {
+    fn to_bytes(&self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
+/// A SyncInfo that can be created from bytes
+///
+/// This allows application to load it regardless of its concrete type
+pub trait TryFromBytes: Sized {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo>;
+}
+
+impl TryFromBytes for () {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+        if bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(InvalidByteSyncInfo)
+        }
+    }
+}
 
 #[derive(Error, Debug, Clone)]
 #[error(transparent)]
@@ -49,7 +84,7 @@ pub trait Named {
 
 /// A backend is used by the [`ConcreteFS`] to perform io operations
 pub trait FSBackend:
-    Named + Sized + TryFrom<Self::CreationInfo, Error = <Self as FSBackend>::IoError>
+    Named + TryFrom<Self::CreationInfo, Error = <Self as FSBackend>::IoError>
 {
     /// Type used to detect updates on nodes of this filesystem. See [`IsModified`].
     type SyncInfo: IsModified + Debug + Named + Clone;

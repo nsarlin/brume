@@ -13,11 +13,12 @@ pub use dir_tree::*;
 pub use virtual_path::*;
 
 use crate::{
-    NameMismatchError,
+    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
     update::{
         DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList, VfsUpdate,
         VfsUpdateApplicationError,
     },
+    NameMismatchError,
 };
 
 /// The virtual in-memory representation of a file system.
@@ -245,7 +246,7 @@ impl<SyncInfo: Clone> Vfs<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified + Clone> Vfs<SyncInfo> {
+impl<SyncInfo: IsModified + Clone + Debug> Vfs<SyncInfo> {
     /// Diff two VFS by comparing their nodes.
     ///
     /// This function returns a sorted list of [`VfsDiff`].
@@ -286,6 +287,20 @@ impl<SyncInfo> From<&Vfs<SyncInfo>> for Vfs<()> {
         Self {
             root: (&value.root).into(),
         }
+    }
+}
+
+impl<SyncInfo: ToBytes> From<&Vfs<SyncInfo>> for Vfs<Vec<u8>> {
+    fn from(value: &Vfs<SyncInfo>) -> Self {
+        Vfs::new((&value.root).into())
+    }
+}
+
+impl<SyncInfo: TryFromBytes> TryFrom<Vfs<Vec<u8>>> for Vfs<SyncInfo> {
+    type Error = InvalidByteSyncInfo;
+
+    fn try_from(value: Vfs<Vec<u8>>) -> Result<Self, Self::Error> {
+        value.root.try_into().map(Vfs::new)
     }
 }
 

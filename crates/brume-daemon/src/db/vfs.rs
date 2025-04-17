@@ -3,7 +3,6 @@ use std::fmt::Debug;
 
 use diesel::prelude::*;
 use futures::future::Either;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use brume::{
@@ -30,26 +29,33 @@ struct DbVfsNode {
     parent: Option<i32>,
 }
 
-impl<'a, SyncInfo> From<&'a DbVfsNode> for VfsNode<SyncInfo>
-where
-    SyncInfo: Deserialize<'a>,
-{
-    fn from(value: &'a DbVfsNode) -> Self {
-        let kind = NodeKind::try_from(value.kind.as_str()).unwrap();
-        let state = value
+impl<'a> TryFrom<&'a DbVfsNode> for VfsNode<Vec<u8>> {
+    type Error = DatabaseError;
+
+    fn try_from(value: &'a DbVfsNode) -> Result<Self, Self::Error> {
+        let kind = NodeKind::try_from(value.kind.as_str())
+            .map_err(|_| DatabaseError::invalid_data("kind", "nodes", None))?;
+        let state: NodeState<Vec<u8>> = value
             .state
             .as_ref()
-            .map(|st| bincode::deserialize(st).unwrap())
+            .map(|st| {
+                bincode::deserialize(st)
+                    .map_err(|e| DatabaseError::invalid_data("state", "nodes", Some(Box::new(e))))
+            })
+            .transpose()?
             .unwrap_or(NodeState::NeedResync);
 
-        match kind {
+        Ok(match kind {
             NodeKind::Dir => Self::Dir(DirTree::new_with_state(&value.name, state)),
             NodeKind::File => Self::File(FileMeta::new_with_state(
                 &value.name,
-                value.size.unwrap() as u64,
+                value
+                    .size
+                    .ok_or_else(|| DatabaseError::invalid_data("size", "nodes", None))?
+                    as u64,
                 state,
             )),
-        }
+        })
     }
 }
 
@@ -119,11 +125,11 @@ impl Database {
     }
 
     /// Loads recursively a node and its children
-    async fn load_nodes_rec<SyncInfo: DeserializeOwned>(
+    async fn load_nodes_rec(
         &self,
         parent_node: &DbVfsNode,
-    ) -> Result<VfsNode<SyncInfo>, DatabaseError> {
-        let mut vfs_node = parent_node.into();
+    ) -> Result<VfsNode<Vec<u8>>, DatabaseError> {
+        let mut vfs_node = parent_node.try_into()?;
 
         if let VfsNode::Dir(dir) = &mut vfs_node {
             let parent_node = parent_node.to_owned();
@@ -149,10 +155,7 @@ impl Database {
     }
 
     /// Loads a vfs with all its node from the DB
-    pub async fn load_vfs<SyncInfo: DeserializeOwned + Debug>(
-        &self,
-        fs_uuid: Uuid,
-    ) -> Result<Vfs<SyncInfo>, DatabaseError> {
+    pub async fn load_vfs(&self, fs_uuid: Uuid) -> Result<Vfs<Vec<u8>>, DatabaseError> {
         let vfs_root = self.get_vfs_root(fs_uuid).await?;
 
         let loaded_root = self.load_nodes_rec(&vfs_root).await?;
@@ -190,10 +193,10 @@ impl Database {
     }
 
     /// Inserts a child node with the provided parent
-    async fn insert_node_child<SyncInfo: Serialize>(
+    async fn insert_node_child(
         &self,
         parent_node: i32,
-        node: &VfsNode<SyncInfo>,
+        node: &VfsNode<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         match node {
             VfsNode::Dir(dir_tree) => Box::pin(self.insert_dir_child(parent_node, dir_tree)).await,
@@ -202,10 +205,10 @@ impl Database {
     }
 
     /// Inserts a file node with the provided parent
-    async fn insert_file_child<SyncInfo: Serialize>(
+    async fn insert_file_child(
         &self,
         parent_node: i32,
-        file: &FileMeta<SyncInfo>,
+        file: &FileMeta<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
@@ -233,10 +236,10 @@ impl Database {
     }
 
     /// Inserts a dir node with the provided parent
-    async fn insert_dir_child<SyncInfo: Serialize>(
+    async fn insert_dir_child(
         &self,
         parent_node: i32,
-        tree: &DirTree<SyncInfo>,
+        tree: &DirTree<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
@@ -272,11 +275,11 @@ impl Database {
     }
 
     /// Inserts a dir node at the provided path
-    async fn insert_dir<SyncInfo: Serialize>(
+    async fn insert_dir(
         &self,
         root: &DbVfsNode,
         path: &VirtualPath,
-        tree: &DirTree<SyncInfo>,
+        tree: &DirTree<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         let parent_node = path
             .parent()
@@ -288,11 +291,11 @@ impl Database {
     }
 
     /// Updates the metadata of the file node at the provided path
-    async fn update_file<SyncInfo: Serialize>(
+    async fn update_file(
         &self,
         root: &DbVfsNode,
         path: &VirtualPath,
-        file: &FileMeta<SyncInfo>,
+        file: &FileMeta<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
@@ -321,11 +324,11 @@ impl Database {
     }
 
     /// Inserts a file node at the provided path
-    async fn insert_file<SyncInfo: Serialize>(
+    async fn insert_file(
         &self,
         root: &DbVfsNode,
         path: &VirtualPath,
-        file: &FileMeta<SyncInfo>,
+        file: &FileMeta<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         let parent_node = path
             .parent()
@@ -349,11 +352,11 @@ impl Database {
     }
 
     /// Updates the state of the node at the provided path
-    async fn set_node_state<SyncInfo: Serialize>(
+    async fn set_node_state(
         &self,
         root: &DbVfsNode,
         path: &VirtualPath,
-        node_state: &NodeState<SyncInfo>,
+        node_state: &NodeState<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
@@ -391,11 +394,11 @@ impl Database {
     }
 
     /// Updates the state of the node at `path` inside the FS with id `fs_uuid`
-    pub async fn update_vfs_node_state<SyncInfo: Serialize>(
+    pub async fn update_vfs_node_state(
         &self,
         fs_uuid: Uuid,
         path: &VirtualPath,
-        node_state: &NodeState<SyncInfo>,
+        node_state: &NodeState<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         let vfs_root = self.get_vfs_root(fs_uuid).await?;
 
@@ -414,10 +417,10 @@ impl Database {
     }
 
     /// Applies a VFS update to the nodes in the DB
-    pub async fn update_vfs<SyncInfo: Serialize>(
+    pub async fn update_vfs(
         &self,
         fs_uuid: Uuid,
-        update: &VfsUpdate<SyncInfo>,
+        update: &VfsUpdate<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         let vfs_root = self.get_vfs_root(fs_uuid).await?;
 
@@ -430,8 +433,11 @@ impl Database {
             VfsUpdate::FileCreated(file_creation) => {
                 let name = file_creation.path().name().to_owned();
                 let path = file_creation.path().to_owned();
-                let file =
-                    FileMeta::new(&name, file_creation.file_size(), file_creation.sync_info());
+                let file = FileMeta::new(
+                    &name,
+                    file_creation.file_size(),
+                    file_creation.sync_info().clone(),
+                );
                 self.insert_file(&vfs_root, &path, &file).await
             }
             VfsUpdate::FileModified(file_modification) => {
@@ -440,7 +446,7 @@ impl Database {
                 let file = FileMeta::new(
                     &name,
                     file_modification.file_size(),
-                    file_modification.sync_info(),
+                    file_modification.sync_info().clone(),
                 );
 
                 self.update_file(&vfs_root, &path, &file).await
@@ -448,12 +454,12 @@ impl Database {
             VfsUpdate::FileRemoved(path) => self.delete_node(&vfs_root, path).await,
             VfsUpdate::FailedApplication(failed_update) => {
                 let path = failed_update.path().to_owned();
-                let state = NodeState::<SyncInfo>::Error(failed_update.clone());
+                let state = NodeState::Error(failed_update.clone());
                 self.set_node_state(&vfs_root, &path, &state).await
             }
             VfsUpdate::Conflict(vfs_diff) => {
                 let path = vfs_diff.path().to_owned();
-                let state = NodeState::<SyncInfo>::Conflict(vfs_diff.clone());
+                let state = NodeState::Conflict(vfs_diff.clone());
                 self.set_node_state(&vfs_root, &path, &state).await
             }
         }
@@ -506,7 +512,9 @@ mod test {
         // Only the root is present
         assert_eq!(nodes.len(), 1);
 
-        db.update_vfs(fs_ref.id(), &creation_update).await.unwrap();
+        db.update_vfs(fs_ref.id(), &creation_update.into())
+            .await
+            .unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 5);
@@ -527,12 +535,14 @@ mod test {
 
         assert_eq!(node.kind, NodeKind::Dir.as_str());
 
-        let vfs_root = db.load_nodes_rec::<()>(&root).await.unwrap();
+        let vfs_root = db.load_nodes_rec(&root).await.unwrap();
         assert!(vfs_root.structural_eq(&base_vfs));
 
         let creation_update =
             VfsUpdate::DirCreated(VfsDirCreation::new(&VirtualPathBuf::new("/a").unwrap(), d));
-        db.update_vfs(fs_ref.id(), &creation_update).await.unwrap();
+        db.update_vfs(fs_ref.id(), &creation_update.into())
+            .await
+            .unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 6);
@@ -549,7 +559,9 @@ mod test {
             42,
             (),
         ));
-        db.update_vfs(fs_ref.id(), &creation_update).await.unwrap();
+        db.update_vfs(fs_ref.id(), &creation_update.into())
+            .await
+            .unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 7);
@@ -567,7 +579,9 @@ mod test {
             54,
             (),
         ));
-        db.update_vfs(fs_ref.id(), &creation_update).await.unwrap();
+        db.update_vfs(fs_ref.id(), &creation_update.into())
+            .await
+            .unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 7);
@@ -590,7 +604,7 @@ mod test {
             .into(),
         );
 
-        let failed_update: VfsUpdate<()> = VfsUpdate::FailedApplication(failed_diff);
+        let failed_update = VfsUpdate::FailedApplication(failed_diff);
         db.update_vfs(fs_ref.id(), &failed_update).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
@@ -601,10 +615,10 @@ mod test {
             .await
             .unwrap();
 
-        let vfs_node = VfsNode::<()>::from(&node);
+        let vfs_node = VfsNode::try_from(&node).unwrap();
         assert!(vfs_node.state().is_err());
 
-        let conflict: VfsUpdate<()> = VfsUpdate::Conflict(diff);
+        let conflict = VfsUpdate::Conflict(diff);
         db.update_vfs(fs_ref.id(), &conflict).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
@@ -615,7 +629,7 @@ mod test {
             .await
             .unwrap();
 
-        let vfs_node = VfsNode::<()>::from(&node);
+        let vfs_node = VfsNode::try_from(&node).unwrap();
         assert!(vfs_node.state().is_conflict());
     }
 }

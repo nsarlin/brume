@@ -14,7 +14,7 @@ use std::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{Stream, TryStream, TryStreamExt};
-use path::{LocalPath, node_from_path_rec};
+use path::{node_from_path_rec, LocalPath};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
@@ -23,12 +23,15 @@ use tokio::{
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::{
-    Error,
     update::{IsModified, ModificationState},
     vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
+    Error,
 };
 
-use super::{FSBackend, FsBackendError, FsInstanceDescription, Named};
+use super::{
+    FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
+    TryFromBytes,
+};
 
 #[derive(Error, Debug)]
 pub enum LocalDirError {
@@ -292,6 +295,37 @@ impl<'a> From<&'a LocalSyncInfo> for LocalSyncInfo {
 
 impl<'a> From<&'a LocalSyncInfo> for () {
     fn from(_value: &'a LocalSyncInfo) -> Self {}
+}
+
+impl ToBytes for LocalSyncInfo {
+    fn to_bytes(&self) -> Vec<u8> {
+        let secs = self.last_modified.timestamp();
+        let nanos = self.last_modified.timestamp_subsec_nanos();
+
+        let mut bytes = Vec::with_capacity(12);
+        bytes.extend_from_slice(&secs.to_le_bytes());
+        bytes.extend_from_slice(&nanos.to_le_bytes());
+        bytes
+    }
+}
+
+impl TryFromBytes for LocalSyncInfo {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+        if bytes.len() != 12 {
+            return Err(InvalidByteSyncInfo);
+        }
+
+        // Ok to unwrap because size has been checked
+        let secs_bytes: [u8; 8] = bytes[0..8].try_into().unwrap();
+        let nanos_bytes: [u8; 4] = bytes[8..12].try_into().unwrap();
+
+        let secs = i64::from_le_bytes(secs_bytes);
+        let nanos = u32::from_le_bytes(nanos_bytes);
+
+        let last_modified = DateTime::from_timestamp(secs, nanos).ok_or(InvalidByteSyncInfo)?;
+
+        Ok(Self { last_modified })
+    }
 }
 
 /// Uniquely identify a path on the local filesystem
