@@ -13,15 +13,14 @@ use diesel::prelude::*;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use futures::future::try_join;
 use thiserror::Error;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use brume::concrete::{local::LocalSyncInfo, nextcloud::NextcloudSyncInfo};
 use brume_daemon_proto::{
-    AnyFsCreationInfo, AnyFsRef, AnySynchroCreationInfo, AnySynchroRef, SynchroId, SynchroState,
-    SynchroStatus,
+    AnyFsCreationInfo, AnySynchroCreationInfo, FileSystemMeta, SynchroId, SynchroMeta,
+    SynchroState, SynchroStatus,
 };
 
+use crate::synchro_list::NamedSynchroCreationInfo;
 use crate::{
     schema::{filesystems, synchros},
     synchro_list::{CreatedSynchro, SynchroList},
@@ -83,7 +82,7 @@ pub struct LoadedFileSystem {
     creation_info: AnyFsCreationInfo,
 }
 
-impl From<LoadedFileSystem> for AnyFsRef {
+impl From<LoadedFileSystem> for FileSystemMeta {
     fn from(value: LoadedFileSystem) -> Self {
         Self::new(value.uuid, value.creation_info.into())
     }
@@ -293,7 +292,7 @@ impl Database {
     }
 
     /// Deletes a single filesystem from the db
-    pub async fn delete_filesystem(&self, fs: &AnyFsRef) -> Result<(), DatabaseError> {
+    pub async fn delete_filesystem(&self, fs: &FileSystemMeta) -> Result<(), DatabaseError> {
         use crate::schema::filesystems::dsl::*;
 
         let fs = fs.clone();
@@ -350,66 +349,49 @@ impl Database {
         .map(|_| ())
     }
 
-    /// Loads a single filesystem into the [`SynchroList`]
-    async fn load_fs_to_list(
-        &self,
-        fs: &LoadedFileSystem,
-        synchro_list: &mut SynchroList,
-    ) -> Result<(), DatabaseError> {
-        let fs_info: AnyFsCreationInfo = fs.clone().into();
-        let vfs_bytes = self.load_vfs(fs.uuid).await?;
-
-        match fs_info {
-            AnyFsCreationInfo::LocalDir(_) => {
-                let vfs = vfs_bytes.try_into()?;
-
-                synchro_list
-                    .insert_existing_fs::<LocalSyncInfo>(fs_info, &vfs, fs.uuid)
-                    .map_err(|e| DatabaseError::invalid_data("nodes", "*", Some(Box::new(e))))
-            }
-            AnyFsCreationInfo::Nextcloud(_) => {
-                let vfs = vfs_bytes.try_into()?;
-
-                synchro_list
-                    .insert_existing_fs::<NextcloudSyncInfo>(fs_info, &vfs, fs.uuid)
-                    .map_err(|e| DatabaseError::invalid_data("nodes", "*", Some(Box::new(e))))
-            }
-        }
-    }
-
     /// Loads a single synchro into the [`SynchroList`]
     async fn load_synchro_to_list(
         &self,
-        synchro: &DbSynchro,
+        db_synchro: &DbSynchro,
         synchro_list: &mut SynchroList,
     ) -> Result<(), DatabaseError> {
-        let local = self.load_filesystem_from_id(synchro.local_fs).await?;
-        self.load_fs_to_list(&local, synchro_list).await?;
-        let remote = self.load_filesystem_from_id(synchro.remote_fs).await?;
-        self.load_fs_to_list(&remote, synchro_list).await?;
+        let local = self.load_filesystem_from_id(db_synchro.local_fs).await?;
+        let local_vfs = self.load_vfs(local.uuid).await?;
+        let remote = self.load_filesystem_from_id(db_synchro.remote_fs).await?;
+        let remote_vfs = self.load_vfs(remote.uuid).await?;
+        let synchro_info = NamedSynchroCreationInfo::new(
+            local.creation_info.clone(),
+            remote.creation_info.clone(),
+            db_synchro.name.clone(),
+        );
 
-        let mut synchro_ref = AnySynchroRef::new(local.into(), remote.into(), synchro.name.clone());
-        synchro_ref.set_state(
-            synchro
+        let mut meta = SynchroMeta::new(local.into(), remote.into(), db_synchro.name.clone());
+        meta.set_state(
+            db_synchro
                 .state
                 .as_str()
                 .try_into()
                 .map_err(|_| DatabaseError::invalid_data("synchros", "state", None))?,
         );
-        synchro_ref.set_status(
-            synchro
+        meta.set_status(
+            db_synchro
                 .status
                 .as_str()
                 .try_into()
-                .map_err(|_| DatabaseError::invalid_data("synchros", "state", None))?,
+                .map_err(|_| DatabaseError::invalid_data("synchros", "status", None))?,
         );
 
-        let synchro_id = Uuid::from_slice(synchro.uuid.as_slice())
+        let synchro_id = Uuid::from_slice(db_synchro.uuid.as_slice())
             .map_err(|e| DatabaseError::invalid_data("synchros", "uuid", Some(Box::new(e))))?;
 
-        synchro_list
-            .synchro_ref_list_mut()
-            .insert(synchro_id.into(), RwLock::new(synchro_ref));
+        let mut synchro = synchro_info
+            .instantiate()
+            .map_err(|e| DatabaseError::invalid_data("nodes", "*", Some(Box::new(e))))?;
+
+        synchro.set_local_vfs(local_vfs)?;
+        synchro.set_remote_vfs(remote_vfs)?;
+
+        synchro_list.insert_existing(synchro_id.into(), synchro, meta);
         Ok(())
     }
 
@@ -514,7 +496,7 @@ mod test {
         db.load_all_filesystems().await.unwrap();
 
         let fs_info = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new("/tmp/test"));
-        let fs_ref = AnyFsRef::from(fs_info.clone());
+        let fs_ref = FileSystemMeta::from(fs_info.clone());
         db.insert_new_filesystem(fs_ref.id(), &fs_info)
             .await
             .unwrap();

@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{Stream, TryStream, TryStreamExt};
+use futures::{future::BoxFuture, Stream, TryStream, TryStreamExt};
 use reqwest::Body;
 use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
 use serde::{Deserialize, Serialize};
@@ -82,12 +82,12 @@ impl From<NextcloudFsError> for FsBackendError {
 
 /// The nextcloud FileSystem, accessed with the dav protocol
 #[derive(Debug)]
-pub struct NextcloudFs {
+pub struct Nextcloud {
     client: Client,
     name: String,
 }
 
-impl NextcloudFs {
+impl Nextcloud {
     // TODO: handle folders that are not the user root folder
     pub fn new(url: &str, login: &str, password: &str) -> Result<Self, NextcloudFsError> {
         let name = login.to_string();
@@ -103,7 +103,7 @@ impl NextcloudFs {
     }
 }
 
-impl FSBackend for NextcloudFs {
+impl FSBackend for Nextcloud {
     type SyncInfo = NextcloudSyncInfo;
 
     type IoError = NextcloudFsError;
@@ -112,15 +112,17 @@ impl FSBackend for NextcloudFs {
 
     type Description = NextcloudFsDescription;
 
-    async fn validate(info: &Self::CreationInfo) -> Result<(), Self::IoError> {
-        // Try to create a nextcloud client instance and access the remote url
-        let nextcloud: Self = info.clone().try_into()?;
-        nextcloud
-            .client
-            .list("", Depth::Number(0))
-            .await
-            .map(|_| ())
-            .map_err(|e| e.into())
+    fn validate(info: &Self::CreationInfo) -> BoxFuture<'_, Result<(), Self::IoError>> {
+        Box::pin(async {
+            // Try to create a nextcloud client instance and access the remote url
+            let nextcloud: Self = info.clone().try_into()?;
+            nextcloud
+                .client
+                .list("", Depth::Number(0))
+                .await
+                .map(|_| ())
+                .map_err(|e| e.into())
+        })
     }
 
     fn description(&self) -> Self::Description {
@@ -136,72 +138,91 @@ impl FSBackend for NextcloudFs {
         }
     }
 
-    async fn get_sync_info(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
-        let elements = self.client.list(path.into(), Depth::Number(0)).await?;
+    fn get_sync_info<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+        Box::pin(async {
+            let elements = self.client.list(path.into(), Depth::Number(0)).await?;
 
-        let elem = elements.first().ok_or(NextcloudFsError::BadStructure)?;
+            let elem = elements.first().ok_or(NextcloudFsError::BadStructure)?;
 
-        dav_parse_entity_tag(elem.clone())
+            dav_parse_entity_tag(elem.clone())
+        })
     }
 
-    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
-        let elements = self.client.list("", Depth::Infinity).await?;
+    fn load_virtual(&self) -> BoxFuture<'_, Result<Vfs<Self::SyncInfo>, Self::IoError>> {
+        Box::pin(async {
+            let elements = self.client.list("", Depth::Infinity).await?;
 
-        let vfs_root = dav_parse_vfs(elements, &self.name)?;
+            let vfs_root = dav_parse_vfs(elements, &self.name)?;
 
-        Ok(Vfs::new(vfs_root))
+            Ok(Vfs::new(vfs_root))
+        })
     }
 
-    async fn read_file(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
-        Ok(self
-            .client
-            .get(path.into())
-            .await?
-            .bytes_stream()
-            .map_err(|e| e.into()))
+    fn read_file<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<
+        'a,
+        Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError>,
+    > {
+        Box::pin(async {
+            Ok(self
+                .client
+                .get(path.into())
+                .await?
+                .bytes_stream()
+                .map_err(|e| e.into()))
+        })
     }
 
-    async fn write_file<Data: TryStream + Send + 'static>(
-        &self,
-        path: &VirtualPath,
+    fn write_file<'a, Data: TryStream + Send + 'static>(
+        &'a self,
+        path: &'a VirtualPath,
         data: Data,
-    ) -> Result<Self::SyncInfo, Self::IoError>
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
     {
-        let body = Body::wrap_stream(data);
+        Box::pin(async {
+            let body = Body::wrap_stream(data);
 
-        self.client.put(path.into(), body).await?;
+            self.client.put(path.into(), body).await?;
 
-        // Extract the tag of the created file
-        let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
-        entities
-            .pop()
-            .ok_or(NextcloudFsError::BadStructure)
-            .and_then(dav_parse_entity_tag)
+            // Extract the tag of the created file
+            let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
+            entities
+                .pop()
+                .ok_or(NextcloudFsError::BadStructure)
+                .and_then(dav_parse_entity_tag)
+        })
     }
 
-    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
-        self.client.delete(path.into()).await.map_err(|e| e.into())
+    fn rm<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
+        Box::pin(async { self.client.delete(path.into()).await.map_err(|e| e.into()) })
     }
 
-    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
-        self.client.mkcol(path.into()).await?;
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+        Box::pin(async {
+            self.client.mkcol(path.into()).await?;
 
-        // Extract the tag of the created dir
-        let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
-        entities
-            .pop()
-            .ok_or(NextcloudFsError::BadStructure)
-            .and_then(dav_parse_entity_tag)
+            // Extract the tag of the created dir
+            let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
+            entities
+                .pop()
+                .ok_or(NextcloudFsError::BadStructure)
+                .and_then(dav_parse_entity_tag)
+        })
     }
 
-    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
-        self.client.delete(path.into()).await.map_err(|e| e.into())
+    fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
+        Box::pin(async { self.client.delete(path.into()).await.map_err(|e| e.into()) })
     }
 }
 
@@ -307,8 +328,8 @@ impl From<NextcloudFsCreationInfo> for NextcloudFsDescription {
     }
 }
 
-impl TryFrom<NextcloudFsCreationInfo> for NextcloudFs {
-    type Error = <NextcloudFs as FSBackend>::IoError;
+impl TryFrom<NextcloudFsCreationInfo> for Nextcloud {
+    type Error = <Nextcloud as FSBackend>::IoError;
 
     fn try_from(value: NextcloudFsCreationInfo) -> Result<Self, Self::Error> {
         Self::new(&value.server_url, &value.login, &value.password)

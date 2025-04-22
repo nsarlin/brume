@@ -8,8 +8,8 @@ use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use brume_daemon_proto::{
-    AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, AnySynchroRef, BrumeService,
-    SynchroId, SynchroSide, SynchroState,
+    AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService, SynchroId,
+    SynchroMeta, SynchroSide, SynchroState,
 };
 
 use crate::{
@@ -86,15 +86,8 @@ impl BrumeService for Server {
         Ok(())
     }
 
-    async fn list_synchros(self, _context: Context) -> HashMap<SynchroId, AnySynchroRef> {
-        let list = self.synchro_list.read().await;
-
-        let mut ret = HashMap::new();
-        for (key, val) in list.synchro_ref_list() {
-            ret.insert(*key, val.read().await.clone());
-        }
-
-        ret
+    async fn list_synchros(self, _context: Context) -> HashMap<SynchroId, SynchroMeta> {
+        self.synchro_list.read().await.synchro_meta_list().await
     }
 
     async fn delete_synchro(self, _context: Context, id: SynchroId) -> Result<(), String> {

@@ -13,7 +13,7 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{Stream, TryStream, TryStreamExt};
+use futures::{future::BoxFuture, Stream, TryStream, TryStreamExt};
 use path::{node_from_path_rec, LocalPath};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -119,6 +119,7 @@ impl LocalDir {
     }
 }
 
+// TODO: Use `tokio::fs` everywhere for non blocking fs access
 impl FSBackend for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
@@ -128,127 +129,155 @@ impl FSBackend for LocalDir {
 
     type Description = LocalDirDescription;
 
-    async fn validate(info: &Self::CreationInfo) -> Result<(), Self::IoError> {
-        if info.0.exists() {
-            Ok(())
-        } else {
-            Err(LocalDirError::invalid_path(&info.0))
-        }
+    fn validate(info: &Self::CreationInfo) -> BoxFuture<'_, Result<(), Self::IoError>> {
+        Box::pin(async {
+            if info.0.exists() {
+                Ok(())
+            } else {
+                Err(LocalDirError::invalid_path(&info.0))
+            }
+        })
     }
 
     fn description(&self) -> Self::Description {
         LocalDirDescription::new(&self.path)
     }
 
-    async fn get_sync_info(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
-        let full_path = self.full_path(path);
+    fn get_sync_info<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+        Box::pin(async {
+            let full_path = self.full_path(path);
 
-        Ok(LocalSyncInfo::new(
-            full_path
-                .modification_time()
-                .map_err(|e| LocalDirError::io(&self.path, e))?
-                .into(),
-        ))
-    }
-
-    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
-        let sync = LocalSyncInfo::new(
-            self.path
-                .modification_time()
-                .map_err(|e| LocalDirError::io(&self.path, e))?
-                .into(),
-        );
-        let root = if self.path.is_file() {
-            VfsNode::File(FileMeta::new(
-                self.path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .ok_or(LocalDirError::invalid_path(&self.path))?,
-                self.path
-                    .file_size()
-                    .map_err(|e| LocalDirError::io(&self.path, e))?,
-                sync,
+            Ok(LocalSyncInfo::new(
+                full_path
+                    .modification_time()
+                    .map_err(|e| LocalDirError::io(&self.path, e))?
+                    .into(),
             ))
-        } else if self.path.is_dir() {
-            let mut root = DirTree::new("", sync);
-            let children = self
-                .path
-                .read_dir()
-                .map_err(|e| LocalDirError::io(&self.path, e))?
-                .map(|entry| entry.unwrap())
-                .collect::<Vec<_>>();
-            node_from_path_rec(&mut root, &children)?;
-            VfsNode::Dir(root)
-        } else {
-            return Err(LocalDirError::invalid_path(&self.path));
-        };
-
-        Ok(Vfs::new(root))
+        })
     }
 
-    async fn read_file(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
-        let full_path = self.full_path(path);
-        File::open(&full_path)
-            .await
-            .map(|reader| LocalFileStream::new(reader, &full_path))
-            .map_err(|e| LocalDirError::io(&full_path, e))
+    fn load_virtual(&self) -> BoxFuture<'_, Result<Vfs<Self::SyncInfo>, Self::IoError>> {
+        Box::pin(async {
+            let sync = LocalSyncInfo::new(
+                self.path
+                    .modification_time()
+                    .map_err(|e| LocalDirError::io(&self.path, e))?
+                    .into(),
+            );
+            let root = if self.path.is_file() {
+                VfsNode::File(FileMeta::new(
+                    self.path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .ok_or(LocalDirError::invalid_path(&self.path))?,
+                    self.path
+                        .file_size()
+                        .map_err(|e| LocalDirError::io(&self.path, e))?,
+                    sync,
+                ))
+            } else if self.path.is_dir() {
+                let mut root = DirTree::new("", sync);
+                let children = self
+                    .path
+                    .read_dir()
+                    .map_err(|e| LocalDirError::io(&self.path, e))?
+                    .map(|entry| entry.unwrap())
+                    .collect::<Vec<_>>();
+                node_from_path_rec(&mut root, &children)?;
+                VfsNode::Dir(root)
+            } else {
+                return Err(LocalDirError::invalid_path(&self.path));
+            };
+
+            Ok(Vfs::new(root))
+        })
     }
 
-    async fn write_file<Data: TryStream + Send + 'static + Unpin>(
-        &self,
-        path: &VirtualPath,
+    fn read_file<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<
+        'a,
+        Result<
+            impl Stream<Item = Result<Bytes, Self::IoError>> + Send + Unpin + 'static,
+            Self::IoError,
+        >,
+    > {
+        Box::pin(async {
+            let full_path = self.full_path(path);
+            File::open(&full_path)
+                .await
+                .map(|reader| LocalFileStream::new(reader, &full_path))
+                .map_err(|e| LocalDirError::io(&full_path, e))
+        })
+    }
+
+    fn write_file<'a, Data: TryStream + Send + 'static + Unpin>(
+        &'a self,
+        path: &'a VirtualPath,
         data: Data,
-    ) -> Result<Self::SyncInfo, Self::IoError>
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
     {
-        let full_path = self.full_path(path);
-        let mut f = File::create(&full_path)
-            .await
-            .map_err(|e| LocalDirError::io(&self.path, e))?;
-        let mut reader = StreamReader::new(
-            data.map_ok(Bytes::from)
-                .map_err(|e| io::Error::new(ErrorKind::Other, e)),
-        );
+        Box::pin(async {
+            let full_path = self.full_path(path);
+            let mut f = File::create(&full_path)
+                .await
+                .map_err(|e| LocalDirError::io(&self.path, e))?;
+            let mut reader = StreamReader::new(
+                data.map_ok(Bytes::from)
+                    .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+            );
 
-        tokio::io::copy(&mut reader, &mut f)
-            .await
-            .map_err(|e| LocalDirError::io(&self.path, e))?;
+            tokio::io::copy(&mut reader, &mut f)
+                .await
+                .map_err(|e| LocalDirError::io(&self.path, e))?;
 
-        full_path
-            .modification_time()
-            .map(|time| LocalSyncInfo::new(time.into()))
-            .map_err(|e| LocalDirError::io(&self.path, e))
+            full_path
+                .modification_time()
+                .map(|time| LocalSyncInfo::new(time.into()))
+                .map_err(|e| LocalDirError::io(&self.path, e))
+        })
     }
 
-    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
-        let full_path = self.full_path(path);
-        fs::remove_file(&full_path)
-            .await
-            .map_err(|e| LocalDirError::io(&self.path, e))
+    fn rm<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
+        Box::pin(async {
+            let full_path = self.full_path(path);
+            fs::remove_file(&full_path)
+                .await
+                .map_err(|e| LocalDirError::io(&full_path, e))
+        })
     }
 
-    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
-        let full_path = self.full_path(path);
-        fs::create_dir(&full_path)
-            .await
-            .map_err(|e| LocalDirError::io(&self.path, e))?;
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+        Box::pin(async {
+            let full_path = self.full_path(path);
+            fs::create_dir(&full_path)
+                .await
+                .map_err(|e| LocalDirError::io(&self.path, e))?;
 
-        full_path
-            .modification_time()
-            .map(|time| LocalSyncInfo::new(time.into()))
-            .map_err(|e| LocalDirError::io(&self.path, e))
+            full_path
+                .modification_time()
+                .map(|time| LocalSyncInfo::new(time.into()))
+                .map_err(|e| LocalDirError::io(&self.path, e))
+        })
     }
 
-    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
-        let full_path = self.full_path(path);
-        fs::remove_dir_all(&full_path)
-            .await
-            .map_err(|e| LocalDirError::io(&self.path, e))
+    fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
+        Box::pin(async {
+            let full_path = self.full_path(path);
+            fs::remove_dir_all(&full_path)
+                .await
+                .map_err(|e| LocalDirError::io(&full_path, e))
+        })
     }
 }
 

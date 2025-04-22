@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use interprocess::local_socket::{
+    tokio::{prelude::*, Stream},
     GenericNamespaced,
-    tokio::{Stream, prelude::*},
 };
 use tarpc::{
     serde_transport, tokio_serde::formats::Bincode, tokio_util::codec::LengthDelimitedCodec,
 };
 
-use brume_daemon_proto::{AnySynchroRef, BRUME_SOCK_NAME, BrumeServiceClient, SynchroId};
+use brume_daemon_proto::{BrumeServiceClient, SynchroId, SynchroMeta, BRUME_SOCK_NAME};
 
 pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
     let name = BRUME_SOCK_NAME.to_ns_name::<GenericNamespaced>()?;
@@ -23,7 +23,7 @@ pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
 }
 
 pub async fn get_synchro_id(
-    synchro_list: &HashMap<SynchroId, AnySynchroRef>,
+    synchro_list: &HashMap<SynchroId, SynchroMeta>,
     synchro_descriptor: &str,
 ) -> Option<SynchroId> {
     for (id, sync) in synchro_list {
@@ -37,9 +37,9 @@ pub async fn get_synchro_id(
 }
 
 pub async fn get_synchro(
-    synchro_list: &HashMap<SynchroId, AnySynchroRef>,
+    synchro_list: &HashMap<SynchroId, SynchroMeta>,
     synchro_descriptor: &str,
-) -> Option<(SynchroId, AnySynchroRef)> {
+) -> Option<(SynchroId, SynchroMeta)> {
     for (id, sync) in synchro_list {
         if (synchro_descriptor.len() > 3 && id.id().to_string().starts_with(synchro_descriptor))
             || sync.name() == synchro_descriptor

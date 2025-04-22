@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use concrete::ConcreteUpdateApplicationError;
+use concrete::{ConcreteUpdateApplicationError, FSBackend};
 use filesystem::VfsReloadError;
 use thiserror::Error;
 use update::{ReconciliationError, VfsUpdateApplicationError};
@@ -47,13 +47,10 @@ impl Error {
         }
     }
 
-    pub fn vfs_update_application<E: Into<VfsUpdateApplicationError>>(
-        fs_name: &str,
-        source: E,
-    ) -> Self {
+    pub fn vfs_update_application<Backend: FSBackend>(source: VfsUpdateApplicationError) -> Self {
         Self::VfsUpdateApplicationFailed {
-            fs_name: fs_name.to_string(),
-            source: source.into(),
+            fs_name: Backend::TYPE_NAME.to_string(),
+            source,
         }
     }
 
