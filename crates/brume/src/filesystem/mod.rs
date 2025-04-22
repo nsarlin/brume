@@ -1,18 +1,13 @@
 //! File system manipulation
 
-use log::{debug, error, info};
-
-use futures::future::join_all;
+use log::{debug, error};
+use thiserror::Error;
 
 use crate::{
-    Error,
-    concrete::{ConcreteFS, ConcreteUpdateApplicationError, FSBackend, FsBackendError},
+    concrete::{ConcreteFS, FSBackend, FsBackendError},
     sorted_vec::SortedVec,
-    update::{
-        AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DiffError, FailedUpdateApplication,
-        UpdateKind, VfsDiff, VfsDiffList, VfsUpdate, VfsUpdateApplicationError,
-    },
-    vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath},
+    update::{DiffError, VfsDiffList, VfsUpdate, VfsUpdateApplicationError},
+    vfs::{DirTree, InvalidPathError, NodeState, Vfs, VirtualPath},
 };
 
 #[derive(Error, Debug)]
@@ -44,49 +39,6 @@ pub struct FileSystem<Backend: FSBackend> {
     concrete: ConcreteFS<Backend>,
     status_vfs: Vfs<Backend::SyncInfo>,
     loaded_vfs: Vfs<Backend::SyncInfo>,
-}
-
-/// Returned by [`FileSystem::clone_dir_concrete`]
-///
-/// This type holds the list of nodes that were successfully cloned and the one that resulted in an
-/// error.
-pub struct ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> {
-    success: Option<(DirTree<SrcSyncInfo>, DirTree<DstSyncInfo>)>,
-    failures: Vec<FailedUpdateApplication>,
-}
-
-impl<SrcSyncInfo, DstSyncInfo> ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> {
-    /// Create a new Clone result for a mkdir that failed
-    fn new_mkdir_failed<E: Into<FsBackendError>>(path: &VirtualPath, error: E) -> Self {
-        Self {
-            success: None,
-            failures: vec![FailedUpdateApplication::new(
-                VfsDiff::dir_created(path.to_owned()),
-                error.into(),
-            )],
-        }
-    }
-
-    fn new(
-        src_success: DirTree<SrcSyncInfo>,
-        dst_success: DirTree<DstSyncInfo>,
-        failures: Vec<FailedUpdateApplication>,
-    ) -> Self {
-        Self {
-            success: Some((src_success, dst_success)),
-            failures,
-        }
-    }
-
-    /// Returns the successfully cloned nodes, if any, sorted in a [`DirTree`]
-    pub fn take_success(&mut self) -> Option<(DirTree<SrcSyncInfo>, DirTree<DstSyncInfo>)> {
-        self.success.take()
-    }
-
-    /// Returns the nodes that failed to be cloned
-    pub fn take_failures(&mut self) -> Vec<FailedUpdateApplication> {
-        std::mem::take(&mut self.failures)
-    }
 }
 
 impl<Backend: FSBackend> FileSystem<Backend> {
@@ -151,226 +103,8 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     pub fn find_loaded_dir(
         &self,
         path: &VirtualPath,
-    ) -> Result<FileSystemDir<'_, Backend>, InvalidPathError> {
-        Ok(FileSystemDir {
-            concrete: &self.concrete,
-            dir: self.loaded_vfs.find_dir(path)?,
-        })
-    }
-
-    /// Apply an update on the concrete fs.
-    ///
-    /// The file contents will be taken from `ref_fs`
-    // TODO: handle if ref_fs is not sync ?
-    // TODO: check for "last minute" changes in target fs
-    pub async fn apply_update_concrete<RefBackend: FSBackend>(
-        &self,
-        ref_fs: &FileSystem<RefBackend>,
-        update: VfsDiff,
-    ) -> Result<
-        Vec<AppliedUpdate<RefBackend::SyncInfo, Backend::SyncInfo>>,
-        ConcreteUpdateApplicationError,
-    > {
-        if update.path().is_root() {
-            return Err(ConcreteUpdateApplicationError::PathIsRoot);
-        }
-
-        match update.kind() {
-            UpdateKind::DirCreated => {
-                let path = update.path();
-                let dir = ref_fs.find_loaded_dir(path)?;
-
-                let mut res = self.clone_dir_concrete(dir, path).await;
-
-                let mut updates: Vec<_> = res
-                    .take_success()
-                    .map(|(src_dir, dst_dir)| {
-                        AppliedUpdate::DirCreated(AppliedDirCreation::new(
-                            // The update path is not root so we can unwrap
-                            path.parent().unwrap(),
-                            src_dir,
-                            dst_dir,
-                        ))
-                    })
-                    .into_iter()
-                    .collect();
-
-                updates.extend(
-                    res.take_failures()
-                        .into_iter()
-                        .map(AppliedUpdate::FailedApplication),
-                );
-                Ok(updates)
-            }
-            UpdateKind::DirRemoved => {
-                let path = update.path();
-                info!("Removing dir {:?} from {}", path, Backend::TYPE_NAME);
-
-                // If the update is a removal of a node that as never been created because of an
-                // error, we can skip it
-                if let Some(node) = ref_fs.vfs().find_node(update.path()) {
-                    if node.can_skip_removal() {
-                        return Ok(vec![AppliedUpdate::DirRemovedSkipped(path.to_owned())]);
-                    }
-                }
-
-                self.concrete
-                    .backend()
-                    .rmdir(path)
-                    .await
-                    .map(|_| AppliedUpdate::DirRemoved(path.to_owned()))
-                    .or_else(|e| {
-                        Ok(AppliedUpdate::FailedApplication(
-                            FailedUpdateApplication::new(update, e.into()),
-                        ))
-                    })
-                    .map(|update| vec![update])
-            }
-            UpdateKind::FileCreated => {
-                let path = update.path();
-                self.concrete
-                    .clone_file(&ref_fs.concrete, path)
-                    .await
-                    .map(|clone_result| {
-                        AppliedUpdate::FileCreated(AppliedFileUpdate::from_clone_result(
-                            path,
-                            clone_result,
-                        ))
-                    })
-                    .or_else(|e| {
-                        Ok(AppliedUpdate::FailedApplication(
-                            FailedUpdateApplication::new(update, e),
-                        ))
-                    })
-                    .map(|update| vec![update])
-            }
-            UpdateKind::FileModified => {
-                let path = update.path();
-                self.concrete
-                    .clone_file(&ref_fs.concrete, path)
-                    .await
-                    .map(|clone_result| {
-                        AppliedUpdate::FileModified(AppliedFileUpdate::from_clone_result(
-                            path,
-                            clone_result,
-                        ))
-                    })
-                    .or_else(|e| {
-                        Ok(AppliedUpdate::FailedApplication(
-                            FailedUpdateApplication::new(update, e),
-                        ))
-                    })
-                    .map(|update| vec![update])
-            }
-            UpdateKind::FileRemoved => {
-                let path = update.path();
-                info!("Removing file {:?} from {}", path, Backend::TYPE_NAME);
-
-                // If the update is a removal of a node that as never been created because of an
-                // error, we can skip it
-                if let Some(node) = ref_fs.vfs().find_node(update.path()) {
-                    if node.can_skip_removal() {
-                        return Ok(vec![AppliedUpdate::FileRemovedSkipped(path.to_owned())]);
-                    }
-                }
-
-                self.backend()
-                    .rm(path)
-                    .await
-                    .map(|_| AppliedUpdate::FileRemoved(path.to_owned()))
-                    .or_else(|e| {
-                        Ok(AppliedUpdate::FailedApplication(
-                            FailedUpdateApplication::new(update, e.into()),
-                        ))
-                    })
-                    .map(|update| vec![update])
-            }
-        }
-    }
-
-    /// Clone a directory from `ref_concrete` into the concrete fs of self.
-    pub async fn clone_dir_concrete<RefBackend: FSBackend>(
-        &self,
-        ref_fs: FileSystemDir<'_, RefBackend>,
-        path: &VirtualPath,
-    ) -> ConcreteDirCloneResult<RefBackend::SyncInfo, Backend::SyncInfo> {
-        let src_info = match ref_fs.concrete.backend().get_sync_info(path).await {
-            Ok(dir_info) => dir_info,
-            Err(err) => {
-                error!("Failed to create dir {path:?}: {err:?}");
-                return ConcreteDirCloneResult::new_mkdir_failed(path, err);
-            }
-        };
-
-        let dst_info = match self.backend().mkdir(path).await {
-            Ok(dir_info) => dir_info,
-            Err(err) => {
-                error!("Failed to create dir {path:?}: {err:?}");
-                return ConcreteDirCloneResult::new_mkdir_failed(path, err);
-            }
-        };
-
-        let mut dst_dir = DirTree::new(path.name(), dst_info);
-        let mut src_dir = DirTree::new(path.name(), src_info);
-        let mut errors = Vec::new();
-
-        let futures: Vec<_> = ref_fs
-            .dir
-            .children()
-            .iter()
-            .map(|ref_child| async move {
-                let mut child_path = path.to_owned();
-                child_path.push(ref_child.name());
-                match ref_child {
-                    VfsNode::Dir(ref_dir) => {
-                        let mut result = Box::pin(self.clone_dir_concrete(
-                            FileSystemDir::new(ref_fs.concrete, ref_dir),
-                            &child_path,
-                        ))
-                        .await;
-
-                        let success = result.take_success().map(|(src_dir, dst_dir)| {
-                            (VfsNode::Dir(src_dir), VfsNode::Dir(dst_dir))
-                        });
-                        let failures = result.take_failures();
-                        (success, failures)
-                    }
-                    VfsNode::File(_) => {
-                        match self.concrete.clone_file(ref_fs.concrete, &child_path).await {
-                            Ok(clone_result) => {
-                                let size = clone_result.file_size();
-                                let (src_info, dst_info) = clone_result.into();
-                                let src_node =
-                                    VfsNode::File(FileMeta::new(child_path.name(), size, src_info));
-                                let dst_node =
-                                    VfsNode::File(FileMeta::new(child_path.name(), size, dst_info));
-                                (Some((src_node, dst_node)), Vec::new())
-                            }
-                            Err(error) => {
-                                let failure = FailedUpdateApplication::new(
-                                    VfsDiff::file_created(child_path),
-                                    error,
-                                );
-                                (None, vec![failure])
-                            }
-                        }
-                    }
-                }
-            })
-            .collect();
-
-        let results = join_all(futures).await;
-
-        for (success, failures) in results {
-            if let Some((src_node, dst_node)) = success {
-                dst_dir.insert_child(dst_node);
-                src_dir.insert_child(src_node);
-            }
-
-            errors.extend(failures);
-        }
-
-        ConcreteDirCloneResult::new(src_dir, dst_dir, errors)
+    ) -> Result<&DirTree<Backend::SyncInfo>, InvalidPathError> {
+        self.loaded_vfs.find_dir(path)
     }
 
     /// Applies a list of updates to the [`Vfs`], by calling [`Self::apply_update_vfs`] on each of
@@ -392,28 +126,47 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     ) -> Result<(), VfsUpdateApplicationError> {
         self.status_vfs.apply_update(update, &self.loaded_vfs)
     }
-}
 
-/// A directory in the [`FileSystem`]
-pub struct FileSystemDir<'fs, Backend: FSBackend> {
-    concrete: &'fs ConcreteFS<Backend>,
-    dir: &'fs DirTree<Backend::SyncInfo>,
-}
+    /// Sets the state of a node in the [`Vfs`] to `state`
+    pub fn set_node_state_vfs(
+        &mut self,
+        path: &VirtualPath,
+        state: NodeState<Backend::SyncInfo>,
+    ) -> Result<(), VfsUpdateApplicationError> {
+        self.status_vfs.update_node_state(path, state)
+    }
 
-impl<'fs, Backend: FSBackend> FileSystemDir<'fs, Backend> {
-    pub fn new(concrete: &'fs ConcreteFS<Backend>, dir: &'fs DirTree<Backend::SyncInfo>) -> Self {
-        Self { concrete, dir }
+    /// Fetches the sync info from the concrete FS and updates the [`Vfs`] accordingly
+    pub async fn reload_sync_info(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Result<Option<NodeState<Backend::SyncInfo>>, VfsUpdateApplicationError> {
+        // Skip if the node does not exist, meaning it has been removed so there is no state to
+        // update
+        if self.status_vfs.find_node(path).is_some() {
+            let concrete = self.concrete();
+            let state = match concrete.backend().get_sync_info(path).await {
+                Ok(info) => NodeState::Ok(info),
+                // If we can reach the concrete FS, we delay until the next full_sync
+                Err(_) => NodeState::NeedResync,
+            };
+            self.set_node_state_vfs(path, state.clone())?;
+
+            Ok(Some(state))
+        } else {
+            Ok(None)
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use crate::{
         test_utils::{
             TestFileSystem,
             TestNode::{D, FF},
         },
+        update::VfsDiff,
         vfs::VirtualPathBuf,
     };
 
@@ -453,7 +206,8 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/e/g/h").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsDiff::dir_created(dir_path.clone()))
+            .concrete()
+            .apply_update(&remote_fs, VfsDiff::dir_created(dir_path.clone()))
             .await
             .unwrap();
 
@@ -477,7 +231,8 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/a/b").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsDiff::dir_removed(dir_path.clone()))
+            .concrete()
+            .apply_update(&remote_fs, VfsDiff::dir_removed(dir_path.clone()))
             .await
             .unwrap();
 
@@ -508,7 +263,8 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f3.rs").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsDiff::file_created(dir_path.clone()))
+            .concrete()
+            .apply_update(&remote_fs, VfsDiff::file_created(dir_path.clone()))
             .await
             .unwrap();
 
@@ -532,7 +288,8 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f1.md").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsDiff::file_modified(dir_path.clone()))
+            .concrete()
+            .apply_update(&remote_fs, VfsDiff::file_modified(dir_path.clone()))
             .await
             .unwrap();
 
@@ -556,7 +313,8 @@ mod test {
 
         let dir_path = VirtualPathBuf::new("/Doc/f2.pdf").unwrap();
         let applied = local_fs
-            .apply_update_concrete(&remote_fs, VfsDiff::file_removed(dir_path.clone()))
+            .concrete()
+            .apply_update(&remote_fs, VfsDiff::file_removed(dir_path.clone()))
             .await
             .unwrap();
 

@@ -1,7 +1,9 @@
-use std::{cell::RefCell, ffi::OsStr, fmt::Display, io::ErrorKind, ops::Deref, time::SystemTime};
+use std::{
+    ffi::OsStr, fmt::Display, io::ErrorKind, ops::Deref, sync::Arc, sync::RwLock, time::SystemTime,
+};
 
 use bytes::Bytes;
-use futures::{stream, Stream, TryStream, TryStreamExt};
+use futures::{future::BoxFuture, stream, Stream, TryStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
@@ -9,7 +11,8 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
     concrete::{
-        local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription, Named, ToBytes,
+        local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription,
+        InvalidByteSyncInfo, Named, ToBytes, TryFromBytes,
     },
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},
@@ -542,10 +545,16 @@ impl InnerConcreteTestNode {
 }
 
 /// Mock FS that can be used to test concrete operations.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct ConcreteTestNode {
-    inner: RefCell<InnerConcreteTestNode>,
+    inner: Arc<RwLock<InnerConcreteTestNode>>,
     propagate_err_to_vfs: bool,
+}
+
+impl PartialEq for ConcreteTestNode {
+    fn eq(&self, other: &Self) -> bool {
+        *self.inner.read().unwrap() == *other.inner.read().unwrap()
+    }
 }
 
 impl ConcreteTestNode {
@@ -559,7 +568,7 @@ pub(crate) type TestFileSystem = FileSystem<ConcreteTestNode>;
 impl From<TestNode<'_>> for ConcreteTestNode {
     fn from(value: TestNode) -> Self {
         Self {
-            inner: RefCell::new(value.into()),
+            inner: Arc::new(RwLock::new(value.into())),
             propagate_err_to_vfs: false,
         }
     }
@@ -570,7 +579,7 @@ impl TryFrom<InnerConcreteTestNode> for ConcreteTestNode {
 
     fn try_from(value: InnerConcreteTestNode) -> Result<Self, Self::Error> {
         Ok(Self {
-            inner: RefCell::new(value),
+            inner: Arc::new(RwLock::new(value)),
             propagate_err_to_vfs: false,
         })
     }
@@ -578,7 +587,7 @@ impl TryFrom<InnerConcreteTestNode> for ConcreteTestNode {
 
 impl<'a> From<&'a ConcreteTestNode> for VfsNode<ShallowTestSyncInfo> {
     fn from(value: &'a ConcreteTestNode) -> Self {
-        let inner = value.inner.borrow();
+        let inner = value.inner.read().unwrap();
         if !value.propagate_err_to_vfs {
             TestNode::from(inner.deref()).into_node()
         } else {
@@ -608,189 +617,219 @@ impl FSBackend for ConcreteTestNode {
 
     type Description = String;
 
-    async fn validate(_info: &Self::CreationInfo) -> Result<(), Self::IoError> {
-        Ok(())
+    fn validate(_info: &Self::CreationInfo) -> BoxFuture<'_, Result<(), Self::IoError>> {
+        Box::pin(async { Ok(()) })
     }
 
     fn description(&self) -> Self::Description {
-        self.inner.borrow().name().to_string()
+        self.inner.read().unwrap().name().to_string()
     }
 
-    async fn get_sync_info(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
-        let inner: VfsNode<_> = self.into();
+    fn get_sync_info<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+        Box::pin(async {
+            let inner: VfsNode<_> = self.into();
 
-        let node = inner.find_node(path).unwrap();
-        match node.state() {
-            NodeState::Ok(sync) => Ok(sync.clone()),
-            _ => panic!(),
-        }
+            let node = inner.find_node(path).unwrap();
+            match node.state() {
+                NodeState::Ok(sync) => Ok(sync.clone()),
+                _ => panic!(),
+            }
+        })
     }
 
-    async fn load_virtual(&self) -> Result<Vfs<Self::SyncInfo>, Self::IoError> {
-        let root = self.into();
+    fn load_virtual(&self) -> BoxFuture<'_, Result<Vfs<Self::SyncInfo>, Self::IoError>> {
+        Box::pin(async {
+            let root = self.into();
 
-        Ok(Vfs::new(root))
+            Ok(Vfs::new(root))
+        })
     }
 
-    async fn read_file(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError> {
-        let inner = self.inner.borrow();
+    fn read_file<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<
+        'a,
+        Result<
+            impl Stream<Item = Result<Bytes, Self::IoError>> + Send + Unpin + 'static,
+            Self::IoError,
+        >,
+    > {
+        Box::pin(async move {
+            let inner = self.inner.read().unwrap();
 
-        let node = inner.get_node(path);
+            let node = inner.get_node(path);
 
-        if let InnerConcreteTestNode::FE(_, err) = node {
-            return Err(FsBackendError::from(io::Error::new(
-                io::ErrorKind::NotFound,
-                err.as_str(),
-            )));
-        };
+            if let InnerConcreteTestNode::FE(_, err) = node {
+                return Err(FsBackendError::from(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    err.as_str(),
+                )));
+            };
 
-        if let Some(content) = node.content() {
-            let owned = content.to_vec();
-            let stream = stream::iter(owned.into_iter().map(|b| Ok(Bytes::from(vec![b]))));
-            Ok(stream)
-        } else {
-            panic!("can't open node {path:?}")
-        }
+            if let Some(content) = node.content() {
+                let owned = content.to_vec();
+                let stream = stream::iter(owned.into_iter().map(|b| Ok(Bytes::from(vec![b]))));
+                Ok(stream)
+            } else {
+                panic!("can't open node {path:?}")
+            }
+        })
     }
 
-    async fn write_file<Data: TryStream + Send + Unpin>(
-        &self,
-        path: &VirtualPath,
+    fn write_file<'a, Data: TryStream + Send + 'static + Unpin>(
+        &'a self,
+        path: &'a VirtualPath,
         data: Data,
-    ) -> Result<Self::SyncInfo, Self::IoError>
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
     {
-        // Read data
-        let mut reader = StreamReader::new(
-            data.map_ok(Bytes::from)
-                .map_err(|e| io::Error::new(ErrorKind::Other, e)),
-        );
+        Box::pin(async move {
+            // Read data
+            let mut reader = StreamReader::new(
+                data.map_ok(Bytes::from)
+                    .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+            );
 
-        let mut content = Vec::new();
-        reader.read_to_end(&mut content).await?;
+            let mut content = Vec::new();
+            reader.read_to_end(&mut content).await?;
 
-        // Write into the node
-        let mut inner = self.inner.borrow_mut();
-        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(FsBackendError::from(io::Error::new(
-                io::ErrorKind::ReadOnlyFilesystem,
-                err.as_str(),
-            )));
-        };
+            // Write into the node
+            let mut inner = self.inner.write().unwrap();
+            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+                return Err(FsBackendError::from(io::Error::new(
+                    io::ErrorKind::ReadOnlyFilesystem,
+                    err.as_str(),
+                )));
+            };
 
-        let parent = inner.get_node_mut(path.parent().unwrap());
+            let parent = inner.get_node_mut(path.parent().unwrap());
 
-        match parent {
-            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
-                // Overwrite file
-                for child in children.iter_mut() {
-                    if child.name() == path.name() {
-                        let hash = xxh3_64(&content);
-                        *child = InnerConcreteTestNode::FF(path.name().to_owned(), content);
-                        return Ok(ShallowTestSyncInfo::new(hash));
+            match parent {
+                InnerConcreteTestNode::D(_, children)
+                | InnerConcreteTestNode::DH(_, _, children) => {
+                    // Overwrite file
+                    for child in children.iter_mut() {
+                        if child.name() == path.name() {
+                            let hash = xxh3_64(&content);
+                            *child = InnerConcreteTestNode::FF(path.name().to_owned(), content);
+                            return Ok(ShallowTestSyncInfo::new(hash));
+                        }
                     }
-                }
 
-                // Create file
-                let hash = xxh3_64(&content);
-                children.push(InnerConcreteTestNode::FF(path.name().to_owned(), content));
-                Ok(ShallowTestSyncInfo::new(hash))
+                    // Create file
+                    let hash = xxh3_64(&content);
+                    children.push(InnerConcreteTestNode::FF(path.name().to_owned(), content));
+                    Ok(ShallowTestSyncInfo::new(hash))
+                }
+                _ => panic!("{path:?}"),
             }
-            _ => panic!("{path:?}"),
-        }
+        })
     }
 
-    async fn rm(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
-        let mut inner = self.inner.borrow_mut();
-        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(FsBackendError::from(io::Error::new(
-                io::ErrorKind::ReadOnlyFilesystem,
-                err.as_str(),
-            )));
-        };
-        let parent = inner.get_node_mut(path.parent().unwrap());
+    fn rm<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
+        Box::pin(async move {
+            let mut inner = self.inner.write().unwrap();
+            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+                return Err(FsBackendError::from(io::Error::new(
+                    io::ErrorKind::ReadOnlyFilesystem,
+                    err.as_str(),
+                )));
+            };
+            let parent = inner.get_node_mut(path.parent().unwrap());
 
-        match parent {
-            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
-                let init_len = children.len();
-                *children = children
-                    .iter()
-                    .filter(|child| child.name() != path.name() || child.is_dir())
-                    .cloned()
-                    .collect();
-
-                if children.len() != init_len - 1 {
-                    panic!("{path:?}")
-                }
-                Ok(())
-            }
-            _ => panic!("{path:?}"),
-        }
-    }
-
-    async fn mkdir(&self, path: &VirtualPath) -> Result<Self::SyncInfo, Self::IoError> {
-        let mut inner = self.inner.borrow_mut();
-        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(FsBackendError::from(io::Error::new(
-                io::ErrorKind::ReadOnlyFilesystem,
-                err.as_str(),
-            )));
-        };
-
-        let parent = inner.get_node_mut(path.parent().unwrap());
-
-        match parent {
-            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
-                children.push(InnerConcreteTestNode::D(
-                    path.name().to_string(),
-                    Vec::new(),
-                ));
-
-                let hash = xxh3_64(
-                    &children
+            match parent {
+                InnerConcreteTestNode::D(_, children)
+                | InnerConcreteTestNode::DH(_, _, children) => {
+                    let init_len = children.len();
+                    *children = children
                         .iter()
-                        .flat_map(|node| xxh3_64(node.name().as_bytes()).to_le_bytes())
-                        .collect::<Vec<_>>(),
-                );
+                        .filter(|child| child.name() != path.name() || child.is_dir())
+                        .cloned()
+                        .collect();
 
-                Ok(ShallowTestSyncInfo::new(hash))
+                    if children.len() != init_len - 1 {
+                        panic!("{path:?}")
+                    }
+                    Ok(())
+                }
+                _ => panic!("{path:?}"),
             }
-            _ => panic!("{path:?}"),
-        }
+        })
     }
 
-    async fn rmdir(&self, path: &VirtualPath) -> Result<(), Self::IoError> {
-        let mut inner = self.inner.borrow_mut();
-        if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
-            return Err(FsBackendError::from(io::Error::new(
-                io::ErrorKind::ReadOnlyFilesystem,
-                err.as_str(),
-            )));
-        };
+    fn mkdir<'a>(
+        &'a self,
+        path: &'a VirtualPath,
+    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+        Box::pin(async move {
+            let mut inner = self.inner.write().unwrap();
+            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+                return Err(FsBackendError::from(io::Error::new(
+                    io::ErrorKind::ReadOnlyFilesystem,
+                    err.as_str(),
+                )));
+            };
 
-        let parent = inner.get_node_mut(path.parent().unwrap());
+            let parent = inner.get_node_mut(path.parent().unwrap());
 
-        match parent {
-            InnerConcreteTestNode::D(_, children) | InnerConcreteTestNode::DH(_, _, children) => {
-                let init_len = children.len();
-                *children = children
-                    .iter()
-                    .filter(|child| child.name() != path.name() || child.is_file())
-                    .cloned()
-                    .collect();
+            match parent {
+                InnerConcreteTestNode::D(_, children)
+                | InnerConcreteTestNode::DH(_, _, children) => {
+                    children.push(InnerConcreteTestNode::D(
+                        path.name().to_string(),
+                        Vec::new(),
+                    ));
 
-                if children.len() != init_len - 1 {
-                    panic!("{path:?} ({} - {})", children.len(), init_len)
+                    let hash = xxh3_64(
+                        &children
+                            .iter()
+                            .flat_map(|node| xxh3_64(node.name().as_bytes()).to_le_bytes())
+                            .collect::<Vec<_>>(),
+                    );
+
+                    Ok(ShallowTestSyncInfo::new(hash))
                 }
-                Ok(())
+                _ => panic!("{path:?}"),
             }
-            _ => panic!("{path:?}"),
-        }
+        })
+    }
+
+    fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
+        Box::pin(async move {
+            let mut inner = self.inner.write().unwrap();
+            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+                return Err(FsBackendError::from(io::Error::new(
+                    io::ErrorKind::ReadOnlyFilesystem,
+                    err.as_str(),
+                )));
+            };
+
+            let parent = inner.get_node_mut(path.parent().unwrap());
+
+            match parent {
+                InnerConcreteTestNode::D(_, children)
+                | InnerConcreteTestNode::DH(_, _, children) => {
+                    let init_len = children.len();
+                    *children = children
+                        .iter()
+                        .filter(|child| child.name() != path.name() || child.is_file())
+                        .cloned()
+                        .collect();
+
+                    if children.len() != init_len - 1 {
+                        panic!("{path:?} ({} - {})", children.len(), init_len)
+                    }
+                    Ok(())
+                }
+                _ => panic!("{path:?}"),
+            }
+        })
     }
 }
 
@@ -816,6 +855,15 @@ impl RecursiveTestSyncInfo {
 impl ToBytes for RecursiveTestSyncInfo {
     fn to_bytes(&self) -> Vec<u8> {
         self.hash.to_le_bytes().to_vec()
+    }
+}
+
+impl TryFromBytes for RecursiveTestSyncInfo {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+        let array = bytes.try_into().unwrap();
+        Ok(Self {
+            hash: u64::from_le_bytes(array),
+        })
     }
 }
 
@@ -853,6 +901,15 @@ impl ShallowTestSyncInfo {
 impl ToBytes for ShallowTestSyncInfo {
     fn to_bytes(&self) -> Vec<u8> {
         self.hash.to_le_bytes().to_vec()
+    }
+}
+
+impl TryFromBytes for ShallowTestSyncInfo {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+        let array = bytes.try_into().unwrap();
+        Ok(Self {
+            hash: u64::from_le_bytes(array),
+        })
     }
 }
 

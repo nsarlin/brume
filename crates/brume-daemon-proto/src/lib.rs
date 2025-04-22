@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fmt::Display};
 
 use brume::concrete::{
-    FSBackend, FsInstanceDescription, Named, local::LocalDir, nextcloud::NextcloudFs,
+    local::LocalDir, nextcloud::Nextcloud, FSBackend, FsInstanceDescription, Named,
 };
 
 use brume::synchro::FullSyncStatus;
@@ -51,20 +51,20 @@ impl SynchroId {
     }
 }
 
-/// A reference to a filesystem in the SynchroList handled by the brume daemon.
+/// Metadata associated to a filesystem in the SynchroList handled by the brume daemon.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct AnyFsRef {
+pub struct FileSystemMeta {
     id: Uuid,
     description: AnyFsDescription,
 }
 
-impl Display for AnyFsRef {
+impl Display for FileSystemMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.description)
     }
 }
 
-impl From<AnyFsCreationInfo> for AnyFsRef {
+impl From<AnyFsCreationInfo> for FileSystemMeta {
     fn from(value: AnyFsCreationInfo) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -73,7 +73,7 @@ impl From<AnyFsCreationInfo> for AnyFsRef {
     }
 }
 
-impl AnyFsRef {
+impl FileSystemMeta {
     pub fn new(id: Uuid, description: AnyFsDescription) -> Self {
         Self { id, description }
     }
@@ -96,7 +96,7 @@ impl AnyFsRef {
 /// This status is mostly gotten from the [`FullSyncStatus`] returned by [`full_sync`]. When
 /// [`full_sync`] is running, the status is set to [`Self::SyncInProgress`]
 ///
-/// [`full_sync`]: brume::synchro::Synchro::full_sync
+/// [`full_sync`]: brume::synchro::Synchronized::full_sync
 #[derive(Default, Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SynchroStatus {
     /// No node in any FS is in Conflict or Error state
@@ -178,17 +178,13 @@ impl TryFrom<&str> for SynchroState {
     }
 }
 
-/// A [`Synchro`] where the [`Backend`] filesystems are only known at runtime.
+/// Metadata associated with a [`Synchro`].
 ///
-/// This type represents only an index and needs a valid SynchroList, to actually be used. It
-/// must not be used after the Synchro it points to has been removed from the SynchroList.
-///
-/// [`Backend`]: FSBackend
 /// [`Synchro`]: brume::synchro::Synchro
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct AnySynchroRef {
-    local: AnyFsRef,
-    remote: AnyFsRef,
+pub struct SynchroMeta {
+    local: FileSystemMeta,
+    remote: FileSystemMeta,
     /// the status of the synchro is automatically updated, for example in case of error or
     /// conflict
     status: SynchroStatus,
@@ -197,15 +193,15 @@ pub struct AnySynchroRef {
     name: String,
 }
 
-impl Display for AnySynchroRef {
+impl Display for SynchroMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "synchro between {} and {}", self.local, self.remote)
     }
 }
 
-impl AnySynchroRef {
-    pub fn new(local_ref: AnyFsRef, remote_ref: AnyFsRef, name: String) -> Self {
-        AnySynchroRef {
+impl SynchroMeta {
+    pub fn new(local_ref: FileSystemMeta, remote_ref: FileSystemMeta, name: String) -> Self {
+        SynchroMeta {
             local: local_ref,
             remote: remote_ref,
             status: SynchroStatus::default(),
@@ -215,12 +211,12 @@ impl AnySynchroRef {
     }
 
     /// Returns the local counterpart of the synchro
-    pub fn local(&self) -> &AnyFsRef {
+    pub fn local(&self) -> &FileSystemMeta {
         &self.local
     }
 
     /// Returns the remote counterpart of the synchro
-    pub fn remote(&self) -> &AnyFsRef {
+    pub fn remote(&self) -> &FileSystemMeta {
         &self.remote
     }
 
@@ -257,7 +253,7 @@ impl AnySynchroRef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnyFsCreationInfo {
     LocalDir(<LocalDir as FSBackend>::CreationInfo),
-    Nextcloud(<NextcloudFs as FSBackend>::CreationInfo),
+    Nextcloud(<Nextcloud as FSBackend>::CreationInfo),
 }
 
 impl AnyFsCreationInfo {
@@ -266,7 +262,7 @@ impl AnyFsCreationInfo {
             AnyFsCreationInfo::LocalDir(info) => LocalDir::validate(info)
                 .await
                 .map_err(|_| "Invalid directory for synchronization".to_string()),
-            AnyFsCreationInfo::Nextcloud(info) => NextcloudFs::validate(info).await.map_err(|e| {
+            AnyFsCreationInfo::Nextcloud(info) => Nextcloud::validate(info).await.map_err(|e| {
                 let msg = if let Some(msg) = e.protocol_error_message() {
                     msg
                 } else {
@@ -314,7 +310,7 @@ impl AnySynchroCreationInfo {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AnyFsDescription {
     LocalDir(<LocalDir as FSBackend>::Description),
-    Nextcloud(<NextcloudFs as FSBackend>::Description),
+    Nextcloud(<Nextcloud as FSBackend>::Description),
 }
 
 impl AnyFsDescription {
@@ -328,7 +324,7 @@ impl AnyFsDescription {
     pub fn type_name(&self) -> &str {
         match self {
             AnyFsDescription::LocalDir(_) => LocalDir::TYPE_NAME,
-            AnyFsDescription::Nextcloud(_) => NextcloudFs::TYPE_NAME,
+            AnyFsDescription::Nextcloud(_) => Nextcloud::TYPE_NAME,
         }
     }
 }
@@ -361,7 +357,7 @@ pub trait BrumeService {
     ) -> Result<(), String>;
 
     /// Lists all the existing synchronizations registered in the daemon
-    async fn list_synchros() -> HashMap<SynchroId, AnySynchroRef>;
+    async fn list_synchros() -> HashMap<SynchroId, SynchroMeta>;
 
     /// Deletes a synchronization
     async fn delete_synchro(id: SynchroId) -> Result<(), String>;

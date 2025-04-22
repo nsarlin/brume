@@ -476,7 +476,7 @@ mod test {
         vfs::{DirTree, FileMeta, NodeKind, VfsNode},
     };
     use brume_daemon_proto::{
-        AnyFsCreationInfo, AnyFsRef, LocalDirCreationInfo, VirtualPath, VirtualPathBuf,
+        AnyFsCreationInfo, FileSystemMeta, LocalDirCreationInfo, VirtualPath, VirtualPathBuf,
     };
 
     use crate::db::{Database, DatabaseConfig};
@@ -502,7 +502,7 @@ mod test {
         let creation_update = VfsUpdate::DirCreated(VfsDirCreation::new(VirtualPath::root(), a));
 
         let fs_info = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new("/tmp/test"));
-        let fs_ref = AnyFsRef::from(fs_info.clone());
+        let fs_ref = FileSystemMeta::from(fs_info.clone());
         db.insert_new_filesystem(fs_ref.id(), &fs_info)
             .await
             .unwrap();

@@ -1,13 +1,9 @@
-use std::{any::Any, collections::HashMap, sync::Arc, thread::sleep, time::Duration};
+use std::{collections::HashMap, sync::Arc, thread::sleep, time::Duration};
 
 use brume::{
-    concrete::{
-        local::{LocalDir, LocalSyncInfo},
-        nextcloud::{NextcloudFs, NextcloudSyncInfo},
-        FSBackend, FsBackendError, Named, ToBytes,
-    },
+    concrete::{local::LocalDir, nextcloud::Nextcloud, FsBackendError},
     filesystem::FileSystem,
-    synchro::{ConflictResolutionState, FullSyncStatus, Synchro, SynchroSide},
+    synchro::{ConflictResolutionState, FullSyncStatus, Synchro, SynchroSide, Synchronized},
     vfs::{Vfs, VirtualPath},
 };
 use futures::{future::join_all, stream, StreamExt};
@@ -17,8 +13,8 @@ use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use uuid::Uuid;
 
 use brume_daemon_proto::{
-    AnyFsCreationInfo, AnyFsDescription, AnyFsRef, AnySynchroCreationInfo, AnySynchroRef,
-    SynchroId, SynchroState, SynchroStatus,
+    AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, FileSystemMeta, SynchroId,
+    SynchroMeta, SynchroState, SynchroStatus,
 };
 
 use crate::db::{Database, DatabaseError};
@@ -38,18 +34,18 @@ pub enum SyncError {
 #[derive(Error, Debug)]
 #[error("Failed to synchronize {synchro}")]
 pub struct SynchroFailed {
-    synchro: AnySynchroRef,
+    synchro: SynchroMeta,
     source: brume::Error,
 }
 
 #[derive(Error, Debug)]
 #[error("Synchro in invalid state: {synchro}")]
 pub struct InvalidSynchro {
-    synchro: AnySynchroRef,
+    synchro: SynchroMeta,
 }
 
-impl From<AnySynchroRef> for InvalidSynchro {
-    fn from(value: AnySynchroRef) -> Self {
+impl From<SynchroMeta> for InvalidSynchro {
+    fn from(value: SynchroMeta) -> Self {
         InvalidSynchro { synchro: value }
     }
 }
@@ -60,17 +56,6 @@ pub enum SynchroCreationError {
     AlreadyPresent,
     #[error("Failed to instantiate filesystem object")]
     FileSystemCreationError(#[from] FsBackendError),
-    #[error("The provided synchro is not of the expected type")]
-    InvalidType { expected: String, found: String },
-}
-
-impl SynchroCreationError {
-    fn invalid_type<Expected: Named, Found: Named>() -> Self {
-        Self::InvalidType {
-            expected: Expected::TYPE_NAME.to_string(),
-            found: Found::TYPE_NAME.to_string(),
-        }
-    }
 }
 
 #[derive(Error, Debug)]
@@ -141,25 +126,132 @@ impl ReadOnlySynchroList {
     }
 }
 
-/// A synchronized Filesystem pair where both filesystems are in a Mutex
-struct SynchroMutex<
-    'local,
-    'remote,
-    LocalBackend: FSBackend + 'static,
-    RemoteBackend: FSBackend + 'static,
-> {
-    local: &'local Mutex<FileSystem<LocalBackend>>,
-    remote: &'remote Mutex<FileSystem<RemoteBackend>>,
+/// Similar to [`AnySynchroCreationInfo`], but the name has been chosen and can't be empty
+#[derive(Clone)]
+pub struct NamedSynchroCreationInfo {
+    local: AnyFsCreationInfo,
+    remote: AnyFsCreationInfo,
+    name: String,
 }
 
-/// Allow to easily convert the given type into [`Any`] for runtime downcast
-trait DynTyped {
-    fn as_any(&self) -> &dyn Any;
+impl From<NamedSynchroCreationInfo> for SynchroMeta {
+    fn from(value: NamedSynchroCreationInfo) -> Self {
+        let local_meta = value.local.into();
+        let remote_meta = value.remote.into();
+
+        Self::new(local_meta, remote_meta, value.name)
+    }
 }
 
-impl<T: FSBackend + 'static> DynTyped for Mutex<FileSystem<T>> {
-    fn as_any(&self) -> &dyn Any {
-        self
+/// Creates a Box<dyn Synchronized> (effectively a dyn typed Synchro<Local, Remote>) from a
+/// NamedSynchroCreationInfo.
+///
+/// This should be called with the list of filesystem types (see example call below)
+///
+/// The macro will create a nested match for all supported combinations of filesystem types.
+/// This uses the fact that the [`AnyFsCreationInfo`] variants have the same name as the various
+/// concrete filesystem types.
+macro_rules! generate_synchro_constructor {
+    // Entry point
+    ($ab:tt) => {
+        pub fn instantiate(self) -> Result<Box<dyn Synchronized + Send + Sync>, FsBackendError> {
+            let local_info = self.local;
+            let remote_info = self.remote;
+            generate_synchro_constructor!(@outer local_info, remote_info, $ab, $ab)
+        }
+    };
+
+    // Outer match, matching the local fs type
+    (@outer $local_info:ident, $remote_info:ident, [$($local_ty:ident),* $(,)?], $remote_ty:tt) => {
+        match $local_info {
+            $(
+                AnyFsCreationInfo::$local_ty(info) => {
+                    let concrete: $local_ty = info.try_into()?;
+                    let local = FileSystem::new(concrete);
+                    generate_synchro_constructor!(@inner local, $remote_info, $remote_ty)
+                }
+            )*
+        }
+    };
+
+    // Inner match, matching the remote fs type
+    (@inner $local_fs:ident, $remote_info:ident, [$($remote_ty:ident),* $(,)?]) => {
+        match $remote_info {
+            $(
+                AnyFsCreationInfo::$remote_ty(info) => {
+                    let concrete: $remote_ty = info.try_into()?;
+                    let remote = FileSystem::new(concrete);
+                    Ok(Box::new(Synchro::new($local_fs, remote)))
+                },
+            )*
+        }
+    }
+}
+
+impl NamedSynchroCreationInfo {
+    pub fn new(local: AnyFsCreationInfo, remote: AnyFsCreationInfo, name: String) -> Self {
+        Self {
+            local,
+            remote,
+            name,
+        }
+    }
+
+    generate_synchro_constructor!([LocalDir, Nextcloud]);
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// A synchro that has been inserted in the list
+struct RegisteredSynchro {
+    synchro: Mutex<Box<dyn Synchronized + Send + Sync>>,
+    meta: SynchroMeta,
+}
+
+impl TryFrom<NamedSynchroCreationInfo> for RegisteredSynchro {
+    fn try_from(value: NamedSynchroCreationInfo) -> Result<Self, Self::Error> {
+        let meta = value.clone().into();
+        let synchro = Mutex::new(value.instantiate()?);
+
+        Ok(Self { synchro, meta })
+    }
+
+    type Error = FsBackendError;
+}
+
+impl RegisteredSynchro {
+    pub fn name(&self) -> &str {
+        self.meta.name()
+    }
+
+    pub fn local(&self) -> &FileSystemMeta {
+        self.meta.local()
+    }
+
+    pub fn remote(&self) -> &FileSystemMeta {
+        self.meta.remote()
+    }
+
+    /// Returns the status of this synchro
+    pub fn status(&self) -> SynchroStatus {
+        self.meta.status()
+    }
+
+    /// Updates the status of this synchro
+    pub fn set_status(&mut self, status: SynchroStatus) {
+        self.meta.set_status(status)
+    }
+
+    /// Returns the state of this synchro
+    pub fn state(&self) -> SynchroState {
+        self.meta.state()
+    }
+
+    /// Updates the state of this synchro
+    pub fn set_state(&mut self, state: SynchroState) {
+        self.meta.set_state(state)
     }
 }
 
@@ -171,9 +263,7 @@ impl<T: FSBackend + 'static> DynTyped for Mutex<FileSystem<T>> {
 /// [`supported types`]: brume_daemon_proto::AnyFsCreationInfo
 #[derive(Default)]
 pub struct SynchroList {
-    synchros: HashMap<SynchroId, RwLock<AnySynchroRef>>,
-    nextcloud_list: HashMap<Uuid, Mutex<FileSystem<NextcloudFs>>>,
-    local_dir_list: HashMap<Uuid, Mutex<FileSystem<LocalDir>>>,
+    synchros: HashMap<SynchroId, RwLock<RegisteredSynchro>>,
 }
 
 impl SynchroList {
@@ -190,67 +280,16 @@ impl SynchroList {
         self.len() == 0
     }
 
-    pub fn synchro_ref_list(&self) -> &HashMap<SynchroId, RwLock<AnySynchroRef>> {
-        &self.synchros
-    }
-
-    pub(crate) fn synchro_ref_list_mut(
-        &mut self,
-    ) -> &mut HashMap<SynchroId, RwLock<AnySynchroRef>> {
-        &mut self.synchros
-    }
-
-    fn create_and_insert_fs(
-        &mut self,
-        fs_info: AnyFsCreationInfo,
-    ) -> Result<AnyFsRef, FsBackendError> {
-        let fs_ref: AnyFsRef = fs_info.clone().into();
-        match fs_info {
-            AnyFsCreationInfo::LocalDir(info) => {
-                let concrete = info.try_into()?;
-                self.local_dir_list
-                    .insert(fs_ref.id(), Mutex::new(FileSystem::new(concrete)));
-                Ok(fs_ref)
-            }
-            AnyFsCreationInfo::Nextcloud(info) => {
-                let concrete = info.try_into()?;
-                self.nextcloud_list
-                    .insert(fs_ref.id(), Mutex::new(FileSystem::new(concrete)));
-                Ok(fs_ref)
-            }
-        }
-    }
-
-    pub(crate) fn insert_existing_fs<SyncInfo: Named + 'static>(
-        &mut self,
-        fs_info: AnyFsCreationInfo,
-        vfs: &Vfs<SyncInfo>,
-        id: Uuid,
-    ) -> Result<(), SynchroCreationError> {
-        match fs_info {
-            AnyFsCreationInfo::LocalDir(info) => {
-                let concrete = info.try_into().map_err(FsBackendError::from)?;
-                let mut fs = FileSystem::new(concrete);
-                *fs.vfs_mut() = (vfs as &dyn Any)
-                    .downcast_ref::<Vfs<LocalSyncInfo>>()
-                    .ok_or_else(|| SynchroCreationError::invalid_type::<LocalSyncInfo, SyncInfo>())?
-                    .clone();
-                self.local_dir_list.insert(id, Mutex::new(fs));
-                Ok(())
-            }
-            AnyFsCreationInfo::Nextcloud(info) => {
-                let concrete = info.try_into().map_err(FsBackendError::from)?;
-                let mut fs = FileSystem::new(concrete);
-                *fs.vfs_mut() = (vfs as &dyn Any)
-                    .downcast_ref::<Vfs<NextcloudSyncInfo>>()
-                    .ok_or_else(|| {
-                        SynchroCreationError::invalid_type::<NextcloudSyncInfo, SyncInfo>()
-                    })?
-                    .clone();
-                self.nextcloud_list.insert(id, Mutex::new(fs));
-                Ok(())
-            }
-        }
+    /// Returns a list of the metadata for all the synchros
+    pub async fn synchro_meta_list(&self) -> HashMap<SynchroId, SynchroMeta> {
+        join_all(
+            self.synchros
+                .iter()
+                .map(async |(id, sync)| (*id, sync.read().await.meta.clone())),
+        )
+        .await
+        .into_iter()
+        .collect()
     }
 
     /// Checks if the two Filesystems in the pair are already synchronized together.
@@ -322,6 +361,29 @@ impl SynchroList {
         self.make_unique_name(&name).await
     }
 
+    /// Find a locally unique name for a Synchro before its creation
+    pub async fn name_synchro(
+        &self,
+        sync_info: AnySynchroCreationInfo,
+    ) -> NamedSynchroCreationInfo {
+        let local = sync_info.local().clone();
+        let remote = sync_info.remote().clone();
+        let name = if let Some(name) = sync_info.name() {
+            self.make_unique_name(name).await
+        } else {
+            let local_desc = AnyFsDescription::from(local.clone());
+            let remote_desc = AnyFsDescription::from(remote.clone());
+            self.unique_synchro_name(local_desc.name(), remote_desc.name())
+                .await
+        };
+
+        NamedSynchroCreationInfo {
+            local,
+            remote,
+            name,
+        }
+    }
+
     /// Creates and inserts a new filesystem Synchro in the list
     pub async fn insert(
         &mut self,
@@ -334,55 +396,49 @@ impl SynchroList {
             return Err(SynchroCreationError::AlreadyPresent);
         }
         let id = SynchroId::new();
+        let named_info = self.name_synchro(sync_info).await;
+        let name = named_info.name().to_string();
 
-        let local_ref = self.create_and_insert_fs(sync_info.local().clone())?;
-        let remote_ref = self.create_and_insert_fs(sync_info.remote().clone())?;
-        let name = if let Some(name) = sync_info.name() {
-            self.make_unique_name(name).await
-        } else {
-            self.unique_synchro_name(local_ref.name(), remote_ref.name())
-                .await
-        };
+        let synchro: RegisteredSynchro = named_info.try_into()?;
 
         info!("Synchro created: name: {name}, id: {id:?}");
         let res = CreatedSynchro {
             id,
             name: name.clone(),
-            local_id: local_ref.id(),
-            remote_id: remote_ref.id(),
+            local_id: synchro.meta.local().id(),
+            remote_id: synchro.meta.remote().id(),
         };
 
-        let synchro = AnySynchroRef::new(local_ref, remote_ref, name);
-
-        self.synchros.insert(id, RwLock::new(synchro.clone()));
+        self.synchros.insert(id, RwLock::new(synchro));
 
         Ok(res)
     }
 
+    /// Insert an already created synchro in the list
+    pub fn insert_existing(
+        &mut self,
+        id: SynchroId,
+        synchro: Box<dyn Synchronized + Send + Sync + 'static>,
+        meta: SynchroMeta,
+    ) {
+        let registered = RegisteredSynchro {
+            synchro: Mutex::new(synchro),
+            meta,
+        };
+        self.synchros.insert(id, RwLock::new(registered));
+    }
+
     /// Deletes a synchronization from the list
     pub fn remove(&mut self, id: SynchroId) -> Result<(), SynchroDeletionError> {
-        if let Some(sync) = self.synchros.remove(&id) {
-            let mut res = Ok(());
-            let sync = sync.into_inner();
-
-            if !self.remove_fs(sync.local()) {
-                res = Err(SynchroDeletionError::InvalidSynchroState(
-                    sync.clone().into(),
-                ));
-            }
-            if !self.remove_fs(sync.remote()) {
-                res = Err(SynchroDeletionError::InvalidSynchroState(
-                    sync.clone().into(),
-                ));
-            }
-
+        if self.synchros.remove(&id).is_some() {
             info!("Synchro deleted: {id:?}");
-            res
+            Ok(())
         } else {
             Err(SynchroDeletionError::SynchroNotFound(id))
         }
     }
 
+    /// Resolves a conflict on a synchro in the list by applying the update from the chosen side
     pub async fn resolve_conflict(
         &self,
         id: SynchroId,
@@ -394,77 +450,21 @@ impl SynchroList {
             .synchros
             .get(&id)
             .ok_or_else(|| SyncError::SynchroNotFound(id))?;
-        let local_desc = synchro.read().await.local().description().clone();
-        let remote_desc = synchro.read().await.remote().description().clone();
-        match (local_desc, remote_desc) {
-            (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
-                self.resolve_conflict_sync::<LocalDir, LocalDir>(id, synchro, path, side, db)
-                    .await
-            }
-            (AnyFsDescription::LocalDir(_), AnyFsDescription::Nextcloud(_)) => {
-                self.resolve_conflict_sync::<LocalDir, NextcloudFs>(id, synchro, path, side, db)
-                    .await
-            }
-            (AnyFsDescription::Nextcloud(_), AnyFsDescription::LocalDir(_)) => {
-                self.resolve_conflict_sync::<NextcloudFs, LocalDir>(id, synchro, path, side, db)
-                    .await
-            }
-            (AnyFsDescription::Nextcloud(_), AnyFsDescription::Nextcloud(_)) => {
-                self.resolve_conflict_sync::<NextcloudFs, NextcloudFs>(id, synchro, path, side, db)
-                    .await
-            }
-        }
-    }
 
-    fn get_fs<Backend: FSBackend + 'static>(
-        &self,
-        fs: &AnyFsRef,
-    ) -> Option<&Mutex<FileSystem<Backend>>> {
-        match fs.description() {
-            AnyFsDescription::LocalDir(_) => self
-                .local_dir_list
-                .get(&fs.id())
-                .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Backend>>>()),
-            AnyFsDescription::Nextcloud(_) => self
-                .nextcloud_list
-                .get(&fs.id())
-                .and_then(|fs| fs.as_any().downcast_ref::<Mutex<FileSystem<Backend>>>()),
-        }
-    }
-
-    fn remove_fs(&mut self, fs: &AnyFsRef) -> bool {
-        match fs.description() {
-            AnyFsDescription::LocalDir(_) => self.local_dir_list.remove(&fs.id()).is_some(),
-            AnyFsDescription::Nextcloud(_) => self.nextcloud_list.remove(&fs.id()).is_some(),
-        }
-    }
-
-    fn get_sync<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>(
-        &self,
-        synchro: &AnySynchroRef,
-    ) -> Option<SynchroMutex<LocalBackend, RemoteBackend>> {
-        let local = self.get_fs::<LocalBackend>(synchro.local())?;
-        let remote = self.get_fs::<RemoteBackend>(synchro.remote())?;
-
-        Some(SynchroMutex { local, remote })
+        // TODO: what to do if synchro is paused?
+        self.resolve_conflict_sync(id, synchro, path, side, db)
+            .await
     }
 
     /// Resolves a conflict on a synchro in the list by applying the update from the chosen side
-    pub async fn resolve_conflict_sync<
-        LocalBackend: FSBackend + 'static,
-        RemoteBackend: FSBackend + 'static,
-    >(
+    async fn resolve_conflict_sync(
         &self,
         id: SynchroId,
-        synchro_lock: &RwLock<AnySynchroRef>,
+        synchro_lock: &RwLock<RegisteredSynchro>,
         path: &VirtualPath,
         side: SynchroSide,
         db: &Database,
-    ) -> Result<(), SyncError>
-    where
-        LocalBackend::SyncInfo: ToBytes,
-        RemoteBackend::SyncInfo: ToBytes,
-    {
+    ) -> Result<(), SyncError> {
         // Wait for synchro to be ready
         loop {
             {
@@ -482,18 +482,9 @@ impl SynchroList {
 
         let res = {
             let synchro = synchro_lock.read().await;
+            let mut mutex = synchro.synchro.lock().await;
 
-            let synchro_mutex = self
-                .get_sync::<LocalBackend, RemoteBackend>(&synchro)
-                .ok_or_else(|| InvalidSynchro::from(synchro.clone()))
-                .unwrap();
-
-            let mut local_fs = synchro_mutex.local.lock().await;
-            let mut remote_fs = synchro_mutex.remote.lock().await;
-
-            let mut sync: Synchro<'_, '_, LocalBackend, RemoteBackend> =
-                Synchro::new(&mut local_fs, &mut remote_fs);
-            sync.resolve_conflict(path, side).await
+            mutex.resolve_conflict(path, side).await
         };
 
         match res {
@@ -533,7 +524,7 @@ impl SynchroList {
                 synchro.set_status(status);
                 db.set_synchro_status(id, status).await?;
                 Err(SynchroFailed {
-                    synchro: synchro.to_owned(),
+                    synchro: synchro.meta.clone(),
                     source: err,
                 }
                 .into())
@@ -544,16 +535,12 @@ impl SynchroList {
     /// Performs a [`full_sync`] on the provided synchro, that should be in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
-    pub async fn sync_one<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>(
+    async fn sync_one(
         &self,
         id: SynchroId,
-        synchro_lock: &RwLock<AnySynchroRef>,
+        synchro_lock: &RwLock<RegisteredSynchro>,
         db: &Database,
-    ) -> Result<(), SyncError>
-    where
-        LocalBackend::SyncInfo: ToBytes,
-        RemoteBackend::SyncInfo: ToBytes,
-    {
+    ) -> Result<(), SyncError> {
         {
             let mut synchro = synchro_lock.write().await;
 
@@ -570,14 +557,9 @@ impl SynchroList {
             let synchro = synchro_lock.read().await;
             debug!("Starting full_sync for Synchro {}", synchro.name());
 
-            let synchro_mutex = self
-                .get_sync::<LocalBackend, RemoteBackend>(&synchro)
-                .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?;
+            let mut mutex = synchro.synchro.lock().await;
 
-            let mut local_fs = synchro_mutex.local.lock().await;
-            let mut remote_fs = synchro_mutex.remote.lock().await;
-            let mut sync = Synchro::new(&mut local_fs, &mut remote_fs);
-            sync.full_sync().await
+            mutex.full_sync().await
         };
 
         match res {
@@ -611,7 +593,7 @@ impl SynchroList {
                 synchro.set_status(status);
                 db.set_synchro_status(id, status).await?;
                 Err(SynchroFailed {
-                    synchro: synchro.to_owned(),
+                    synchro: synchro.meta.clone(),
                     source: err,
                 }
                 .into())
@@ -626,35 +608,12 @@ impl SynchroList {
         let futures: Vec<_> = self
             .synchros
             .iter()
-            .map(|(id, synchro)| async move {
+            .map(async move |(id, synchro)| {
                 if matches!(synchro.read().await.state(), SynchroState::Paused) {
                     return Ok(());
                 }
 
-                let (local_desc, remote_desc) = {
-                    let sync = synchro.read().await;
-                    (
-                        sync.local().description().clone(),
-                        sync.remote().description().clone(),
-                    )
-                };
-                match (local_desc, remote_desc) {
-                    (AnyFsDescription::LocalDir(_), AnyFsDescription::LocalDir(_)) => {
-                        self.sync_one::<LocalDir, LocalDir>(*id, synchro, db).await
-                    }
-                    (AnyFsDescription::LocalDir(_), AnyFsDescription::Nextcloud(_)) => {
-                        self.sync_one::<LocalDir, NextcloudFs>(*id, synchro, db)
-                            .await
-                    }
-                    (AnyFsDescription::Nextcloud(_), AnyFsDescription::LocalDir(_)) => {
-                        self.sync_one::<NextcloudFs, LocalDir>(*id, synchro, db)
-                            .await
-                    }
-                    (AnyFsDescription::Nextcloud(_), AnyFsDescription::Nextcloud(_)) => {
-                        self.sync_one::<NextcloudFs, NextcloudFs>(*id, synchro, db)
-                            .await
-                    }
-                }
+                self.sync_one(*id, synchro, db).await
             })
             .collect();
 
@@ -677,6 +636,9 @@ impl SynchroList {
         Ok(())
     }
 
+    /// Returns the [`Vfs`] associated with the provided synchro and side
+    ///
+    /// The SyncInfo will be erased but the directory structure and metadata will be preserved
     pub async fn get_vfs(&self, id: SynchroId, side: SynchroSide) -> Result<Vfs<()>, SyncError> {
         let synchro = self
             .synchros
@@ -685,35 +647,10 @@ impl SynchroList {
             .read()
             .await;
 
-        let (desc, id) = match side {
-            SynchroSide::Local => (synchro.local().description().clone(), synchro.local().id()),
-            SynchroSide::Remote => (
-                synchro.remote().description().clone(),
-                synchro.remote().id(),
-            ),
-        };
-
-        match desc {
-            AnyFsDescription::LocalDir(_) => {
-                let fs = self
-                    .local_dir_list
-                    .get(&id)
-                    .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?
-                    .lock()
-                    .await;
-
-                Ok(fs.vfs().into())
-            }
-            AnyFsDescription::Nextcloud(_) => {
-                let fs = self
-                    .nextcloud_list
-                    .get(&id)
-                    .ok_or_else(|| InvalidSynchro::from(synchro.clone()))?
-                    .lock()
-                    .await;
-
-                Ok(fs.vfs().into())
-            }
+        let synchro_lock = synchro.synchro.lock().await;
+        match side {
+            SynchroSide::Local => Ok(synchro_lock.local_vfs()),
+            SynchroSide::Remote => Ok(synchro_lock.remote_vfs()),
         }
     }
 }
@@ -822,8 +759,15 @@ mod test {
         let id1 = list.insert(sync1).await.unwrap().id();
 
         assert_eq!(list.synchros.len(), 1);
-        assert_eq!(list.local_dir_list.len(), 2);
-        assert_eq!(list.nextcloud_list.len(), 0);
+        let meta_list = list.synchro_meta_list().await;
+        assert!(matches!(
+            meta_list[&id1].local().description(),
+            AnyFsDescription::LocalDir(_),
+        ));
+        assert!(matches!(
+            meta_list[&id1].remote().description(),
+            AnyFsDescription::LocalDir(_),
+        ));
 
         let nx_a = NextcloudFsCreationInfo::new("https://cloud.com", "user", "user");
         let loc_b = LocalDirCreationInfo::new("/b");
@@ -833,16 +777,37 @@ mod test {
             None,
         );
 
-        list.insert(sync2).await.unwrap();
+        let id2 = list.insert(sync2).await.unwrap().id();
 
         assert_eq!(list.synchros.len(), 2);
-        assert_eq!(list.local_dir_list.len(), 3);
-        assert_eq!(list.nextcloud_list.len(), 1);
+        let meta_list = list.synchro_meta_list().await;
+        assert!(matches!(
+            meta_list[&id1].local().description(),
+            AnyFsDescription::LocalDir(_),
+        ));
+        assert!(matches!(
+            meta_list[&id1].remote().description(),
+            AnyFsDescription::LocalDir(_),
+        ));
+        assert!(matches!(
+            meta_list[&id2].local().description(),
+            AnyFsDescription::LocalDir(_),
+        ));
+        assert!(matches!(
+            meta_list[&id2].remote().description(),
+            AnyFsDescription::Nextcloud(_),
+        ));
 
         list.remove(id1).unwrap();
 
         assert_eq!(list.synchros.len(), 1);
-        assert_eq!(list.local_dir_list.len(), 1);
-        assert_eq!(list.nextcloud_list.len(), 1);
+        assert!(matches!(
+            meta_list[&id1].local().description(),
+            AnyFsDescription::LocalDir(_),
+        ));
+        assert!(matches!(
+            meta_list[&id1].remote().description(),
+            AnyFsDescription::LocalDir(_),
+        ));
     }
 }
