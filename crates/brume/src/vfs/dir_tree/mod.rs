@@ -11,10 +11,10 @@ use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Error, NameMismatchError,
     concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
     sorted_vec::{Sortable, SortedVec},
     update::{FailedUpdateApplication, ModificationState, VirtualReconciledUpdate},
-    Error, NameMismatchError,
 };
 
 use super::{
@@ -977,14 +977,16 @@ mod test {
 
         let node_ref = F("f1.md").into_node();
 
-        assert!(base
-            .find_node(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-            .unwrap()
-            .structural_eq(&node_ref));
-        assert!(base
-            .find_node_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-            .unwrap()
-            .structural_eq(&node_ref));
+        assert!(
+            base.find_node(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+                .unwrap()
+                .structural_eq(&node_ref)
+        );
+        assert!(
+            base.find_node_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+                .unwrap()
+                .structural_eq(&node_ref)
+        );
         assert_eq!(
             base.find_file(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
                 .unwrap()
@@ -997,57 +999,71 @@ mod test {
                 .name(),
             "f1.md"
         );
-        assert!(base
-            .find_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-            .is_err());
-        assert!(base
-            .find_dir_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-            .is_err());
+        assert!(
+            base.find_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+                .is_err()
+        );
+        assert!(
+            base.find_dir_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+                .is_err()
+        );
 
         let node_ref = D("b", vec![D("c", vec![])]).into_node();
         let dir_ref = D("b", vec![D("c", vec![])]).into_dir();
 
-        assert!(base
-            .find_node(&VirtualPathBuf::new("/a/b").unwrap())
-            .unwrap()
-            .structural_eq(&node_ref));
-        assert!(base
-            .find_node_mut(&VirtualPathBuf::new("/a/b").unwrap())
-            .unwrap()
-            .structural_eq(&node_ref));
-        assert!(base
-            .find_file(&VirtualPathBuf::new("/a/b").unwrap())
-            .is_err());
-        assert!(base
-            .find_file_mut(&VirtualPathBuf::new("/a/b").unwrap())
-            .is_err());
-        assert!(base
-            .find_dir(&VirtualPathBuf::new("/a/b").unwrap())
-            .unwrap()
-            .structural_eq(&dir_ref));
-        assert!(base
-            .find_dir_mut(&VirtualPathBuf::new("/a/b").unwrap())
-            .unwrap()
-            .structural_eq(&dir_ref));
+        assert!(
+            base.find_node(&VirtualPathBuf::new("/a/b").unwrap())
+                .unwrap()
+                .structural_eq(&node_ref)
+        );
+        assert!(
+            base.find_node_mut(&VirtualPathBuf::new("/a/b").unwrap())
+                .unwrap()
+                .structural_eq(&node_ref)
+        );
+        assert!(
+            base.find_file(&VirtualPathBuf::new("/a/b").unwrap())
+                .is_err()
+        );
+        assert!(
+            base.find_file_mut(&VirtualPathBuf::new("/a/b").unwrap())
+                .is_err()
+        );
+        assert!(
+            base.find_dir(&VirtualPathBuf::new("/a/b").unwrap())
+                .unwrap()
+                .structural_eq(&dir_ref)
+        );
+        assert!(
+            base.find_dir_mut(&VirtualPathBuf::new("/a/b").unwrap())
+                .unwrap()
+                .structural_eq(&dir_ref)
+        );
 
-        assert!(base
-            .find_node(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_none());
-        assert!(base
-            .find_node_mut(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_none());
-        assert!(base
-            .find_file(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_err());
-        assert!(base
-            .find_file_mut(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_err());
-        assert!(base
-            .find_dir(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_err());
-        assert!(base
-            .find_dir_mut(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_err());
+        assert!(
+            base.find_node(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_none()
+        );
+        assert!(
+            base.find_node_mut(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_none()
+        );
+        assert!(
+            base.find_file(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_err()
+        );
+        assert!(
+            base.find_file_mut(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_err()
+        );
+        assert!(
+            base.find_dir(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_err()
+        );
+        assert!(
+            base.find_dir_mut(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1099,9 +1115,11 @@ mod test {
         assert!(without_f1.structural_eq(&without_f1_ref));
 
         let mut without_f1 = base.clone();
-        assert!(without_f1
-            .delete_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-            .is_err());
+        assert!(
+            without_f1
+                .delete_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+                .is_err()
+        );
         assert!(without_f1.structural_eq(&base));
 
         let mut without_b = base.clone();
@@ -1119,27 +1137,35 @@ mod test {
         assert!(without_b.structural_eq(&without_b_ref));
 
         let mut without_b = base.clone();
-        assert!(without_b
-            .delete_file(&VirtualPathBuf::new("/a/b").unwrap())
-            .is_err());
+        assert!(
+            without_b
+                .delete_file(&VirtualPathBuf::new("/a/b").unwrap())
+                .is_err()
+        );
         assert!(without_b.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(identical
-            .delete_node(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_err());
+        assert!(
+            identical
+                .delete_node(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_err()
+        );
         assert!(identical.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(identical
-            .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_err());
+        assert!(
+            identical
+                .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_err()
+        );
         assert!(identical.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(identical
-            .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
-            .is_err());
+        assert!(
+            identical
+                .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
+                .is_err()
+        );
         assert!(identical.structural_eq(&base));
 
         let mut empty = base.clone();
@@ -1157,9 +1183,11 @@ mod test {
         assert!(empty.structural_eq(&empty_ref));
 
         let mut empty = base.clone();
-        assert!(empty
-            .delete_file(&VirtualPathBuf::new("/").unwrap())
-            .is_err());
+        assert!(
+            empty
+                .delete_file(&VirtualPathBuf::new("/").unwrap())
+                .is_err()
+        );
         assert!(empty.structural_eq(&base));
     }
 

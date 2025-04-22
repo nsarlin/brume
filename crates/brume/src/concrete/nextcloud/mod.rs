@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{future::BoxFuture, Stream, TryStream, TryStreamExt};
+use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture};
 use reqwest::Body;
 use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use crate::{
     vfs::{Vfs, VirtualPath, VirtualPathError},
 };
 
-use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
+use dav::{TagError, dav_parse_entity_tag, dav_parse_vfs};
 
 use super::{
     FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,

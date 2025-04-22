@@ -13,8 +13,8 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{future::BoxFuture, Stream, TryStream, TryStreamExt};
-use path::{node_from_path_rec, LocalPath};
+use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture};
+use path::{LocalPath, node_from_path_rec};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
@@ -23,9 +23,9 @@ use tokio::{
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::{
+    Error,
     update::{IsModified, ModificationState},
     vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
-    Error,
 };
 
 use super::{
