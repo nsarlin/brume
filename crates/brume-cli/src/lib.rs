@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use interprocess::local_socket::{
-    tokio::{prelude::*, Stream},
     GenericNamespaced,
+    tokio::{Stream, prelude::*},
 };
 use tarpc::{
     serde_transport, tokio_serde::formats::Bincode, tokio_util::codec::LengthDelimitedCodec,
 };
 
-use brume_daemon_proto::{BrumeServiceClient, SynchroId, SynchroMeta, BRUME_SOCK_NAME};
+use brume_daemon_proto::{BRUME_SOCK_NAME, BrumeServiceClient, SynchroId, SynchroMeta};
 
 pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
     let name = BRUME_SOCK_NAME.to_ns_name::<GenericNamespaced>()?;

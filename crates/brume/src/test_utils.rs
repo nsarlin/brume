@@ -3,7 +3,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{future::BoxFuture, stream, Stream, TryStream, TryStreamExt};
+use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture, stream};
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
@@ -11,8 +11,8 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
     concrete::{
-        local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription,
-        InvalidByteSyncInfo, Named, ToBytes, TryFromBytes,
+        FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
+        TryFromBytes, local::path::LocalPath,
     },
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},

@@ -27,12 +27,12 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Error, NameMismatchError,
     concrete::{ConcreteFileCloneResult, FsBackendError, Named, ToBytes},
     sorted_vec::{Sortable, SortedVec},
     vfs::{
         DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
     },
-    Error, NameMismatchError,
 };
 
 /// Error encountered during a diff operation

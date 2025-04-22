@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fmt::Display};
 
 use brume::concrete::{
-    local::LocalDir, nextcloud::Nextcloud, FSBackend, FsInstanceDescription, Named,
+    FSBackend, FsInstanceDescription, Named, local::LocalDir, nextcloud::Nextcloud,
 };
 
 use brume::synchro::FullSyncStatus;

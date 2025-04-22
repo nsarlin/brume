@@ -1,12 +1,12 @@
 use std::{collections::HashMap, sync::Arc, thread::sleep, time::Duration};
 
 use brume::{
-    concrete::{local::LocalDir, nextcloud::Nextcloud, FsBackendError},
+    concrete::{FsBackendError, local::LocalDir, nextcloud::Nextcloud},
     filesystem::FileSystem,
     synchro::{ConflictResolutionState, FullSyncStatus, Synchro, SynchroSide, Synchronized},
     vfs::{Vfs, VirtualPath},
 };
-use futures::{future::join_all, stream, StreamExt};
+use futures::{StreamExt, future::join_all, stream};
 use log::{debug, error, info};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};

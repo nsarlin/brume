@@ -7,12 +7,12 @@ pub mod nextcloud;
 use std::error::Error;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use byte_counter::ByteCounterExt;
 use bytes::Bytes;
-use futures::future::{join_all, try_join_all, BoxFuture};
+use futures::future::{BoxFuture, join_all, try_join_all};
 use futures::{Stream, TryStream, TryStreamExt};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
