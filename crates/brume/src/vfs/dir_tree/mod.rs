@@ -7,7 +7,7 @@ use std::fmt::Debug;
 
 pub use dir::*;
 pub use file::*;
-use log::info;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -910,7 +910,6 @@ impl<SyncInfo: IsModified + Debug> VfsNode<SyncInfo> {
             (VfsNode::File(fself), VfsNode::File(fother)) => {
                 // Diff the file based on their sync info
                 if fself.state().is_modified(fother.state()) {
-                    info!("self {:?} != other {:?}", fself.state(), fother.state());
                     let mut file_path = parent_path.to_owned();
                     file_path.push(fself.name());
 

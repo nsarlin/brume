@@ -598,7 +598,7 @@ mod test {
         let failed_diff = FailedUpdateApplication::new(
             diff.clone(),
             LocalDirError::io(
-                &VirtualPathBuf::new("/a/b/f2").unwrap(),
+                VirtualPathBuf::new("/a/b/f2").unwrap(),
                 io::Error::new(ErrorKind::AlreadyExists, "Error"),
             )
             .into(),

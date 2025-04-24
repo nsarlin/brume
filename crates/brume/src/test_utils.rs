@@ -3,7 +3,11 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture, stream};
+use futures::{
+    Stream, StreamExt, TryStream, TryStreamExt,
+    future::BoxFuture,
+    stream::{self, BoxStream},
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
 use tokio_util::io::StreamReader;
@@ -304,13 +308,13 @@ impl TestNode<'_> {
 
 impl LocalPath for TestNode<'_> {
     type DirEntry = Self;
-    fn is_file(&self) -> bool {
+    async fn is_file(&self) -> bool {
         match self {
             TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) | TestNode::FE(_, _) => true,
             TestNode::D(_, _) | TestNode::DH(_, _, _) | TestNode::DE(_, _) => false,
             TestNode::L(_, target) => {
                 if let Some(node) = target {
-                    node.is_file()
+                    Box::pin(node.is_file()).await
                 } else {
                     panic!("Invalid symlink")
                 }
@@ -318,13 +322,13 @@ impl LocalPath for TestNode<'_> {
         }
     }
 
-    fn is_dir(&self) -> bool {
+    async fn is_dir(&self) -> bool {
         match self {
             TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) | TestNode::FE(_, _) => false,
             TestNode::D(_, _) | TestNode::DH(_, _, _) | TestNode::DE(_, _) => true,
             TestNode::L(_, target) => {
                 if let Some(node) = target {
-                    node.is_dir()
+                    Box::pin(node.is_dir()).await
                 } else {
                     panic!("Invalid symlink")
                 }
@@ -336,17 +340,18 @@ impl LocalPath for TestNode<'_> {
         Some(OsStr::new(self.name()))
     }
 
-    fn read_dir(&self) -> io::Result<impl Iterator<Item = io::Result<Self>>> {
+    async fn read_dir(&self) -> io::Result<BoxStream<'_, io::Result<Self::DirEntry>>> {
         match self {
             TestNode::F(_) | TestNode::FH(_, _) | TestNode::FF(_, _) | TestNode::FE(_, _) => Err(
                 io::Error::new(io::ErrorKind::InvalidInput, "expected a dir"),
             ),
             TestNode::D(_, children) | TestNode::DH(_, _, children) => {
-                Ok(children.iter().cloned().map(Ok))
+                let children = children.clone();
+                Ok(stream::iter(children.into_iter().map(Ok)).boxed())
             }
             TestNode::L(_, target) => {
                 if let Some(node) = target {
-                    node.read_dir()
+                    Box::pin(node.read_dir()).await
                 } else {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -358,7 +363,7 @@ impl LocalPath for TestNode<'_> {
         }
     }
 
-    fn modification_time(&self) -> io::Result<SystemTime> {
+    async fn modification_time(&self) -> io::Result<SystemTime> {
         match self {
             TestNode::F(_)
             | TestNode::D(_, _)
@@ -367,7 +372,7 @@ impl LocalPath for TestNode<'_> {
             | TestNode::FF(_, _) => Ok(SystemTime::now()),
             TestNode::L(_, target) => {
                 if let Some(node) = target {
-                    node.modification_time()
+                    Box::pin(node.modification_time()).await
                 } else {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -381,7 +386,7 @@ impl LocalPath for TestNode<'_> {
         }
     }
 
-    fn file_size(&self) -> std::io::Result<u64> {
+    async fn file_size(&self) -> std::io::Result<u64> {
         match self {
             TestNode::F(_) | TestNode::FH(_, _) => Ok(0),
             TestNode::D(_, _) | TestNode::DH(_, _, _) => Err(io::Error::new(
@@ -391,7 +396,7 @@ impl LocalPath for TestNode<'_> {
             TestNode::FF(_, content) => Ok(content.len() as u64),
             TestNode::L(_, target) => {
                 if let Some(node) = target {
-                    node.file_size()
+                    Box::pin(node.file_size()).await
                 } else {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
