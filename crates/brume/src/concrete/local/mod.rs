@@ -1,4 +1,4 @@
-//! Interactions with the local filesystem
+//! FSBackend using the local filesystem
 
 pub mod path;
 
@@ -13,8 +13,8 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture};
-use path::{LocalPath, node_from_path_rec};
+use futures::{Stream, StreamExt, TryStream, TryStreamExt, future::BoxFuture};
+use path::{LocalPath, build_vfs_subtree};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
@@ -46,7 +46,7 @@ pub enum LocalDirError {
 }
 
 impl LocalDirError {
-    pub fn io<P: Debug>(path: &P, source: io::Error) -> Self {
+    pub fn io<P: Debug>(path: P, source: io::Error) -> Self {
         Self::IoError {
             path: format!("{:?}", path),
             source,
@@ -119,7 +119,6 @@ impl LocalDir {
     }
 }
 
-// TODO: Use `tokio::fs` everywhere for non blocking fs access
 impl FSBackend for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
@@ -131,11 +130,10 @@ impl FSBackend for LocalDir {
 
     fn validate(info: &Self::CreationInfo) -> BoxFuture<'_, Result<(), Self::IoError>> {
         Box::pin(async {
-            if info.0.exists() {
-                Ok(())
-            } else {
-                Err(LocalDirError::invalid_path(&info.0))
-            }
+            fs::metadata(&info.0)
+                .await
+                .map(|_| ())
+                .map_err(|e| LocalDirError::io(&info.0, e))
         })
     }
 
@@ -149,44 +147,41 @@ impl FSBackend for LocalDir {
     ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
         Box::pin(async {
             let full_path = self.full_path(path);
-
-            Ok(LocalSyncInfo::new(
-                full_path
-                    .modification_time()
-                    .map_err(|e| LocalDirError::io(&self.path, e))?
-                    .into(),
-            ))
+            LocalSyncInfo::load(full_path).await
         })
     }
 
     fn load_virtual(&self) -> BoxFuture<'_, Result<Vfs<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async {
-            let sync = LocalSyncInfo::new(
-                self.path
-                    .modification_time()
-                    .map_err(|e| LocalDirError::io(&self.path, e))?
-                    .into(),
-            );
-            let root = if self.path.is_file() {
+            let metadata = fs::metadata(&self.path)
+                .await
+                .map_err(|e| LocalDirError::io(&self.path, e))?;
+            let sync_info = LocalSyncInfo::load(&self.path).await?;
+
+            let root = if metadata.is_file() {
                 VfsNode::File(FileMeta::new(
                     self.path
                         .file_name()
                         .and_then(|s| s.to_str())
                         .ok_or(LocalDirError::invalid_path(&self.path))?,
-                    self.path
-                        .file_size()
-                        .map_err(|e| LocalDirError::io(&self.path, e))?,
-                    sync,
+                    metadata.len(),
+                    sync_info,
                 ))
-            } else if self.path.is_dir() {
-                let mut root = DirTree::new("", sync);
+            } else if metadata.is_dir() {
+                let mut root = DirTree::new("", sync_info);
                 let children = self
                     .path
                     .read_dir()
+                    .await
                     .map_err(|e| LocalDirError::io(&self.path, e))?
                     .map(|entry| entry.unwrap())
-                    .collect::<Vec<_>>();
-                node_from_path_rec(&mut root, &children)?;
+                    .collect::<Vec<_>>()
+                    .await;
+                let vfs_children = build_vfs_subtree(&children).await?;
+                vfs_children.into_iter().for_each(|n| {
+                    root.insert_child(n);
+                });
+
                 VfsNode::Dir(root)
             } else {
                 return Err(LocalDirError::invalid_path(&self.path));
@@ -240,6 +235,7 @@ impl FSBackend for LocalDir {
 
             full_path
                 .modification_time()
+                .await
                 .map(|time| LocalSyncInfo::new(time.into()))
                 .map_err(|e| LocalDirError::io(&self.path, e))
         })
@@ -266,6 +262,7 @@ impl FSBackend for LocalDir {
 
             full_path
                 .modification_time()
+                .await
                 .map(|time| LocalSyncInfo::new(time.into()))
                 .map_err(|e| LocalDirError::io(&self.path, e))
         })
@@ -299,6 +296,20 @@ pub struct LocalSyncInfo {
 impl LocalSyncInfo {
     pub fn new(last_modified: DateTime<Utc>) -> Self {
         Self { last_modified }
+    }
+
+    pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self, LocalDirError> {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path)
+            .await
+            .map_err(|e| LocalDirError::io(path, e))?;
+
+        Ok(LocalSyncInfo::new(
+            metadata
+                .modified()
+                .map_err(|e| LocalDirError::io(path, e))?
+                .into(),
+        ))
     }
 }
 
