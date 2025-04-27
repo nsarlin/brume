@@ -1,5 +1,7 @@
 //! Link two [`FileSystem`] for bidirectional synchronization
 
+use std::fmt::Display;
+
 use futures::{
     TryFutureExt,
     future::{BoxFuture, try_join_all},
@@ -125,6 +127,15 @@ impl SynchroSide {
         match self {
             SynchroSide::Local => Self::Remote,
             SynchroSide::Remote => Self::Local,
+        }
+    }
+}
+
+impl Display for SynchroSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SynchroSide::Local => write!(f, "local"),
+            SynchroSide::Remote => write!(f, "remote"),
         }
     }
 }
