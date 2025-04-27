@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod prompt;
 
 use std::collections::HashMap;
 
