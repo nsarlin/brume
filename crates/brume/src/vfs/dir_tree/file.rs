@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{
     concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
     update::FailedUpdateApplication,
@@ -6,7 +8,7 @@ use crate::{
 use super::NodeState;
 
 /// Description of a File node, with arbitrary user provided metadata
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo<Meta> {
     name: String,
     size: u64,

@@ -7,6 +7,7 @@ use brume::concrete::{
 };
 
 use brume::synchro::FullSyncStatus;
+use brume::vfs::StatefulVfs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -374,4 +375,7 @@ pub trait BrumeService {
         path: VirtualPathBuf,
         side: SynchroSide,
     ) -> Result<(), String>;
+
+    /// Returns the Vfs associated with a synchronized filesystem
+    async fn get_vfs(id: SynchroId, side: SynchroSide) -> Result<StatefulVfs<()>, String>;
 }

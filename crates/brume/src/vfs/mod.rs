@@ -10,6 +10,7 @@ pub mod virtual_path;
 use std::fmt::Debug;
 
 pub use dir_tree::*;
+use serde::{Deserialize, Serialize};
 pub use virtual_path::*;
 
 use crate::{
@@ -31,7 +32,7 @@ use crate::{
 /// comparison, using their implementation of the [`IsModified`] trait.
 ///
 /// [`updates`]: crate::update
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vfs<Meta> {
     root: VfsNode<Meta>,
 }

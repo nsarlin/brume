@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use brume::vfs::VirtualPathBuf;
+use brume::vfs::{StatefulVfs, VirtualPathBuf};
 use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
@@ -152,5 +152,16 @@ impl BrumeService for Server {
             .send(command)
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    async fn get_vfs(
+        self,
+        _context: Context,
+        id: SynchroId,
+        side: SynchroSide,
+    ) -> Result<StatefulVfs<()>, String> {
+        let list = self.synchro_list.read().await;
+
+        list.get_vfs(id, side).await.map_err(|e| e.to_string())
     }
 }

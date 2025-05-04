@@ -1,9 +1,11 @@
 //! Representation of path objects that are not necessarily linked to the local filesystem.
 
-use std::{borrow::Borrow, ops::Deref, path::Path};
+use std::{borrow::Borrow, fmt::Display, ops::Deref, path::Path};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::sorted_vec::Sortable;
 
 use super::NodeKind;
 
@@ -32,6 +34,20 @@ impl InvalidPathError {
 #[repr(transparent)]
 pub struct VirtualPath {
     path: str,
+}
+
+impl Sortable for VirtualPath {
+    type Key = Self;
+
+    fn key(&self) -> &Self::Key {
+        self
+    }
+}
+
+impl Display for VirtualPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 #[derive(Error, Debug)]
@@ -114,6 +130,10 @@ impl VirtualPath {
         path.rsplit_once('/')
             .map(|(_, suffix)| suffix)
             .unwrap_or("")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.path
     }
 
     /// Return the parent of this path, if any
@@ -263,6 +283,20 @@ impl<'a> Iterator for VirtualPathIterator<'a> {
 #[repr(transparent)]
 pub struct VirtualPathBuf {
     path: String,
+}
+
+impl Sortable for VirtualPathBuf {
+    type Key = VirtualPath;
+
+    fn key(&self) -> &Self::Key {
+        self
+    }
+}
+
+impl Display for VirtualPathBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 impl VirtualPathBuf {
