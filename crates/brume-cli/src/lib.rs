@@ -25,7 +25,7 @@ pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
     Ok(BrumeServiceClient::new(Default::default(), transport).spawn())
 }
 
-pub async fn get_synchro_id(
+pub fn get_synchro_id(
     synchro_list: &HashMap<SynchroId, SynchroMeta>,
     synchro_descriptor: &str,
 ) -> Option<SynchroId> {
@@ -39,7 +39,7 @@ pub async fn get_synchro_id(
     None
 }
 
-pub async fn get_synchro(
+pub fn get_synchro(
     synchro_list: &HashMap<SynchroId, SynchroMeta>,
     synchro_descriptor: &str,
 ) -> Option<(SynchroId, SynchroMeta)> {

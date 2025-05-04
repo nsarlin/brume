@@ -451,7 +451,8 @@ impl SynchroList {
             .get(&id)
             .ok_or_else(|| SyncError::SynchroNotFound(id))?;
 
-        // TODO: what to do if synchro is paused?
+        // TODO: what to do if synchro is paused? Store the request in a queue or process it
+        // immediately? Or return an error?
         self.resolve_conflict_sync(id, synchro, path, side, db)
             .await
     }

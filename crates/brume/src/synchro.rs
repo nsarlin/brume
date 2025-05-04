@@ -179,7 +179,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
     /// conflicts.
     ///
     /// This is done in three steps:
-    /// - First reconcile individual elements by comparing them between one list and the other
+    /// - First merge individual updates by comparing them between one list and the other
     /// - Then access the concrete backends to check if duplicates should be removed or if they are
     ///   conflicts. They are removed when the content of the files are identical on both
     ///   filesystems, or are marked as conflicts if the content differs.

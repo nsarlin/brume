@@ -123,7 +123,7 @@ impl<SyncInfo: TryFromBytes> TryFrom<NodeState<Vec<u8>>> for NodeState<SyncInfo>
 /// A directory, seen as a tree.
 ///
 /// It is composed of metadata for the directory itself and a list of children.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirTree<Meta> {
     info: DirInfo<Meta>,
     // TODO: handle having a dir and file with the same name
@@ -660,7 +660,7 @@ impl TryFrom<&str> for NodeKind {
 }
 
 /// A node in a File System tree. Can represent a directory or a file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VfsNode<Meta> {
     Dir(DirTree<Meta>),
     File(FileInfo<Meta>),

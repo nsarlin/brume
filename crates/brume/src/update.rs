@@ -22,7 +22,7 @@
 //! [`VFS`]: crate::vfs::Vfs
 //! [`FSBackend`]: crate::concrete::FSBackend
 
-use std::collections::HashSet;
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 
@@ -140,6 +140,18 @@ pub enum UpdateKind {
     FileModified,
     //TODO: add DirModified to update the syncinfo of a dir
     //TODO: detect moves
+}
+
+impl Display for UpdateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateKind::DirCreated => write!(f, "Directory created"),
+            UpdateKind::DirRemoved => write!(f, "Directory removed"),
+            UpdateKind::FileCreated => write!(f, "File created"),
+            UpdateKind::FileRemoved => write!(f, "File removed"),
+            UpdateKind::FileModified => write!(f, "File modified"),
+        }
+    }
 }
 
 impl UpdateKind {
@@ -337,7 +349,7 @@ impl Sortable for VfsDiff {
 pub type VfsDiffList = SortedVec<VfsDiff>;
 
 impl VfsDiffList {
-    /// Merge two update lists by calling [`VfsDiff::reconcile`] on their elements one by
+    /// Merge two update lists by calling [`VfsDiff::merge`] on their elements one by
     /// one
     pub(crate) fn merge<SyncInfo: Named, RemoteSyncInfo: Named>(
         &self,

@@ -1,23 +1,26 @@
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use clap::Args;
 use tarpc::context;
 
-use brume_daemon_proto::{BrumeServiceClient, VirtualPathBuf};
+use brume_daemon_proto::{BrumeServiceClient, SynchroStatus, VirtualPathBuf};
 
-use crate::get_synchro_id;
+use crate::{
+    get_synchro,
+    prompt::{filter_synchro_list, prompt_conflict_path, prompt_side, prompt_synchro},
+};
 
 use super::SynchroSide;
 
 #[derive(Args)]
 pub struct CommandResolve {
     /// The id of the synchro
-    synchro: String,
+    synchro: Option<String>,
     /// The path of the node in conflict, as an absolute path from the root of the synchro
     #[arg(short, long)]
-    path: String,
+    path: Option<String>,
     /// The side of the synchro to chose for the resolution
     #[arg(short, long)]
-    side: SynchroSide,
+    side: Option<SynchroSide>,
 }
 
 pub async fn resolve(
@@ -29,18 +32,54 @@ pub async fn resolve(
         path,
         side,
     } = args;
-
-    println!("Resolving conflict in synchro: {synchro}, path: {path}, side: {side:?}");
     let list = daemon.list_synchros(context::current()).await?;
+    let list = filter_synchro_list(list, |sync| sync.status() == SynchroStatus::Conflict);
 
-    let id = get_synchro_id(&list, &synchro)
-        .await
-        .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+    if list.is_empty() {
+        println!("No conflict to resolve");
+        return Ok(());
+    }
 
-    let vpath = VirtualPathBuf::new(&path).context("Invalid path")?;
+    let (id, sync) = synchro
+        .map(|sync| {
+            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+        })
+        .unwrap_or_else(|| prompt_synchro(&list))?;
+
+    let base_path = if let Some(path) = path {
+        VirtualPathBuf::new(&path).context("Invalid path")?
+    } else {
+        let local_vfs = daemon
+            .get_vfs(
+                context::current(),
+                id,
+                brume_daemon_proto::SynchroSide::Local,
+            )
+            .await??;
+        let remote_vfs = daemon
+            .get_vfs(
+                context::current(),
+                id,
+                brume_daemon_proto::SynchroSide::Remote,
+            )
+            .await??;
+
+        prompt_conflict_path(&local_vfs, &remote_vfs)?
+    };
+
+    let side = side
+        .map(|side| side.into())
+        .map(Ok)
+        .unwrap_or_else(prompt_side)?;
+
+    println!(
+        "Resolving conflict in synchro: {} ({:x}), path: {base_path:?}, side: {side:?}",
+        sync.name(),
+        id.short()
+    );
 
     daemon
-        .resolve_conflict(context::current(), id, vpath, side.into())
+        .resolve_conflict(context::current(), id, base_path, side)
         .await??;
     println!("Done");
 

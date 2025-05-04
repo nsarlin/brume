@@ -1,14 +1,13 @@
-use anyhow::anyhow;
 use clap::Args;
 use tarpc::context;
 
 use brume_daemon_proto::BrumeServiceClient;
 
-use crate::get_synchro;
+use crate::{get_synchro, prompt::prompt_synchro};
 
 #[derive(Args)]
 pub struct CommandStatus {
-    synchro: String,
+    synchro: Option<String>,
 }
 
 pub async fn status(
@@ -18,9 +17,16 @@ pub async fn status(
     let CommandStatus { synchro } = args;
     let list = daemon.list_synchros(context::current()).await?;
 
-    let (id, sync) = get_synchro(&list, &synchro)
-        .await
-        .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+    if list.is_empty() {
+        println!("No active synchro");
+        return Ok(());
+    }
+
+    let (id, sync) = synchro
+        .map(|sync| {
+            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+        })
+        .unwrap_or_else(|| prompt_synchro(&list))?;
 
     println!("○ Synchro: {} - {}", sync.name(), id.id());
     for (key, value) in [
