@@ -1,11 +1,15 @@
 //! Various prompts that can be used for user interactions
 mod autocomplete;
 
+use std::collections::HashMap;
+
 use brume_daemon_proto::{
-    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroSide,
+    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroId, SynchroMeta,
+    SynchroSide,
 };
 use inquire::{Password, Select, Text};
 
+use crate::get_synchro;
 use autocomplete::LocalFilePathCompleter;
 
 /// A prompt for filesystem creation information
@@ -56,4 +60,32 @@ pub fn prompt_nextcloud() -> Result<NextcloudFsCreationInfo, String> {
         .map_err(|e| e.to_string())?;
 
     Ok(NextcloudFsCreationInfo::new(&url, &username, &password))
+}
+
+/// Prompt for a synchro from the list
+pub fn prompt_synchro(
+    synchro_list: &HashMap<SynchroId, SynchroMeta>,
+) -> Result<(SynchroId, SynchroMeta), String> {
+    let options = synchro_list.values().map(|sync| sync.name()).collect();
+
+    let ans = Select::new("Which synchro?", options)
+        .prompt()
+        .map_err(|e| e.to_string())?;
+
+    Ok(get_synchro(synchro_list, ans).expect("Chosen synchro must be in the list"))
+}
+
+/// Prompt for a synchro side, remote or local
+pub fn prompt_side() -> Result<SynchroSide, String> {
+    let options = vec!["Local", "Remote"];
+
+    let ans = Select::new("Use content from which side?", options)
+        .prompt()
+        .map_err(|e| e.to_string())?;
+
+    match ans {
+        "Local" => Ok(SynchroSide::Local),
+        "Remote" => Ok(SynchroSide::Remote),
+        _ => Err(String::from("Invalid option")),
+    }
 }

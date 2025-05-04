@@ -1,14 +1,13 @@
-use anyhow::anyhow;
 use clap::Args;
 use tarpc::context;
 
 use brume_daemon_proto::{BrumeServiceClient, SynchroState};
 
-use crate::get_synchro;
+use crate::{get_synchro, prompt::prompt_synchro};
 
 #[derive(Args)]
 pub struct CommandPause {
-    synchro: String,
+    synchro: Option<String>,
 }
 
 pub async fn pause(
@@ -16,12 +15,15 @@ pub async fn pause(
     args: CommandPause,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let CommandPause { synchro } = args;
-    println!("Pausing synchro: {synchro}");
     let list = daemon.list_synchros(context::current()).await?;
 
-    let (id, sync) = get_synchro(&list, &synchro)
-        .await
-        .ok_or_else(|| anyhow!("Invalid synchro descriptor"))?;
+    let (id, sync) = synchro
+        .map(|sync| {
+            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+        })
+        .unwrap_or_else(|| prompt_synchro(&list))?;
+
+    println!("Pausing synchro: {} ({:x})", sync.name(), id.short());
 
     if matches!(sync.state(), SynchroState::Paused) {
         println!("Synchro is already paused");
