@@ -233,6 +233,18 @@ Please check if {} is in use by another process and try again.",
         self.cancellation_token.cancel()
     }
 
+    /// Logs the error, and properly shutdowns the daemon if [`ErrorMode`] is `Exit`
+    pub fn handle_error(&self, err: &anyhow::Error) {
+        if self.config.error_mode == ErrorMode::Exit {
+            // print user orented multiline backtrace
+            error!("{err:?}");
+            self.stop();
+        } else {
+            // print single line backtrace for logs
+            error!("{err:#}");
+        }
+    }
+
     /// Spawns a new tokio task and runs the daemon inside it
     pub async fn spawn(self: &Arc<Self>) -> JoinHandle<Result<()>> {
         let daemon = self.clone();
@@ -265,25 +277,20 @@ Please check if {} is in use by another process and try again.",
             let results = synchro_list.sync_all(&self.database).await;
 
             for res in results {
-                if let Err(err) = res {
-                    let wrapped_err = anyhow!(err);
-                    error!("Failed to synchronize filesystems: {wrapped_err:?}");
-                    if self.config.error_mode == ErrorMode::Exit {
-                        self.is_running.store(false, Ordering::Relaxed);
-                        return Err(wrapped_err);
-                    }
-                }
+                let _ = res
+                    .context("Failed to synchronize filesystems")
+                    .inspect_err(|err| self.handle_error(err));
             }
-
             // Wait and update synchro list with any new sync from user
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => break,
                     Some(command) = self.recv_user_commands() => {
                         let res = self.handle_user_commands(command).await;
-                        res.inspect_err(|_| {
-                            self.is_running.store(false, Ordering::Relaxed);
-                        })?
+                        let _ = res.context("Failed to handle user command").inspect_err(|err| {
+                            self.handle_error(err);
+                        });
                     }
                     _ = self.cancellation_token.cancelled() => {
                         self.is_running.store(false, Ordering::Relaxed);
