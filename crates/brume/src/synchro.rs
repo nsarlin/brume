@@ -929,6 +929,12 @@ mod test {
                 .is_conflict()
         );
 
+        // Do a second sync to check that the conflict is not lost
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
         // Resolve the conflict
         assert_eq!(
             synchro
@@ -1016,6 +1022,12 @@ mod test {
                 .unwrap()
                 .state()
                 .is_conflict()
+        );
+
+        // Do a second sync to check that the conflict is not lost
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
         );
 
         // Resolve the conflict
