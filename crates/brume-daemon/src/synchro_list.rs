@@ -4,7 +4,7 @@ use brume::{
     concrete::{FsBackendError, local::LocalDir, nextcloud::Nextcloud},
     filesystem::FileSystem,
     synchro::{ConflictResolutionState, FullSyncStatus, Synchro, SynchroSide, Synchronized},
-    vfs::{Vfs, VirtualPath},
+    vfs::{StatefulVfs, VirtualPath},
 };
 use futures::{StreamExt, future::join_all, stream};
 use log::{debug, error, info};
@@ -639,7 +639,13 @@ impl SynchroList {
     /// Returns the [`Vfs`] associated with the provided synchro and side
     ///
     /// The SyncInfo will be erased but the directory structure and metadata will be preserved
-    pub async fn get_vfs(&self, id: SynchroId, side: SynchroSide) -> Result<Vfs<()>, SyncError> {
+    ///
+    /// [`Vfs`]: brume::vfs::Vfs
+    pub async fn get_vfs(
+        &self,
+        id: SynchroId,
+        side: SynchroSide,
+    ) -> Result<StatefulVfs<()>, SyncError> {
         let synchro = self
             .synchros
             .get(&id)

@@ -190,7 +190,7 @@ async fn main() {
 
     fs_a.diff_vfs().await.unwrap();
     fs_b.diff_vfs().await.unwrap();
-    assert!(fs_a.vfs().diff(fs_b.vfs()).unwrap().is_empty());
+    assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
 
     // Test deletion
     let first_sync = list.keys().collect::<Vec<_>>()[0];

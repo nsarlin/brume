@@ -6,7 +6,7 @@ use urlencoding::decode;
 
 use crate::{
     sorted_vec::{Sortable, SortedVec},
-    vfs::{DirTree, FileMeta, VfsNode, VirtualPath, VirtualPathBuf, VirtualPathError},
+    vfs::{DirTree, FileInfo, VfsNode, VirtualPath, VirtualPathBuf, VirtualPathError},
 };
 
 use super::{NC_DAV_PATH_STR, NextcloudFsError, NextcloudSyncInfo};
@@ -178,7 +178,7 @@ impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
         let sync = NextcloudSyncInfo::new(tag);
 
         match &value.entity {
-            ListEntity::File(file) => Ok(VfsNode::File(FileMeta::new(
+            ListEntity::File(file) => Ok(VfsNode::File(FileInfo::new(
                 &name,
                 file.content_length as u64,
                 sync,
@@ -287,7 +287,7 @@ mod test {
 
         let elements: Vec<ListEntity> = ron::from_str(dav_folder).unwrap();
 
-        let res = dav_parse_vfs(elements, "admin").unwrap();
+        let res = dav_parse_vfs(elements, "admin").unwrap().as_ok();
 
         assert!(res.structural_eq(&reference))
     }

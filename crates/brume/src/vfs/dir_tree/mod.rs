@@ -53,6 +53,36 @@ impl<SyncInfo> NodeState<SyncInfo> {
     pub fn is_conflict(&self) -> bool {
         matches!(self, Self::Conflict(_))
     }
+
+    pub fn matches<OtherSyncInfo>(&self, other: &NodeState<OtherSyncInfo>) -> bool {
+        matches!(
+            (self, other),
+            (NodeState::Ok(_), NodeState::Ok(_))
+                | (NodeState::NeedResync, NodeState::NeedResync)
+                | (NodeState::Error(_), NodeState::Error(_))
+                | (NodeState::Conflict(_), NodeState::Conflict(_))
+        )
+    }
+}
+
+impl<SyncInfo: IsModified> NodeState<SyncInfo> {
+    pub fn modification_state(&self, other_sync: &SyncInfo) -> ModificationState {
+        match self {
+            NodeState::Ok(self_sync) => self_sync.modification_state(other_sync),
+            // Skip nodes in conflict until the conflicts are resolved
+            NodeState::Conflict(_) => ModificationState::ShallowUnmodified,
+            // If at least one node is in error or wants a resync, we return modified
+            _ => ModificationState::Modified,
+        }
+    }
+
+    pub fn is_modified(&self, other_sync: &SyncInfo) -> bool {
+        match self.modification_state(other_sync) {
+            ModificationState::ShallowUnmodified => false,
+            ModificationState::RecursiveUnmodified => false,
+            ModificationState::Modified => true,
+        }
+    }
 }
 
 impl<SyncInfo> From<&NodeState<SyncInfo>> for NodeState<()> {
@@ -94,88 +124,64 @@ impl<SyncInfo: TryFromBytes> TryFrom<NodeState<Vec<u8>>> for NodeState<SyncInfo>
 ///
 /// It is composed of metadata for the directory itself and a list of children.
 #[derive(Debug, Clone)]
-pub struct DirTree<SyncInfo> {
-    metadata: DirMeta<SyncInfo>,
+pub struct DirTree<Meta> {
+    info: DirInfo<Meta>,
     // TODO: handle having a dir and file with the same name
-    children: SortedNodeList<SyncInfo>,
+    children: SortedNodeList<Meta>,
 }
 
-impl<SyncInfo> DirTree<SyncInfo> {
+pub type StatefulDirTree<SyncInfo> = DirTree<NodeState<SyncInfo>>;
+
+impl<Meta> DirTree<Meta> {
     /// Creates a new directory with no child and the provided name
-    pub fn new(name: &str, sync: SyncInfo) -> Self {
+    pub fn new(name: &str, sync: Meta) -> Self {
         Self {
-            metadata: DirMeta::new(name, sync),
-            children: SortedNodeList::new(),
-        }
-    }
-
-    /// Creates a new directory that will always trigger a resync on the first synchro
-    pub fn new_force_resync(name: &str) -> Self {
-        Self {
-            metadata: DirMeta::new_force_resync(name),
-            children: SortedNodeList::new(),
-        }
-    }
-
-    /// Creates a new directory with the provided [`state`]
-    ///
-    /// [`state`]: NodeState
-    pub fn new_with_state(name: &str, state: NodeState<SyncInfo>) -> Self {
-        Self {
-            metadata: DirMeta::new_with_state(name, state),
-            children: SortedNodeList::new(),
-        }
-    }
-
-    /// Creates a new directory in the error [`state`]
-    ///
-    /// [`state`]: NodeState
-    pub fn new_error(name: &str, error: FailedUpdateApplication) -> Self {
-        Self {
-            metadata: DirMeta::new_error(name, error),
+            info: DirInfo::new(name, sync),
             children: SortedNodeList::new(),
         }
     }
 
     /// Creates a new directory with the provided name and child nodes
-    pub fn new_with_children(name: &str, sync: SyncInfo, children: Vec<VfsNode<SyncInfo>>) -> Self {
+    pub fn new_with_children(name: &str, sync: Meta, children: Vec<VfsNode<Meta>>) -> Self {
         Self {
-            metadata: DirMeta::new(name, sync),
+            info: DirInfo::new(name, sync),
             children: SortedNodeList::from_vec(children),
+        }
+    }
+
+    pub fn metadata(&self) -> &Meta {
+        self.info.metadata()
+    }
+
+    /// Converts a stateless dir into a stateful one in the "Ok" state
+    pub fn as_ok(self) -> StatefulDirTree<Meta> {
+        StatefulDirTree {
+            info: self.info.as_ok(),
+            // We know that the input is already sorted
+            children: SortedVec::unchecked_from_vec(
+                self.children.into_iter().map(|node| node.as_ok()).collect(),
+            ),
         }
     }
 
     /// Inserts a new child for this directory. If there is already a child with the same name,
     /// returns false.
-    pub fn insert_child(&mut self, child: VfsNode<SyncInfo>) -> bool {
+    pub fn insert_child(&mut self, child: VfsNode<Meta>) -> bool {
         self.children.insert(child)
     }
 
     pub fn name(&self) -> &str {
-        self.metadata.name()
+        self.info.name()
     }
 
-    pub fn state(&self) -> &NodeState<SyncInfo> {
-        self.metadata.state()
-    }
-
-    pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
-        self.metadata.state_mut()
-    }
-
-    /// Invalidates the sync info to make them trigger a FSBackend sync on next run
-    pub fn force_resync(&mut self) {
-        self.metadata.force_resync()
-    }
-
-    pub fn children(&self) -> &SortedNodeList<SyncInfo> {
+    pub fn children(&self) -> &SortedNodeList<Meta> {
         &self.children
     }
 
     /// Returns a reference to the dir at the given path.
     ///
     /// Returns an error if the path does not point to a valid directory node.
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Meta>, InvalidPathError> {
         if path.is_root() {
             Ok(self)
         } else {
@@ -188,7 +194,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// Returns a reference to the file at the given path.
     ///
     /// Returns an error if the path does not point to a valid file.
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Meta>, InvalidPathError> {
         self.find_node(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| node.as_file())
@@ -197,7 +203,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// Returns a reference to the node at the given path.
     ///
     /// Returns an error if the path does not point to a valid node.
-    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<SyncInfo>> {
+    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<Meta>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
                 self.children.find(top_level)
@@ -220,7 +226,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     pub fn find_dir_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+    ) -> Result<&mut DirTree<Meta>, InvalidPathError> {
         if path.is_root() {
             Ok(self)
         } else {
@@ -236,7 +242,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     pub fn find_file_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
+    ) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
         self.find_node_mut(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| node.as_file_mut())
@@ -245,7 +251,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     /// Returns a mutable reference to the node at the given path.
     ///
     /// Returns None if the path does not point to a valid node.
-    fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<SyncInfo>> {
+    fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Meta>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
                 self.children.find_mut(top_level)
@@ -279,7 +285,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     ///
     /// If there were no child with this name returns None. If a child exists but the predicates is
     /// not verified, returns Some(false).
-    pub fn remove_child_if<F: FnOnce(&VfsNode<SyncInfo>) -> bool>(
+    pub fn remove_child_if<F: FnOnce(&VfsNode<Meta>) -> bool>(
         &mut self,
         child_name: &str,
         condition: F,
@@ -355,19 +361,6 @@ impl<SyncInfo> DirTree<SyncInfo> {
         }
     }
 
-    /// Checks if the two directories are structurally equals.
-    ///
-    /// This means that their trees are composed of nodes with the same kind and the same name.
-    pub fn structural_eq<OtherSyncInfo>(&self, other: &DirTree<OtherSyncInfo>) -> bool {
-        self.name() == other.name()
-            && self.children.len() == other.children.len()
-            && self
-                .children
-                .iter()
-                .zip(other.children.iter())
-                .all(|(child_self, child_other)| child_self.structural_eq(child_other))
-    }
-
     /// Gets the differences between [`DirTree`], and eventually requests file content checks with
     /// their concrete backends.
     ///
@@ -405,6 +398,78 @@ impl<SyncInfo> DirTree<SyncInfo> {
         let diffs = SortedVec::unchecked_flatten(diff_list);
 
         Ok(diffs)
+    }
+}
+
+impl<SyncInfo> StatefulDirTree<SyncInfo> {
+    /// Creates a new directory in the `Ok` state
+    ///
+    /// [`state`]: NodeState
+    pub fn new_ok(name: &str, info: SyncInfo) -> Self {
+        Self {
+            info: DirInfo::new(name, NodeState::Ok(info)),
+            children: SortedNodeList::new(),
+        }
+    }
+
+    /// Creates a new directory that will always trigger a resync on the first synchro
+    pub fn new_force_resync(name: &str) -> Self {
+        Self {
+            info: DirInfo::new_force_resync(name),
+            children: SortedNodeList::new(),
+        }
+    }
+
+    /// Creates a new directory in the error [`state`]
+    ///
+    /// [`state`]: NodeState
+    pub fn new_error(name: &str, error: FailedUpdateApplication) -> Self {
+        Self {
+            info: DirInfo::new_error(name, error),
+            children: SortedNodeList::new(),
+        }
+    }
+
+    pub fn state(&self) -> &NodeState<SyncInfo> {
+        self.info.state()
+    }
+
+    pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
+        self.info.state_mut()
+    }
+
+    /// Checks if the two directories are structurally equals.
+    ///
+    /// This means that their trees are composed of nodes with the same kind and the same name.
+    pub fn structural_eq<OtherSyncInfo>(&self, other: &StatefulDirTree<OtherSyncInfo>) -> bool {
+        self.name() == other.name()
+            && self.state().matches(other.state())
+            && self.children.len() == other.children.len()
+            && self
+                .children
+                .iter()
+                .zip(other.children.iter())
+                .all(|(child_self, child_other)| child_self.structural_eq(child_other))
+    }
+
+    /// Invalidates the sync info to make them trigger a FSBackend sync on next run
+    pub fn force_resync(&mut self) {
+        self.info.force_resync()
+    }
+
+    /// Extract the Ok state of the node, or panic
+    #[cfg(test)]
+    pub fn unwrap(self) -> DirTree<SyncInfo> {
+        DirTree {
+            info: self.info.unwrap(),
+            // input vec is sorted
+            children: SortedVec::unchecked_from_vec(
+                self.children
+                    .into_iter()
+                    .map(|child| child.unwrap())
+                    .collect(),
+            ),
+        }
     }
 
     /// Returns the list of errors for this dir and its children
@@ -456,7 +521,7 @@ impl<SyncInfo: Clone> DirTree<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified + Debug> DirTree<SyncInfo> {
+impl<SyncInfo: IsModified + Debug> StatefulDirTree<SyncInfo> {
     /// Diff two directories based on their content.
     pub fn diff(
         &self,
@@ -466,7 +531,7 @@ impl<SyncInfo: IsModified + Debug> DirTree<SyncInfo> {
         let mut dir_path = parent_path.to_owned();
         dir_path.push(self.name());
 
-        match self.state().modification_state(other.state()) {
+        match self.state().modification_state(other.info.metadata()) {
             // The SyncInfo tells us that nothing has been modified for this dir, but can't
             // speak about its children. So we need to walk them.
             ModificationState::ShallowUnmodified => {
@@ -490,14 +555,10 @@ impl<SyncInfo: IsModified + Debug> DirTree<SyncInfo> {
             // stop there
             ModificationState::RecursiveUnmodified => Ok(VfsDiffList::new()),
             ModificationState::Modified => {
-                // If one of the dir is in error state, resync it completely
+                // If the dir is in error state, resync it completely
                 if self.state().is_err() {
                     let mut res = SortedVec::new();
                     res.insert(VfsDiff::dir_created(dir_path));
-                    Ok(res)
-                } else if other.state().is_err() {
-                    let mut res = SortedVec::new();
-                    res.insert(VfsDiff::dir_removed(dir_path));
                     Ok(res)
                 } else {
                     // The directory has been modified, so we have to walk it recursively to find
@@ -529,10 +590,10 @@ impl<SyncInfo: IsModified + Debug> DirTree<SyncInfo> {
     }
 }
 
-impl<SyncInfo> From<&DirTree<SyncInfo>> for DirTree<()> {
-    fn from(value: &DirTree<SyncInfo>) -> Self {
+impl<SyncInfo> From<&StatefulDirTree<SyncInfo>> for StatefulDirTree<()> {
+    fn from(value: &StatefulDirTree<SyncInfo>) -> Self {
         Self {
-            metadata: (&value.metadata).into(),
+            info: (&value.info).into(),
             // Ok to use unchecked because the input list is sorted
             children: SortedVec::unchecked_from_vec(
                 value.children.iter().map(|child| child.into()).collect(),
@@ -541,10 +602,10 @@ impl<SyncInfo> From<&DirTree<SyncInfo>> for DirTree<()> {
     }
 }
 
-impl<SyncInfo: ToBytes> From<&DirTree<SyncInfo>> for DirTree<Vec<u8>> {
-    fn from(value: &DirTree<SyncInfo>) -> Self {
+impl<SyncInfo: ToBytes> From<&StatefulDirTree<SyncInfo>> for StatefulDirTree<Vec<u8>> {
+    fn from(value: &StatefulDirTree<SyncInfo>) -> Self {
         Self {
-            metadata: (&value.metadata).into(),
+            info: (&value.info).into(),
             // Ok to use unchecked because the input list is sorted
             children: SortedVec::unchecked_from_vec(
                 value.children.iter().map(|child| child.into()).collect(),
@@ -553,17 +614,17 @@ impl<SyncInfo: ToBytes> From<&DirTree<SyncInfo>> for DirTree<Vec<u8>> {
     }
 }
 
-impl<SyncInfo: TryFromBytes> TryFrom<DirTree<Vec<u8>>> for DirTree<SyncInfo> {
+impl<SyncInfo: TryFromBytes> TryFrom<StatefulDirTree<Vec<u8>>> for StatefulDirTree<SyncInfo> {
     type Error = InvalidByteSyncInfo;
 
-    fn try_from(value: DirTree<Vec<u8>>) -> Result<Self, Self::Error> {
+    fn try_from(value: StatefulDirTree<Vec<u8>>) -> Result<Self, Self::Error> {
         Ok(Self {
-            metadata: value.metadata.try_into()?,
+            info: value.info.try_into()?,
             children: SortedVec::unchecked_from_vec(
                 value
                     .children
                     .into_iter()
-                    .map(VfsNode::<SyncInfo>::try_from)
+                    .map(StatefulVfsNode::<SyncInfo>::try_from)
                     .collect::<Result<_, _>>()?,
             ),
         })
@@ -600,12 +661,15 @@ impl TryFrom<&str> for NodeKind {
 
 /// A node in a File System tree. Can represent a directory or a file.
 #[derive(Debug, Clone)]
-pub enum VfsNode<SyncInfo> {
-    Dir(DirTree<SyncInfo>),
-    File(FileMeta<SyncInfo>),
+pub enum VfsNode<Meta> {
+    Dir(DirTree<Meta>),
+    File(FileInfo<Meta>),
 }
 
-impl<SyncInfo> Sortable for VfsNode<SyncInfo> {
+/// A [`VfsNode`] associated with a [`NodeState`]
+pub type StatefulVfsNode<SyncInfo> = VfsNode<NodeState<SyncInfo>>;
+
+impl<Meta> Sortable for VfsNode<Meta> {
     type Key = str;
 
     fn key(&self) -> &Self::Key {
@@ -613,12 +677,26 @@ impl<SyncInfo> Sortable for VfsNode<SyncInfo> {
     }
 }
 
-impl<SyncInfo> VfsNode<SyncInfo> {
+impl<Meta> VfsNode<Meta> {
     /// Returns the name of the file or directory represented by this node
     pub fn name(&self) -> &str {
         match self {
             VfsNode::File(file) => file.name(),
             VfsNode::Dir(dir) => dir.name(),
+        }
+    }
+
+    pub fn metadata(&self) -> &Meta {
+        match self {
+            VfsNode::Dir(dir_tree) => dir_tree.metadata(),
+            VfsNode::File(file_info) => file_info.metadata(),
+        }
+    }
+
+    pub fn as_ok(self) -> StatefulVfsNode<Meta> {
+        match self {
+            Self::Dir(dir_tree) => StatefulVfsNode::Dir(dir_tree.as_ok()),
+            Self::File(file_info) => StatefulVfsNode::File(file_info.as_ok()),
         }
     }
 
@@ -636,20 +714,6 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
     }
 
-    pub fn set_state(&mut self, state: NodeState<SyncInfo>) {
-        match self {
-            VfsNode::Dir(dir_tree) => *dir_tree.state_mut() = state,
-            VfsNode::File(file_meta) => *file_meta.state_mut() = state,
-        }
-    }
-
-    pub fn state(&self) -> &NodeState<SyncInfo> {
-        match self {
-            VfsNode::Dir(dir_tree) => dir_tree.state(),
-            VfsNode::File(file_meta) => file_meta.state(),
-        }
-    }
-
     pub fn kind(&self) -> NodeKind {
         match self {
             VfsNode::Dir(_) => NodeKind::Dir,
@@ -657,23 +721,23 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
     }
 
-    pub fn as_dir(&self) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
+    pub fn as_dir(&self) -> Result<&DirTree<Meta>, InvalidPathError> {
         self.find_dir(VirtualPath::root())
     }
 
-    pub fn as_dir_mut(&mut self) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+    pub fn as_dir_mut(&mut self) -> Result<&mut DirTree<Meta>, InvalidPathError> {
         self.find_dir_mut(VirtualPath::root())
     }
 
-    pub fn as_file(&self) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
+    pub fn as_file(&self) -> Result<&FileInfo<Meta>, InvalidPathError> {
         self.find_file(VirtualPath::root())
     }
 
-    pub fn as_file_mut(&mut self) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
+    pub fn as_file_mut(&mut self) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
         self.find_file_mut(VirtualPath::root())
     }
 
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Meta>, InvalidPathError> {
         self.find_node(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -682,7 +746,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
             })
     }
 
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Meta>, InvalidPathError> {
         self.find_node(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -711,7 +775,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
     pub fn find_dir_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+    ) -> Result<&mut DirTree<Meta>, InvalidPathError> {
         self.find_node_mut(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -723,7 +787,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
     pub fn find_file_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
+    ) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
         self.find_node_mut(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -761,18 +825,6 @@ impl<SyncInfo> VfsNode<SyncInfo> {
                     )))
                 }
             }
-        }
-    }
-
-    /// Compares the structure of trees.
-    ///
-    /// Two trees are structurally equals if they have the same shape and are composed of nodes with
-    /// the same names.
-    pub fn structural_eq<OtherSyncInfo>(&self, other: &VfsNode<OtherSyncInfo>) -> bool {
-        match (self, other) {
-            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.structural_eq(dother),
-            (VfsNode::Dir(_), VfsNode::File(_)) | (VfsNode::File(_), VfsNode::Dir(_)) => false,
-            (VfsNode::File(fself), VfsNode::File(fother)) => fself.name() == fother.name(),
         }
     }
 
@@ -820,6 +872,47 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         path
     }
 
+    /// Creates a diff where this node has been removed from the VFS
+    pub fn to_removed_diff(&self, parent_path: &VirtualPath) -> VfsDiff {
+        match self {
+            VfsNode::Dir(_) => VfsDiff::dir_removed(self.path(parent_path)),
+            VfsNode::File(_) => VfsDiff::file_removed(self.path(parent_path)),
+        }
+    }
+
+    /// Creates a diff where this node has been inserted into the VFS
+    pub fn to_created_diff(&self, parent_path: &VirtualPath) -> VfsDiff {
+        match self {
+            VfsNode::Dir(_) => VfsDiff::dir_created(self.path(parent_path)),
+            VfsNode::File(_) => VfsDiff::file_created(self.path(parent_path)),
+        }
+    }
+}
+
+impl<SyncInfo> VfsNode<NodeState<SyncInfo>> {
+    pub fn set_state(&mut self, state: NodeState<SyncInfo>) {
+        match self {
+            VfsNode::Dir(dir_tree) => *dir_tree.state_mut() = state,
+            VfsNode::File(file_meta) => *file_meta.state_mut() = state,
+        }
+    }
+
+    pub fn state(&self) -> &NodeState<SyncInfo> {
+        match self {
+            VfsNode::Dir(dir_tree) => dir_tree.state(),
+            VfsNode::File(file_meta) => file_meta.state(),
+        }
+    }
+
+    /// Extract the Ok state of the node, or panic
+    #[cfg(test)]
+    pub fn unwrap(self) -> VfsNode<SyncInfo> {
+        match self {
+            VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.unwrap()),
+            VfsNode::File(file_info) => VfsNode::File(file_info.unwrap()),
+        }
+    }
+
     /// Returns the list of errors for this node and its children
     pub fn get_errors_list(
         &self,
@@ -857,6 +950,20 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
     }
 
+    /// Compares the structure of trees.
+    ///
+    /// Two trees are structurally equals if they have the same shape and are composed of nodes with
+    /// the same names.
+    pub fn structural_eq<OtherSyncInfo>(&self, other: &StatefulVfsNode<OtherSyncInfo>) -> bool {
+        match (self, other) {
+            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.structural_eq(dother),
+            (VfsNode::Dir(_), VfsNode::File(_)) | (VfsNode::File(_), VfsNode::Dir(_)) => false,
+            (VfsNode::File(fself), VfsNode::File(fother)) => {
+                fself.name() == fother.name() && fself.state().matches(fother.state())
+            }
+        }
+    }
+
     /// Returns true if a node removal can be skipped because the node creation has not been applied
     /// on the other FS
     pub fn can_skip_removal(&self) -> bool {
@@ -865,25 +972,9 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         }
         false
     }
-
-    /// Creates a diff where this node has been removed from the VFS
-    pub fn to_removed_diff(&self, parent_path: &VirtualPath) -> VfsDiff {
-        match self {
-            VfsNode::Dir(_) => VfsDiff::dir_removed(self.path(parent_path)),
-            VfsNode::File(_) => VfsDiff::file_removed(self.path(parent_path)),
-        }
-    }
-
-    /// Creates a diff where this node has been inserted into the VFS
-    pub fn to_created_diff(&self, parent_path: &VirtualPath) -> VfsDiff {
-        match self {
-            VfsNode::Dir(_) => VfsDiff::dir_created(self.path(parent_path)),
-            VfsNode::File(_) => VfsDiff::file_created(self.path(parent_path)),
-        }
-    }
 }
 
-impl<SyncInfo: IsModified + Debug> VfsNode<SyncInfo> {
+impl<SyncInfo: IsModified + Debug> StatefulVfsNode<SyncInfo> {
     /// Diff two nodes based on their content.
     ///
     /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem.g
@@ -905,11 +996,16 @@ impl<SyncInfo: IsModified + Debug> VfsNode<SyncInfo> {
             return Ok(VfsDiffList::from_vec(vec![failed_update.update().clone()]));
         }
 
+        // If the node is in conflict state, we skip it
+        if let NodeState::Conflict(_) = self.state() {
+            return Ok(VfsDiffList::new());
+        }
+
         match (self, other) {
             (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.diff(dother, parent_path),
             (VfsNode::File(fself), VfsNode::File(fother)) => {
                 // Diff the file based on their sync info
-                if fself.state().is_modified(fother.state()) {
+                if fself.state().is_modified(fother.metadata()) {
                     let mut file_path = parent_path.to_owned();
                     file_path.push(fself.name());
 
@@ -928,8 +1024,8 @@ impl<SyncInfo: IsModified + Debug> VfsNode<SyncInfo> {
 }
 
 // Converts into a generic node by dropping the backend specific sync info
-impl<SyncInfo> From<&VfsNode<SyncInfo>> for VfsNode<()> {
-    fn from(value: &VfsNode<SyncInfo>) -> Self {
+impl<SyncInfo> From<&StatefulVfsNode<SyncInfo>> for StatefulVfsNode<()> {
+    fn from(value: &StatefulVfsNode<SyncInfo>) -> Self {
         match value {
             VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.into()),
             VfsNode::File(file_meta) => VfsNode::File(file_meta.into()),
@@ -937,8 +1033,8 @@ impl<SyncInfo> From<&VfsNode<SyncInfo>> for VfsNode<()> {
     }
 }
 
-impl<SyncInfo: ToBytes> From<&VfsNode<SyncInfo>> for VfsNode<Vec<u8>> {
-    fn from(value: &VfsNode<SyncInfo>) -> Self {
+impl<SyncInfo: ToBytes> From<&StatefulVfsNode<SyncInfo>> for StatefulVfsNode<Vec<u8>> {
+    fn from(value: &StatefulVfsNode<SyncInfo>) -> Self {
         match value {
             VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.into()),
             VfsNode::File(file_meta) => VfsNode::File(file_meta.into()),
@@ -946,10 +1042,10 @@ impl<SyncInfo: ToBytes> From<&VfsNode<SyncInfo>> for VfsNode<Vec<u8>> {
     }
 }
 
-impl<SyncInfo: TryFromBytes> TryFrom<VfsNode<Vec<u8>>> for VfsNode<SyncInfo> {
+impl<SyncInfo: TryFromBytes> TryFrom<StatefulVfsNode<Vec<u8>>> for StatefulVfsNode<SyncInfo> {
     type Error = InvalidByteSyncInfo;
 
-    fn try_from(value: VfsNode<Vec<u8>>) -> Result<Self, Self::Error> {
+    fn try_from(value: StatefulVfsNode<Vec<u8>>) -> Result<Self, Self::Error> {
         Ok(match value {
             VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.try_into()?),
             VfsNode::File(file_meta) => VfsNode::File(file_meta.try_into()?),
@@ -1210,7 +1306,8 @@ mod test {
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_recursive_diff();
+        .into_node_recursive_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1230,7 +1327,8 @@ mod test {
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_recursive_diff();
+        .into_node_recursive_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1250,7 +1348,8 @@ mod test {
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_recursive_diff();
+        .into_node_recursive_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1271,7 +1370,8 @@ mod test {
                 DH("a", 14, vec![DH("bc", 15, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_recursive_diff();
+        .into_node_recursive_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1305,7 +1405,8 @@ mod test {
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_shallow_diff();
+        .into_node_shallow_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1325,7 +1426,8 @@ mod test {
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_shallow_diff();
+        .into_node_shallow_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1345,7 +1447,8 @@ mod test {
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_shallow_diff();
+        .into_node_shallow_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1366,7 +1469,8 @@ mod test {
                 DH("a", 14, vec![DH("bc", 15, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node_shallow_diff();
+        .into_node_shallow_diff()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 
@@ -1401,7 +1505,8 @@ mod test {
                 DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
 

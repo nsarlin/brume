@@ -25,7 +25,9 @@ use crate::update::{
     AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, FailedUpdateApplication, IsModified,
     ReconciledUpdate, ReconciliationError, UpdateKind, VfsDiff, VirtualReconciledUpdate,
 };
-use crate::vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath, VirtualPathBuf};
+use crate::vfs::{
+    DirTree, FileInfo, InvalidPathError, StatefulDirTree, Vfs, VfsNode, VirtualPath, VirtualPathBuf,
+};
 
 /// The sync info stored in bytes is invalid
 #[derive(Error, Debug)]
@@ -67,7 +69,7 @@ impl TryFromBytes for () {
 /// This type holds the list of nodes that were successfully cloned and the one that resulted in an
 /// error.
 pub struct ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> {
-    success: Option<(DirTree<SrcSyncInfo>, DirTree<DstSyncInfo>)>,
+    success: Option<(StatefulDirTree<SrcSyncInfo>, StatefulDirTree<DstSyncInfo>)>,
     failures: Vec<FailedUpdateApplication>,
 }
 
@@ -84,8 +86,8 @@ impl<SrcSyncInfo, DstSyncInfo> ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> 
     }
 
     fn new(
-        src_success: DirTree<SrcSyncInfo>,
-        dst_success: DirTree<DstSyncInfo>,
+        src_success: StatefulDirTree<SrcSyncInfo>,
+        dst_success: StatefulDirTree<DstSyncInfo>,
         failures: Vec<FailedUpdateApplication>,
     ) -> Self {
         Self {
@@ -95,7 +97,9 @@ impl<SrcSyncInfo, DstSyncInfo> ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> 
     }
 
     /// Returns the successfully cloned nodes, if any, sorted in a [`DirTree`]
-    pub fn take_success(&mut self) -> Option<(DirTree<SrcSyncInfo>, DirTree<DstSyncInfo>)> {
+    pub fn take_success(
+        &mut self,
+    ) -> Option<(StatefulDirTree<SrcSyncInfo>, StatefulDirTree<DstSyncInfo>)> {
         self.success.take()
     }
 
@@ -213,6 +217,8 @@ impl<T: FSBackend> Named for T {
 ///
 /// It holds up-to-date values for the syncinfo on the source and destination filesystems, that can
 /// be used to update the [`Vfs`] accordingly.
+///
+/// [`Vfs`]: crate::vfs::Vfs
 pub struct ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo> {
     src_file_info: SrcSyncInfo,
     dst_file_info: DstSyncInfo,
@@ -314,8 +320,8 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             }
         };
 
-        let mut dst_dir = DirTree::new(path.name(), dst_info);
-        let mut src_dir = DirTree::new(path.name(), src_info);
+        let mut dst_dir = DirTree::new_ok(path.name(), dst_info);
+        let mut src_dir = DirTree::new_ok(path.name(), src_info);
         let mut errors = Vec::new();
 
         let children: Vec<_> = ref_dir
@@ -349,9 +355,9 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                             let size = clone_result.file_size();
                             let (src_info, dst_info) = clone_result.into();
                             let src_node =
-                                VfsNode::File(FileMeta::new(child_path.name(), size, src_info));
+                                VfsNode::File(FileInfo::new_ok(child_path.name(), size, src_info));
                             let dst_node =
-                                VfsNode::File(FileMeta::new(child_path.name(), size, dst_info));
+                                VfsNode::File(FileInfo::new_ok(child_path.name(), size, dst_info));
                             (Some((src_node, dst_node)), Vec::new())
                         }
                         Err(error) => {

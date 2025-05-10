@@ -30,9 +30,7 @@ use crate::{
     Error, NameMismatchError,
     concrete::{ConcreteFileCloneResult, FsBackendError, Named, ToBytes},
     sorted_vec::{Sortable, SortedVec},
-    vfs::{
-        DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
-    },
+    vfs::{DeleteNodeError, InvalidPathError, StatefulDirTree, Vfs, VirtualPath, VirtualPathBuf},
 };
 
 /// Error encountered during a diff operation
@@ -59,6 +57,8 @@ pub enum VfsUpdateApplicationError {
     PathIsRoot,
     #[error("failed to delete a node")]
     DeleteError(#[from] DeleteNodeError),
+    #[error("the reference VFS is missing from the synchro")]
+    MissingReferenceVfs,
 }
 
 #[derive(Error, Debug)]
@@ -130,22 +130,6 @@ pub trait IsModified {
     }
 }
 
-impl<SyncInfo: IsModified> IsModified for NodeState<SyncInfo> {
-    fn modification_state(&self, reference: &Self) -> ModificationState {
-        match (self, reference) {
-            (NodeState::Ok(self_sync), NodeState::Ok(other_sync)) => {
-                self_sync.modification_state(other_sync)
-            }
-            // Skip nodes in conflict until the conflicts are resolved
-            (NodeState::Conflict(_), _) | (_, NodeState::Conflict(_)) => {
-                ModificationState::ShallowUnmodified
-            }
-            // If at least one node is in error or wants a resync, we return modified
-            _ => ModificationState::Modified,
-        }
-    }
-}
-
 /// The kinds of fs modifications that can be represented in an update
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum UpdateKind {
@@ -200,6 +184,8 @@ impl UpdateTarget {
 }
 
 /// A single diff on a vfs node, returned by [`Vfs::diff`]
+///
+/// [`Vfs::diff`]: crate::vfs::Vfs::diff
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VfsDiff {
     path: VirtualPathBuf, // Field order is important for the "Ord" impl
@@ -734,8 +720,8 @@ impl SortedVec<ReconciledUpdate> {
 #[derive(Clone, Debug)]
 pub struct AppliedDirCreation<SrcSyncInfo, DstSyncInfo> {
     path: VirtualPathBuf,
-    src_dir: DirTree<SrcSyncInfo>,
-    dst_dir: DirTree<DstSyncInfo>,
+    src_dir: StatefulDirTree<SrcSyncInfo>,
+    dst_dir: StatefulDirTree<DstSyncInfo>,
 }
 
 impl<SrcSyncInfo, DstSyncInfo> AppliedDirCreation<SrcSyncInfo, DstSyncInfo> {
@@ -745,8 +731,8 @@ impl<SrcSyncInfo, DstSyncInfo> AppliedDirCreation<SrcSyncInfo, DstSyncInfo> {
     /// root dir, it always exist.
     pub fn new(
         parent_path: &VirtualPath,
-        src_dir: DirTree<SrcSyncInfo>,
-        dst_dir: DirTree<DstSyncInfo>,
+        src_dir: StatefulDirTree<SrcSyncInfo>,
+        dst_dir: StatefulDirTree<DstSyncInfo>,
     ) -> Self {
         let name = src_dir.name();
         let mut path = parent_path.to_owned();
@@ -956,7 +942,7 @@ impl FailedUpdateApplication {
 #[derive(Clone, Debug)]
 pub struct VfsDirCreation<SyncInfo> {
     path: VirtualPathBuf,
-    dir: DirTree<SyncInfo>,
+    dir: StatefulDirTree<SyncInfo>,
 }
 
 impl<SyncInfo> VfsDirCreation<SyncInfo> {
@@ -964,7 +950,7 @@ impl<SyncInfo> VfsDirCreation<SyncInfo> {
     ///
     /// `parent_path` is the path to the parent of the created dir. Since an update cannot create a
     /// root dir, it always exist.
-    pub fn new(parent_path: &VirtualPath, dir: DirTree<SyncInfo>) -> Self {
+    pub fn new(parent_path: &VirtualPath, dir: StatefulDirTree<SyncInfo>) -> Self {
         let name = dir.name();
         let mut path = parent_path.to_owned();
         path.push(name);
@@ -979,12 +965,12 @@ impl<SyncInfo> VfsDirCreation<SyncInfo> {
         &self.path
     }
 
-    pub fn dir(&self) -> &DirTree<SyncInfo> {
+    pub fn dir(&self) -> &StatefulDirTree<SyncInfo> {
         &self.dir
     }
 }
 
-impl<SyncInfo> From<VfsDirCreation<SyncInfo>> for DirTree<SyncInfo> {
+impl<SyncInfo> From<VfsDirCreation<SyncInfo>> for StatefulDirTree<SyncInfo> {
     fn from(value: VfsDirCreation<SyncInfo>) -> Self {
         value.dir
     }
@@ -1043,6 +1029,8 @@ impl<SyncInfo: ToBytes> From<VfsFileUpdate<SyncInfo>> for VfsFileUpdate<Vec<u8>>
 }
 
 /// An update that can be applied to the [`Vfs`] at the end of the update lifecycle.
+///
+/// [`Vfs`]: crate::vfs::Vfs
 #[derive(Debug)]
 pub enum VfsUpdate<SyncInfo> {
     DirCreated(VfsDirCreation<SyncInfo>),

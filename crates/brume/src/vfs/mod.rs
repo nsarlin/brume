@@ -27,44 +27,45 @@ use crate::{
 /// - Detecting [`updates`] by comparing its structure and metadata at different points in time
 /// - Storing status information such as errors or conflicts
 ///
-/// `SyncInfo` is a metadata type that will be stored with FS nodes and used for more efficient VFS
+/// `Meta` is a metadata type that will be stored with FS nodes and used for more efficient VFS
 /// comparison, using their implementation of the [`IsModified`] trait.
 ///
 /// [`updates`]: crate::update
 #[derive(Debug, Clone)]
-pub struct Vfs<SyncInfo> {
-    root: VfsNode<SyncInfo>,
+pub struct Vfs<Meta> {
+    root: VfsNode<Meta>,
 }
 
-impl<SyncInfo> Vfs<SyncInfo> {
+/// A [`Vfs`] storing a [`NodeState`] inside each nodes
+pub type StatefulVfs<SyncInfo> = Vfs<NodeState<SyncInfo>>;
+
+impl<Meta> Vfs<Meta> {
+    pub fn new(root: VfsNode<Meta>) -> Self {
+        Self { root }
+    }
+
     /// Return the root node of the VFS
-    pub fn root(&self) -> &VfsNode<SyncInfo> {
+    pub fn root(&self) -> &VfsNode<Meta> {
         &self.root
     }
 
     /// Returns a mutable access to the root node of the VFS
-    pub fn root_mut(&mut self) -> &mut VfsNode<SyncInfo> {
+    pub fn root_mut(&mut self) -> &mut VfsNode<Meta> {
         &mut self.root
     }
 
-    /// Structural comparison of two VFS, looking at the names of files and directories, but
-    /// ignoring the content of files.
-    pub fn structural_eq<OtherSyncInfo>(&self, other: &Vfs<OtherSyncInfo>) -> bool {
-        self.root.structural_eq(other.root())
-    }
-
     /// Returns the dir at `path` in the VFS
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<SyncInfo>, InvalidPathError> {
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Meta>, InvalidPathError> {
         self.root.find_dir(path)
     }
 
     /// Returns the file at `path` in the VFS
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileMeta<SyncInfo>, InvalidPathError> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Meta>, InvalidPathError> {
         self.root.find_file(path)
     }
 
     /// Returns the node at `path` in the VFS
-    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<SyncInfo>> {
+    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<Meta>> {
         self.root.find_node(path)
     }
 
@@ -72,7 +73,7 @@ impl<SyncInfo> Vfs<SyncInfo> {
     pub fn find_dir_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut DirTree<SyncInfo>, InvalidPathError> {
+    ) -> Result<&mut DirTree<Meta>, InvalidPathError> {
         self.root.find_dir_mut(path)
     }
 
@@ -80,15 +81,17 @@ impl<SyncInfo> Vfs<SyncInfo> {
     pub fn find_file_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut FileMeta<SyncInfo>, InvalidPathError> {
+    ) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
         self.root.find_file_mut(path)
     }
 
     /// Returns the node at `path` in the VFS, as mutable
-    pub fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<SyncInfo>> {
+    pub fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Meta>> {
         self.root.find_node_mut(path)
     }
+}
 
+impl<SyncInfo> StatefulVfs<SyncInfo> {
     /// Returns the update inside a node that is in conflict state
     pub fn find_conflict(&self, path: &VirtualPath) -> Option<&VfsDiff> {
         let node = self.find_node(path)?;
@@ -98,9 +101,31 @@ impl<SyncInfo> Vfs<SyncInfo> {
             _ => None,
         }
     }
+
+    /// Structural comparison of two VFS, looking at the names of files and directories, but
+    /// ignoring the content of files.
+    pub fn structural_eq<OtherSyncInfo>(&self, other: &StatefulVfs<OtherSyncInfo>) -> bool {
+        self.root.structural_eq(other.root())
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            root: VfsNode::Dir(DirTree::new_force_resync("")),
+        }
+    }
+
+    /// Returns the list of nodes with error from the concrete FS
+    pub fn get_errors(&self) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
+        self.root().get_errors_list(VirtualPath::root())
+    }
+
+    /// Returns the list of nodes with a conflict that should be manually resolved
+    pub fn get_conflicts(&self) -> Vec<VirtualPathBuf> {
+        self.root().get_conflicts_list(VirtualPath::root())
+    }
 }
 
-impl<SyncInfo: Clone> Vfs<SyncInfo> {
+impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
     /// Applies an update to the Vfs, by adding or removing nodes.
     ///
     /// The created or modified nodes uses the SyncInfo from the [`VfsUpdate`].
@@ -147,10 +172,10 @@ impl<SyncInfo: Clone> Vfs<SyncInfo> {
                 .delete_dir(path)
                 .map_err(|e| e.into()),
             VfsUpdate::FileCreated(update) => {
-                let child = VfsNode::File(FileMeta::new(
+                let child = VfsNode::File(FileInfo::new(
                     path.name(),
                     update.file_size(),
-                    update.sync_info().clone(),
+                    NodeState::Ok(update.sync_info().clone()),
                 ));
                 if parent.insert_child(child) {
                     Ok(())
@@ -173,15 +198,15 @@ impl<SyncInfo: Clone> Vfs<SyncInfo> {
             VfsUpdate::FailedApplication(failure) => {
                 let mut node = loaded_vfs
                     .find_node(failure.path())
+                    .map(|node| node.clone().as_ok())
                     // If not found on the loaded vfs, it might have been removed so we try to get
                     // the node on the status one
-                    .or_else(|| self.find_node(failure.path()))
+                    .or_else(|| self.find_node(failure.path()).cloned())
                     .ok_or_else(|| {
                         VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(
                             failure.path().to_owned(),
                         ))
-                    })?
-                    .clone();
+                    })?;
 
                 let state = NodeState::Error(failure.clone());
                 node.set_state(state);
@@ -198,15 +223,15 @@ impl<SyncInfo: Clone> Vfs<SyncInfo> {
             VfsUpdate::Conflict(update) => {
                 let mut node = loaded_vfs
                     .find_node(update.path())
+                    .map(|node| node.clone().as_ok())
                     // If not found on the loaded vfs, it might have been removed so we try to get
                     // the node on the status one
-                    .or_else(|| self.find_node(update.path()))
+                    .or_else(|| self.find_node(update.path()).cloned())
                     .ok_or_else(|| {
                         VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(
                             update.path().to_owned(),
                         ))
-                    })?
-                    .clone();
+                    })?;
 
                 let state = NodeState::Conflict(update.clone());
                 node.set_state(state);
@@ -246,7 +271,7 @@ impl<SyncInfo: Clone> Vfs<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified + Clone + Debug> Vfs<SyncInfo> {
+impl<SyncInfo: IsModified + Clone + Debug> StatefulVfs<SyncInfo> {
     /// Diff two VFS by comparing their nodes.
     ///
     /// This function returns a sorted list of [`VfsDiff`].
@@ -259,47 +284,25 @@ impl<SyncInfo: IsModified + Clone + Debug> Vfs<SyncInfo> {
     }
 }
 
-impl<SyncInfo> Vfs<SyncInfo> {
-    pub fn new(root: VfsNode<SyncInfo>) -> Self {
-        Self { root }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            root: VfsNode::Dir(DirTree::new_force_resync("")),
-        }
-    }
-
-    /// Returns the list of nodes with error from the concrete FS
-    pub fn get_errors(&self) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
-        self.root().get_errors_list(VirtualPath::root())
-    }
-
-    /// Returns the list of nodes with a conflict that should be manually resolved
-    pub fn get_conflicts(&self) -> Vec<VirtualPathBuf> {
-        self.root().get_conflicts_list(VirtualPath::root())
-    }
-}
-
 // Converts into a generic vfs by dropping the backend specific sync info
-impl<SyncInfo> From<&Vfs<SyncInfo>> for Vfs<()> {
-    fn from(value: &Vfs<SyncInfo>) -> Self {
+impl<SyncInfo> From<&StatefulVfs<SyncInfo>> for StatefulVfs<()> {
+    fn from(value: &StatefulVfs<SyncInfo>) -> Self {
         Self {
             root: (&value.root).into(),
         }
     }
 }
 
-impl<SyncInfo: ToBytes> From<&Vfs<SyncInfo>> for Vfs<Vec<u8>> {
-    fn from(value: &Vfs<SyncInfo>) -> Self {
+impl<SyncInfo: ToBytes> From<&StatefulVfs<SyncInfo>> for StatefulVfs<Vec<u8>> {
+    fn from(value: &StatefulVfs<SyncInfo>) -> Self {
         Vfs::new((&value.root).into())
     }
 }
 
-impl<SyncInfo: TryFromBytes> TryFrom<Vfs<Vec<u8>>> for Vfs<SyncInfo> {
+impl<SyncInfo: TryFromBytes> TryFrom<StatefulVfs<Vec<u8>>> for StatefulVfs<SyncInfo> {
     type Error = InvalidByteSyncInfo;
 
-    fn try_from(value: Vfs<Vec<u8>>) -> Result<Self, Self::Error> {
+    fn try_from(value: StatefulVfs<Vec<u8>>) -> Result<Self, Self::Error> {
         value.root.try_into().map(Vfs::new)
     }
 }
@@ -343,7 +346,8 @@ mod test {
                 ),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
         let update = VfsUpdate::DirCreated(VfsDirCreation::new(
@@ -367,7 +371,8 @@ mod test {
                 D("e", vec![]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let update = VfsUpdate::DirRemoved(VirtualPathBuf::new("/e/g").unwrap());
         let ref_vfs = Vfs::new(updated);
@@ -387,7 +392,8 @@ mod test {
                 D("e", vec![D("g", vec![F("tmp.txt"), F("file.bin")])]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
@@ -412,7 +418,8 @@ mod test {
                 D("e", vec![D("g", vec![F("tmp.txt")])]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = VfsUpdate::FileModified(VfsFileUpdate::new(
@@ -437,7 +444,8 @@ mod test {
                 D("e", vec![D("g", vec![F("tmp.txt")])]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f2.pdf").unwrap());
         let ref_vfs = Vfs::new(updated);
@@ -473,7 +481,8 @@ mod test {
                 D("h", vec![F("file.bin"), D("i", vec![])]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
         let update = VfsUpdate::DirCreated(VfsDirCreation::new(
@@ -496,7 +505,8 @@ mod test {
                 D("a", vec![D("b", vec![D("c", vec![])])]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let update = VfsUpdate::DirRemoved(VirtualPathBuf::new("/e").unwrap());
         let ref_vfs = Vfs::new(updated);
@@ -508,7 +518,7 @@ mod test {
         // Test file creation
         let mut vfs = Vfs::new(base.clone());
 
-        let updated = D(
+        let base = D(
             "",
             vec![
                 D("Doc", vec![F("f1.md"), F("f2.pdf")]),
@@ -518,6 +528,7 @@ mod test {
             ],
         )
         .into_node();
+        let updated = base.clone().unwrap();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
@@ -532,7 +543,7 @@ mod test {
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
         // Test file modification
-        let mut vfs = ref_vfs;
+        let mut vfs = Vfs::new(base.clone());
 
         let new_file_info = ShallowTestSyncInfo::new(0);
         let update = VfsUpdate::FileModified(VfsFileUpdate::new(
@@ -547,7 +558,7 @@ mod test {
         assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
 
         // Test file removal
-        let mut vfs = ref_vfs;
+        let mut vfs = Vfs::new(base);
         let updated = D(
             "",
             vec![
@@ -556,7 +567,8 @@ mod test {
                 D("e", vec![D("g", vec![F("tmp.txt")])]),
             ],
         )
-        .into_node();
+        .into_node()
+        .unwrap();
 
         let ref_vfs = Vfs::new(updated);
 
@@ -581,7 +593,7 @@ mod test {
 
         // Test invalid path
         let mut vfs = Vfs::new(base.clone());
-        let ref_vfs = Vfs::new(base.clone());
+        let ref_vfs = Vfs::new(base.clone().unwrap());
 
         let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/e/f/h").unwrap());
 
