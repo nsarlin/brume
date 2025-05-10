@@ -996,9 +996,9 @@ impl<SyncInfo: IsModified + Debug> StatefulVfsNode<SyncInfo> {
             return Ok(VfsDiffList::from_vec(vec![failed_update.update().clone()]));
         }
 
-        // If the node is in conflict state, we skip it
-        if let NodeState::Conflict(_) = self.state() {
-            return Ok(VfsDiffList::new());
+        // If the node is in conflict, we retry it
+        if let NodeState::Conflict(diff) = self.state() {
+            return Ok(VfsDiffList::from_vec(vec![diff.clone()]));
         }
 
         match (self, other) {
