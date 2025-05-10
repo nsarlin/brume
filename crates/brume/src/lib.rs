@@ -1,20 +1,32 @@
-use std::fmt::Display;
-
+use brume_vfs::{
+    InvalidPathError,
+    update::{MergeError, VfsUpdateApplicationError},
+};
 use concrete::{ConcreteUpdateApplicationError, FSBackend};
 use filesystem::VfsReloadError;
+use synchro::ReconciliationError;
 use thiserror::Error;
-use update::{ReconciliationError, VfsUpdateApplicationError};
-use vfs::InvalidPathError;
 
 pub mod concrete;
 pub mod filesystem;
-pub mod sorted_vec;
 pub mod synchro;
-pub mod update;
-pub mod vfs;
 
 #[cfg(test)]
 mod test_utils;
+
+pub mod vfs {
+    pub use brume_vfs::*;
+}
+
+pub mod update {
+    pub use brume_vfs::update::*;
+}
+
+pub mod sorted_vec {
+    pub use brume_vfs::sorted_vec::*;
+}
+
+pub use brume_vfs::Named;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -78,18 +90,8 @@ impl Error {
     }
 }
 
-#[derive(Error, Debug)]
-pub struct NameMismatchError {
-    pub found: String,
-    pub expected: String,
-}
-
-impl Display for NameMismatchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "name mismatch, expected {}, got {}",
-            self.expected, self.found
-        )
+impl From<MergeError> for Error {
+    fn from(value: MergeError) -> Self {
+        Self::ReconciliationFailed(value.into())
     }
 }

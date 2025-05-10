@@ -4,22 +4,80 @@
 //! concrete filesystem behind it.
 
 pub mod dir_tree;
-
+pub mod sorted_vec;
+pub mod update;
 pub mod virtual_path;
 
-use std::fmt::Debug;
+#[cfg(test)]
+mod test_utils;
+
+use std::fmt::{Debug, Display};
+
+use thiserror::Error;
 
 pub use dir_tree::*;
 pub use virtual_path::*;
 
-use crate::{
-    NameMismatchError,
-    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
-    update::{
-        DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList, VfsUpdate,
-        VfsUpdateApplicationError,
-    },
+use crate::update::{
+    DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList, VfsUpdate,
+    VfsUpdateApplicationError,
 };
+
+#[derive(Error, Debug)]
+pub struct NameMismatchError {
+    pub found: String,
+    pub expected: String,
+}
+
+impl Display for NameMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "name mismatch, expected {}, got {}",
+            self.expected, self.found
+        )
+    }
+}
+
+/// The sync info stored in bytes is invalid
+#[derive(Error, Debug)]
+#[error("Failed to load SyncInfo from raw bytes")]
+pub struct InvalidByteSyncInfo;
+
+/// A SyncInfo that can be converted to bytes
+///
+/// This allows application to store it regardless of its concrete type
+pub trait ToBytes {
+    fn to_bytes(&self) -> Vec<u8>;
+}
+
+impl ToBytes for () {
+    fn to_bytes(&self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
+/// A SyncInfo that can be created from bytes
+///
+/// This allows application to load it regardless of its concrete type
+pub trait TryFromBytes: Sized {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo>;
+}
+
+impl TryFromBytes for () {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+        if bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(InvalidByteSyncInfo)
+        }
+    }
+}
+
+/// Human readable name of a type, for user errors
+pub trait Named {
+    const TYPE_NAME: &'static str;
+}
 
 /// The virtual in-memory representation of a file system.
 ///

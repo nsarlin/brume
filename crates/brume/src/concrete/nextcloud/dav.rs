@@ -20,13 +20,15 @@ pub enum TagError {
     InvalidTag(String),
 }
 
-impl Sortable for ListEntity {
+struct DavNode(ListEntity);
+
+impl Sortable for DavNode {
     type Key = str;
 
     // By sorting the paths lexicographically, we make sure that children nodes are right after the
     // directory that contain them.
     fn key(&self) -> &Self::Key {
-        dav_entity_href(self)
+        dav_entity_href(&self.0)
     }
 }
 
@@ -36,10 +38,10 @@ pub(crate) fn dav_parse_vfs(
     entities: Vec<ListEntity>,
     folder_name: &str,
 ) -> Result<VfsNode<NextcloudSyncInfo>, NextcloudFsError> {
-    let entities = SortedVec::from_vec(entities);
+    let entities = SortedVec::from_vec(entities.into_iter().map(DavNode).collect());
 
-    let mut entities_iter = entities.into_iter().map(|entity| DavEntity {
-        entity,
+    let mut entities_iter = entities.into_iter().map(|node| DavEntity {
+        entity: node.0,
         folder_name: folder_name.to_string(),
     });
 

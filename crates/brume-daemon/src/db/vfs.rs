@@ -468,10 +468,8 @@ impl Database {
 
 #[cfg(test)]
 mod test {
-    use std::io::{self, ErrorKind};
 
     use brume::{
-        concrete::local::LocalDirError,
         update::{FailedUpdateApplication, VfsDiff, VfsDirCreation, VfsFileUpdate, VfsUpdate},
         vfs::{DirTree, FileMeta, NodeKind, VfsNode},
     };
@@ -595,14 +593,7 @@ mod test {
         assert_eq!(node.size, Some(54));
 
         let diff = VfsDiff::file_modified(VirtualPathBuf::new("/a/b/f2").unwrap());
-        let failed_diff = FailedUpdateApplication::new(
-            diff.clone(),
-            LocalDirError::io(
-                VirtualPathBuf::new("/a/b/f2").unwrap(),
-                io::Error::new(ErrorKind::AlreadyExists, "Error"),
-            )
-            .into(),
-        );
+        let failed_diff = FailedUpdateApplication::new(diff.clone(), String::from("Error"));
 
         let failed_update = VfsUpdate::FailedApplication(failed_diff);
         db.update_vfs(fs_ref.id(), &failed_update).await.unwrap();

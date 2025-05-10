@@ -5,6 +5,7 @@ members = [
 	"crates/brume",
 	"crates/brume-daemon",
 	"crates/brume-daemon-proto",
+	"crates/brume-vfs",
 ]
 resolver = "2"
 

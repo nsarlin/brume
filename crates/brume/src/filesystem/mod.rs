@@ -3,12 +3,13 @@
 use log::{debug, error};
 use thiserror::Error;
 
-use crate::{
-    concrete::{ConcreteFS, FSBackend, FsBackendError},
+use brume_vfs::{
+    DirTree, InvalidPathError, NodeState, Vfs, VirtualPath,
     sorted_vec::SortedVec,
     update::{DiffError, VfsDiffList, VfsUpdate, VfsUpdateApplicationError},
-    vfs::{DirTree, InvalidPathError, NodeState, Vfs, VirtualPath},
 };
+
+use crate::concrete::{ConcreteFS, FSBackend, FsBackendError};
 
 #[derive(Error, Debug)]
 pub enum VfsReloadError {

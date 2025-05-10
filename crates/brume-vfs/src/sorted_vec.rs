@@ -281,8 +281,8 @@ impl<T: Clone + Sortable> SortedVec<T> {
 #[cfg(test)]
 mod test {
     use crate::{
+        dir_tree::NodeKind,
         test_utils::TestNode::{D, F},
-        vfs::dir_tree::NodeKind,
     };
 
     use super::SortedVec;

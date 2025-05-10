@@ -10,6 +10,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use brume_vfs::Named;
 use byte_counter::ByteCounterExt;
 use bytes::Bytes;
 use futures::future::{BoxFuture, join_all, try_join_all};
@@ -19,48 +20,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::filesystem::FileSystem;
-use crate::sorted_vec::SortedVec;
-use crate::update::{
+use brume_vfs::sorted_vec::SortedVec;
+use brume_vfs::update::{
     AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, FailedUpdateApplication, IsModified,
-    ReconciledUpdate, ReconciliationError, UpdateKind, VfsDiff, VirtualReconciledUpdate,
+    ReconciledUpdate, UpdateKind, VfsDiff, VirtualReconciledUpdate,
 };
+
+use crate::filesystem::FileSystem;
+use crate::synchro::ReconciliationError;
 use crate::vfs::{DirTree, FileMeta, InvalidPathError, Vfs, VfsNode, VirtualPath, VirtualPathBuf};
-
-/// The sync info stored in bytes is invalid
-#[derive(Error, Debug)]
-#[error("Failed to load SyncInfo from raw bytes")]
-pub struct InvalidByteSyncInfo;
-
-/// A SyncInfo that can be converted to bytes
-///
-/// This allows application to store it regardless of its concrete type
-pub trait ToBytes {
-    fn to_bytes(&self) -> Vec<u8>;
-}
-
-impl ToBytes for () {
-    fn to_bytes(&self) -> Vec<u8> {
-        Vec::new()
-    }
-}
-
-/// A SyncInfo that can be created from bytes
-///
-/// This allows application to load it regardless of its concrete type
-pub trait TryFromBytes: Sized {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo>;
-}
-
-impl TryFromBytes for () {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
-        if bytes.is_empty() {
-            Ok(())
-        } else {
-            Err(InvalidByteSyncInfo)
-        }
-    }
-}
 
 /// Returned by [`ConcreteFS::clone_dir`]
 ///
@@ -71,6 +39,10 @@ pub struct ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> {
     failures: Vec<FailedUpdateApplication>,
 }
 
+#[derive(Error, Debug, Clone)]
+#[error(transparent)]
+pub struct FsBackendError(Arc<dyn std::error::Error + Send + Sync>);
+
 impl<SrcSyncInfo, DstSyncInfo> ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> {
     /// Create a new Clone result for a mkdir that failed
     fn new_mkdir_failed<E: Into<FsBackendError>>(path: &VirtualPath, error: E) -> Self {
@@ -78,7 +50,7 @@ impl<SrcSyncInfo, DstSyncInfo> ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> 
             success: None,
             failures: vec![FailedUpdateApplication::new(
                 VfsDiff::dir_created(path.to_owned()),
-                error.into(),
+                error.into().to_string(),
             )],
         }
     }
@@ -105,10 +77,6 @@ impl<SrcSyncInfo, DstSyncInfo> ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> 
     }
 }
 
-#[derive(Error, Debug, Clone)]
-#[error(transparent)]
-pub struct FsBackendError(Arc<dyn std::error::Error + Send + Sync>);
-
 /// Error encountered while applying an update to a FSBackend
 #[derive(Error, Debug)]
 pub enum ConcreteUpdateApplicationError {
@@ -122,17 +90,12 @@ pub trait FsInstanceDescription: Display {
     fn name(&self) -> &str;
 }
 
-pub trait Named {
-    /// Human readable name of the filesystem type, for user errors
-    const TYPE_NAME: &'static str;
-}
-
 /// A backend is used by the [`ConcreteFS`] to perform io operations
 pub trait FSBackend:
     Named + TryFrom<Self::CreationInfo, Error = <Self as FSBackend>::IoError> + Send + Sync
 {
     /// Type used to detect updates on nodes of this filesystem. See [`IsModified`].
-    type SyncInfo: IsModified + Debug + Named + Clone + Send + Sync;
+    type SyncInfo: IsModified + Named + Debug + Clone + Send + Sync;
     /// Errors returned by this FileSystem type
     type IoError: Error + Send + Sync + 'static + Into<FsBackendError>;
     /// Info needed to create a new filesystem of this type (url, login,...)
@@ -205,10 +168,6 @@ pub trait FSBackend:
     fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>>;
 }
 
-impl<T: FSBackend> Named for T {
-    const TYPE_NAME: &'static str = T::SyncInfo::TYPE_NAME;
-}
-
 /// Return value of a successful [`ConcreteFS::clone_file`].
 ///
 /// It holds up-to-date values for the syncinfo on the source and destination filesystems, that can
@@ -230,6 +189,16 @@ impl<SrcSyncInfo, DstSyncInfo> ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>
 
     pub fn file_size(&self) -> u64 {
         self.file_size
+    }
+
+    pub fn into_applied_file_update(
+        self,
+        path: &VirtualPath,
+    ) -> AppliedFileUpdate<SrcSyncInfo, DstSyncInfo> {
+        let file_size = self.file_size();
+        let (src_file_info, dst_file_info) = self.into();
+
+        AppliedFileUpdate::new(path, file_size, src_file_info, dst_file_info)
     }
 }
 
@@ -357,7 +326,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                         Err(error) => {
                             let failure = FailedUpdateApplication::new(
                                 VfsDiff::file_created(child_path),
-                                error,
+                                error.to_string(),
                             );
                             (None, vec![failure])
                         }
@@ -487,7 +456,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                     .map(|_| AppliedUpdate::DirRemoved(path.to_owned()))
                     .or_else(|e| {
                         Ok(AppliedUpdate::FailedApplication(
-                            FailedUpdateApplication::new(update, e.into()),
+                            FailedUpdateApplication::new(update, e.to_string()),
                         ))
                     })
                     .map(|update| vec![update])
@@ -496,14 +465,11 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 .clone_file(ref_fs.concrete(), &path)
                 .await
                 .map(|clone_result| {
-                    AppliedUpdate::FileCreated(AppliedFileUpdate::from_clone_result(
-                        &path,
-                        clone_result,
-                    ))
+                    AppliedUpdate::FileCreated(clone_result.into_applied_file_update(&path))
                 })
                 .or_else(|e| {
                     Ok(AppliedUpdate::FailedApplication(
-                        FailedUpdateApplication::new(update, e),
+                        FailedUpdateApplication::new(update, e.to_string()),
                     ))
                 })
                 .map(|update| vec![update]),
@@ -511,14 +477,11 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 .clone_file(ref_fs.concrete(), &path)
                 .await
                 .map(|clone_result| {
-                    AppliedUpdate::FileModified(AppliedFileUpdate::from_clone_result(
-                        &path,
-                        clone_result,
-                    ))
+                    AppliedUpdate::FileModified(clone_result.into_applied_file_update(&path))
                 })
                 .or_else(|e| {
                     Ok(AppliedUpdate::FailedApplication(
-                        FailedUpdateApplication::new(update, e),
+                        FailedUpdateApplication::new(update, e.to_string()),
                     ))
                 })
                 .map(|update| vec![update]),
@@ -539,7 +502,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                     .map(|_| AppliedUpdate::FileRemoved(path))
                     .or_else(|e| {
                         Ok(AppliedUpdate::FailedApplication(
-                            FailedUpdateApplication::new(update, e.into()),
+                            FailedUpdateApplication::new(update, e.to_string()),
                         ))
                     })
                     .map(|update| vec![update])

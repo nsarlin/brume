@@ -8,15 +8,19 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use tokio::try_join;
 
+use brume_vfs::{
+    InvalidByteSyncInfo, InvalidPathError, NameMismatchError, NodeState, ToBytes, TryFromBytes,
+    Vfs, VirtualPath,
+    sorted_vec::SortedVec,
+    update::{
+        AppliedUpdate, DiffError, MergeError, ReconciledUpdate, VfsDiff, VfsDiffList, VfsUpdate,
+    },
+};
+
 use crate::{
     Error,
-    concrete::{
-        ConcreteUpdateApplicationError, FSBackend, InvalidByteSyncInfo, ToBytes, TryFromBytes,
-    },
+    concrete::{ConcreteUpdateApplicationError, FSBackend, FsBackendError},
     filesystem::FileSystem,
-    sorted_vec::SortedVec,
-    update::{AppliedUpdate, ReconciledUpdate, VfsDiff, VfsDiffList, VfsUpdate},
-    vfs::{NodeState, Vfs, VirtualPath},
 };
 
 #[derive(Debug)]
@@ -76,6 +80,45 @@ impl ConflictResolutionResult {
 
     pub fn status(&self) -> FullSyncStatus {
         self.status
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum ReconciliationError {
+    #[error("error from {fs_name} during reconciliation")]
+    FsBackendError {
+        fs_name: String,
+        source: FsBackendError,
+    },
+    #[error(
+        "the nodes in 'local' and 'remote' FS do not point to the same node and can't be reconciled"
+    )]
+    NodeMismatch(#[from] NameMismatchError),
+    #[error("invalid path on {fs_name} provided for reconciliation")]
+    InvalidPath {
+        fs_name: String,
+        source: InvalidPathError,
+    },
+    #[error("failed to diff vfs nodes")]
+    DiffError(#[from] DiffError),
+}
+
+impl ReconciliationError {
+    pub fn concrete<E: Into<FsBackendError>>(fs_name: &str, source: E) -> Self {
+        Self::FsBackendError {
+            fs_name: fs_name.to_string(),
+            source: source.into(),
+        }
+    }
+}
+
+impl From<MergeError> for ReconciliationError {
+    fn from(value: MergeError) -> Self {
+        match value {
+            MergeError::NodeMismatch(name_mismatch) => Self::NodeMismatch(name_mismatch),
+            MergeError::InvalidPath { fs_name, source } => Self::InvalidPath { fs_name, source },
+            MergeError::DiffError(diff_error) => Self::DiffError(diff_error),
+        }
     }
 }
 

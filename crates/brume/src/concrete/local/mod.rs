@@ -22,16 +22,15 @@ use tokio::{
 };
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::{
-    Error,
+use brume_vfs::{
+    DirTree, FileMeta, InvalidByteSyncInfo, Named, ToBytes, TryFromBytes, Vfs, VfsNode,
+    VirtualPath,
     update::{IsModified, ModificationState},
-    vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
 };
 
-use super::{
-    FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
-    TryFromBytes,
-};
+use crate::Error;
+
+use super::{FSBackend, FsBackendError, FsInstanceDescription};
 
 #[derive(Error, Debug)]
 pub enum LocalDirError {
@@ -117,6 +116,12 @@ impl LocalDir {
 
         self.path.join(trimmed)
     }
+}
+
+const LOCAL_FS_NAME: &str = "local FileSystem";
+
+impl Named for LocalDir {
+    const TYPE_NAME: &'static str = LOCAL_FS_NAME;
 }
 
 impl FSBackend for LocalDir {
@@ -293,6 +298,10 @@ pub struct LocalSyncInfo {
     last_modified: DateTime<Utc>,
 }
 
+impl Named for LocalSyncInfo {
+    const TYPE_NAME: &'static str = LOCAL_FS_NAME;
+}
+
 impl LocalSyncInfo {
     pub fn new(last_modified: DateTime<Utc>) -> Self {
         Self { last_modified }
@@ -321,10 +330,6 @@ impl IsModified for LocalSyncInfo {
             ModificationState::ShallowUnmodified
         }
     }
-}
-
-impl Named for LocalSyncInfo {
-    const TYPE_NAME: &'static str = "local FileSystem";
 }
 
 impl<'a> From<&'a LocalSyncInfo> for LocalSyncInfo {

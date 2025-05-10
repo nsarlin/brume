@@ -25,14 +25,12 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
-    Error, NameMismatchError,
-    concrete::{ConcreteFileCloneResult, FsBackendError, Named, ToBytes},
+    DeleteNodeError, DirTree, InvalidPathError, NameMismatchError, Named, NodeState, ToBytes, Vfs,
+    VirtualPath, VirtualPathBuf,
     sorted_vec::{Sortable, SortedVec},
-    vfs::{
-        DeleteNodeError, DirTree, InvalidPathError, NodeState, Vfs, VirtualPath, VirtualPathBuf,
-    },
 };
 
 /// Error encountered during a diff operation
@@ -62,12 +60,7 @@ pub enum VfsUpdateApplicationError {
 }
 
 #[derive(Error, Debug)]
-pub enum ReconciliationError {
-    #[error("error from {fs_name} during reconciliation")]
-    FsBackendError {
-        fs_name: String,
-        source: FsBackendError,
-    },
+pub enum MergeError {
     #[error(
         "the nodes in 'local' and 'remote' FS do not point to the same node and can't be reconciled"
     )]
@@ -81,14 +74,7 @@ pub enum ReconciliationError {
     DiffError(#[from] DiffError),
 }
 
-impl ReconciliationError {
-    pub fn concrete<E: Into<FsBackendError>>(fs_name: &str, source: E) -> Self {
-        Self::FsBackendError {
-            fs_name: fs_name.to_string(),
-            source: source.into(),
-        }
-    }
-
+impl MergeError {
     pub fn invalid_path<E: Into<InvalidPathError>>(fs_name: &str, source: E) -> Self {
         Self::InvalidPath {
             fs_name: fs_name.to_string(),
@@ -255,12 +241,12 @@ impl VfsDiff {
     /// This step is performed without access to the concrete filesystems. This means that only
     /// obvious conflicts are detected. Files that are modified on both fs will be flagged as
     /// `NeedBackendCheck` so they can be resolved later with concrete fs access.
-    fn merge<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
+    pub fn merge<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
         remote_update: &VfsDiff,
         vfs_local: &Vfs<LocalSyncInfo>,
         vfs_remote: &Vfs<RemoteSyncInfo>,
-    ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
+    ) -> Result<SortedVec<VirtualReconciledUpdate>, MergeError> {
         if self.path() != remote_update.path() {
             return Err(NameMismatchError {
                 found: self.path().name().to_string(),
@@ -269,7 +255,7 @@ impl VfsDiff {
             .into());
         }
 
-        let mut reconciled = SortedVec::new();
+        let mut merged = SortedVec::new();
 
         match (self.kind, remote_update.kind) {
             (UpdateKind::DirCreated, UpdateKind::DirCreated) => {
@@ -278,27 +264,27 @@ impl VfsDiff {
                 // nodes.
                 let dir_local = vfs_local
                     .find_dir(&self.path)
-                    .map_err(|e| ReconciliationError::invalid_path(LocalSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| MergeError::invalid_path(LocalSyncInfo::TYPE_NAME, e))?;
                 let dir_remote = vfs_remote
                     .find_dir(&remote_update.path)
-                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| MergeError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
-                let reconciled = dir_local.reconciliation_diff(
+                let reconciled = dir_local.merge_diff(
                     dir_remote,
                     self.path().parent().unwrap_or(VirtualPath::root()),
                 )?;
                 // Since we iterate on sorted updates, the result will be sorted too
                 Ok(reconciled)
             }
-            (UpdateKind::DirRemoved, UpdateKind::DirRemoved) => Ok(reconciled),
+            (UpdateKind::DirRemoved, UpdateKind::DirRemoved) => Ok(merged),
             (UpdateKind::FileModified, UpdateKind::FileModified)
             | (UpdateKind::FileCreated, UpdateKind::FileCreated) => {
                 let file_local = vfs_local
                     .find_file(&self.path)
-                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| MergeError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
                 let file_remote = vfs_remote
                     .find_file(&remote_update.path)
-                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| MergeError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
                 let update = if file_local.size() == file_remote.size() {
                     VirtualReconciledUpdate::backend_check_both(self)
@@ -306,15 +292,15 @@ impl VfsDiff {
                     VirtualReconciledUpdate::conflict_both(self)
                 };
 
-                reconciled.insert(update);
+                merged.insert(update);
 
-                Ok(reconciled)
+                Ok(merged)
             }
-            (UpdateKind::FileRemoved, UpdateKind::FileRemoved) => Ok(reconciled),
+            (UpdateKind::FileRemoved, UpdateKind::FileRemoved) => Ok(merged),
             (_, _) => {
-                reconciled.insert(VirtualReconciledUpdate::conflict_local(self));
-                reconciled.insert(VirtualReconciledUpdate::conflict_remote(remote_update));
-                Ok(reconciled)
+                merged.insert(VirtualReconciledUpdate::conflict_local(self));
+                merged.insert(VirtualReconciledUpdate::conflict_remote(remote_update));
+                Ok(merged)
             }
         }
     }
@@ -351,14 +337,13 @@ impl Sortable for VfsDiff {
 pub type VfsDiffList = SortedVec<VfsDiff>;
 
 impl VfsDiffList {
-    /// Merge two update lists by calling [`VfsDiff::reconcile`] on their elements one by
-    /// one
-    pub(crate) fn merge<SyncInfo: Named, RemoteSyncInfo: Named>(
+    /// Merge two update lists and detect duplicates
+    pub fn merge<SyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
         remote_updates: VfsDiffList,
         local_vfs: &Vfs<SyncInfo>,
         remote_vfs: &Vfs<RemoteSyncInfo>,
-    ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
+    ) -> Result<SortedVec<VirtualReconciledUpdate>, MergeError> {
         let res = self.iter_zip_map(
             &remote_updates,
             |local_item| {
@@ -562,7 +547,7 @@ impl SortedVec<ApplicableUpdate> {
 
 /// An update that has been reconciled based on VFS diff but needs a check against the concrete FS
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum VirtualReconciledUpdate {
+pub enum VirtualReconciledUpdate {
     Applicable(ApplicableUpdate),
     /// Updates in this state cannot be directly applied and need to be checked with concrete file
     /// access. The outcome of the check can be:
@@ -686,7 +671,7 @@ impl SortedVec<ReconciledUpdate> {
     ///
     /// For example, `DirRemoved("/a/b")` and `FileModified("/a/b/c/d")` will generate conflicts on
     /// both `/a/b` and `/a/b/c/d`.
-    pub(crate) fn resolve_ancestor_conflicts(self) -> Self {
+    pub fn resolve_ancestor_conflicts(self) -> Self {
         let mut resolved = Vec::new();
         let mut iter = self.into_iter().peekable();
 
@@ -804,15 +789,6 @@ impl<SrcSyncInfo, DstSyncInfo> AppliedFileUpdate<SrcSyncInfo, DstSyncInfo> {
             dst_file_info,
         }
     }
-
-    pub fn from_clone_result(
-        path: &VirtualPath,
-        clone_result: ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>,
-    ) -> Self {
-        let file_size = clone_result.file_size();
-        let (src_file_info, dst_file_info) = clone_result.into();
-        Self::new(path, file_size, src_file_info, dst_file_info)
-    }
 }
 
 impl<SrcSyncInfo, DstSyncInfo> From<AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>>
@@ -929,11 +905,8 @@ pub struct FailedUpdateApplication {
 }
 
 impl FailedUpdateApplication {
-    pub fn new(update: VfsDiff, error: FsBackendError) -> Self {
-        Self {
-            update,
-            error: format!("{error}"),
-        }
+    pub fn new(update: VfsDiff, error: String) -> Self {
+        Self { update, error }
     }
 
     pub fn path(&self) -> &VirtualPath {

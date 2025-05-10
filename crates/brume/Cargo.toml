@@ -26,5 +26,7 @@ thiserror = "2.0"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 
+brume-vfs = { path = "../brume-vfs" }
+
 [dev-dependencies]
 ron = "0.8"

@@ -2,10 +2,9 @@
 
 use std::{collections::HashMap, fmt::Display};
 
-use brume::concrete::{
-    FSBackend, FsInstanceDescription, Named, local::LocalDir, nextcloud::Nextcloud,
-};
+use brume::concrete::{FSBackend, FsInstanceDescription, local::LocalDir, nextcloud::Nextcloud};
 
+use brume::Named;
 use brume::synchro::FullSyncStatus;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

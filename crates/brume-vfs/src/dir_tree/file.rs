@@ -1,7 +1,4 @@
-use crate::{
-    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
-    update::FailedUpdateApplication,
-};
+use crate::{InvalidByteSyncInfo, ToBytes, TryFromBytes, update::FailedUpdateApplication};
 
 use super::NodeState;
 

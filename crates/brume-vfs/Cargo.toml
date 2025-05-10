@@ -1,0 +1,19 @@
+[package]
+name = "brume-vfs"
+description = "Definition of the Virtual Filesystem used by Brume"
+edition = "2024"
+
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

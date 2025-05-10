@@ -11,8 +11,7 @@ pub use file::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, NameMismatchError,
-    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
+    Error, InvalidByteSyncInfo, NameMismatchError, ToBytes, TryFromBytes,
     sorted_vec::{Sortable, SortedVec},
     update::{FailedUpdateApplication, ModificationState, VirtualReconciledUpdate},
 };
@@ -373,7 +372,7 @@ impl<SyncInfo> DirTree<SyncInfo> {
     ///
     /// This will perform a structural diff between both trees, and return a
     /// [`VirtualReconciledUpdate::NeedBackendCheck`] when two files with the same name are found.
-    pub(crate) fn reconciliation_diff<OtherSyncInfo>(
+    pub(crate) fn merge_diff<OtherSyncInfo>(
         &self,
         other: &DirTree<OtherSyncInfo>,
         parent_path: &VirtualPath,
@@ -786,9 +785,7 @@ impl<SyncInfo> VfsNode<SyncInfo> {
         parent_path: &VirtualPath,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, DiffError> {
         match (self, other) {
-            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => {
-                dself.reconciliation_diff(dother, parent_path)
-            }
+            (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.merge_diff(dother, parent_path),
             (VfsNode::File(fself), VfsNode::File(fother)) => {
                 let mut file_path = parent_path.to_owned();
                 file_path.push(fself.name());

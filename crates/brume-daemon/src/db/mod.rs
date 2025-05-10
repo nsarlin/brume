@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use brume::concrete::InvalidByteSyncInfo;
+use brume::vfs::InvalidByteSyncInfo;
 use deadpool_diesel::PoolError;
 use deadpool_diesel::{
     Runtime,

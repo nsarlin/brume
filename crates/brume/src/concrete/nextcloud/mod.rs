@@ -17,17 +17,14 @@ use thiserror::Error;
 
 mod dav;
 
-use crate::{
+use brume_vfs::{
+    InvalidByteSyncInfo, Named, ToBytes, TryFromBytes, Vfs, VirtualPath, VirtualPathError,
     update::{IsModified, ModificationState},
-    vfs::{Vfs, VirtualPath, VirtualPathError},
 };
 
 use dav::{TagError, dav_parse_entity_tag, dav_parse_vfs};
 
-use super::{
-    FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
-    TryFromBytes,
-};
+use super::{FSBackend, FsBackendError, FsInstanceDescription};
 
 const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
@@ -101,6 +98,12 @@ impl Nextcloud {
             name: name.to_string(),
         })
     }
+}
+
+const NEXTCLOUD_FS_NAME: &str = "Nextcloud";
+
+impl Named for Nextcloud {
+    const TYPE_NAME: &'static str = NEXTCLOUD_FS_NAME;
 }
 
 impl FSBackend for Nextcloud {
@@ -244,7 +247,7 @@ impl NextcloudSyncInfo {
 }
 
 impl Named for NextcloudSyncInfo {
-    const TYPE_NAME: &'static str = "Nextcloud";
+    const TYPE_NAME: &'static str = NEXTCLOUD_FS_NAME;
 }
 
 impl IsModified for NextcloudSyncInfo {

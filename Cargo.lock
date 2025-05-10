@@ -234,6 +234,7 @@ dependencies = [
 name = "brume"
 version = "0.1.0"
 dependencies = [
+ "brume-vfs",
  "bytes",
  "chrono",
  "futures",
@@ -300,6 +301,15 @@ dependencies = [
 [[package]]
 name = "brume-gui"
 version = "0.1.0"
+
+[[package]]
+name = "brume-vfs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.11",
+ "xxhash-rust",
+]
 
 [[package]]
 name = "bumpalo"
