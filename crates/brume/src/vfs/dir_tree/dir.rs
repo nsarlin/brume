@@ -5,39 +5,18 @@ use crate::{
 
 use super::NodeState;
 
-/// Metadata of a Directory node
+/// Description of a Directory node, with arbitrary user provided metadata
 #[derive(Debug, Clone)]
-pub struct DirMeta<SyncInfo> {
+pub struct DirInfo<Meta> {
     name: String,
-    state: NodeState<SyncInfo>,
+    metadata: Meta,
 }
 
-impl<SyncInfo> DirMeta<SyncInfo> {
-    pub fn new(name: &str, sync: SyncInfo) -> Self {
+impl<Meta> DirInfo<Meta> {
+    pub fn new(name: &str, meta: Meta) -> Self {
         Self {
             name: name.to_string(),
-            state: NodeState::Ok(sync),
-        }
-    }
-
-    pub fn new_force_resync(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            state: NodeState::NeedResync,
-        }
-    }
-
-    pub fn new_error(name: &str, error: FailedUpdateApplication) -> Self {
-        Self {
-            name: name.to_string(),
-            state: NodeState::Error(error),
-        }
-    }
-
-    pub fn new_with_state(name: &str, state: NodeState<SyncInfo>) -> Self {
-        Self {
-            name: name.to_string(),
-            state,
+            metadata: meta,
         }
     }
 
@@ -45,45 +24,92 @@ impl<SyncInfo> DirMeta<SyncInfo> {
         &self.name
     }
 
+    pub fn as_ok(self) -> DirState<Meta> {
+        DirState {
+            name: self.name,
+            metadata: NodeState::Ok(self.metadata),
+        }
+    }
+
+    pub fn metadata(&self) -> &Meta {
+        &self.metadata
+    }
+}
+
+pub type DirState<SyncInfo> = DirInfo<NodeState<SyncInfo>>;
+
+impl<SyncInfo> DirState<SyncInfo> {
+    pub fn new_ok(name: &str, info: SyncInfo) -> Self {
+        Self::new(name, NodeState::Ok(info))
+    }
+
+    pub fn new_force_resync(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            metadata: NodeState::NeedResync,
+        }
+    }
+
+    pub fn new_error(name: &str, error: FailedUpdateApplication) -> Self {
+        Self {
+            name: name.to_string(),
+            metadata: NodeState::Error(error),
+        }
+    }
+
     pub fn state(&self) -> &NodeState<SyncInfo> {
-        &self.state
+        &self.metadata
     }
 
     pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
-        &mut self.state
+        &mut self.metadata
     }
 
     /// Invalidate the sync info to make them trigger a FSBackend sync on next run
     pub fn force_resync(&mut self) {
-        self.state = NodeState::NeedResync;
+        self.metadata = NodeState::NeedResync;
     }
-}
 
-impl<SyncInfo> From<&DirMeta<SyncInfo>> for DirMeta<()> {
-    fn from(value: &DirMeta<SyncInfo>) -> Self {
-        Self {
-            name: value.name.clone(),
-            state: (&value.state).into(),
+    /// Extract the Ok state of the node, or panic
+    #[cfg(test)]
+    pub fn unwrap(self) -> DirInfo<SyncInfo> {
+        match self.metadata {
+            NodeState::Ok(info) => DirInfo {
+                name: self.name,
+                metadata: info,
+            },
+            NodeState::NeedResync => panic!("NeedResync"),
+            NodeState::Error(_) => panic!("Error"),
+            NodeState::Conflict(_) => panic!("Conflict"),
         }
     }
 }
 
-impl<SyncInfo: ToBytes> From<&DirMeta<SyncInfo>> for DirMeta<Vec<u8>> {
-    fn from(value: &DirMeta<SyncInfo>) -> Self {
+impl<SyncInfo> From<&DirState<SyncInfo>> for DirState<()> {
+    fn from(value: &DirState<SyncInfo>) -> Self {
         Self {
             name: value.name.clone(),
-            state: (&value.state).into(),
+            metadata: (&value.metadata).into(),
         }
     }
 }
 
-impl<SyncInfo: TryFromBytes> TryFrom<DirMeta<Vec<u8>>> for DirMeta<SyncInfo> {
+impl<SyncInfo: ToBytes> From<&DirState<SyncInfo>> for DirState<Vec<u8>> {
+    fn from(value: &DirState<SyncInfo>) -> Self {
+        Self {
+            name: value.name.clone(),
+            metadata: (&value.metadata).into(),
+        }
+    }
+}
+
+impl<SyncInfo: TryFromBytes> TryFrom<DirState<Vec<u8>>> for DirState<SyncInfo> {
     type Error = InvalidByteSyncInfo;
 
-    fn try_from(value: DirMeta<Vec<u8>>) -> Result<Self, Self::Error> {
+    fn try_from(value: DirState<Vec<u8>>) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name.clone(),
-            state: value.state.try_into()?,
+            metadata: value.metadata.try_into()?,
         })
     }
 }

@@ -7,7 +7,7 @@ use crate::{
     concrete::{ConcreteFS, FSBackend, FsBackendError},
     sorted_vec::SortedVec,
     update::{DiffError, VfsDiffList, VfsUpdate, VfsUpdateApplicationError},
-    vfs::{DirTree, InvalidPathError, NodeState, Vfs, VirtualPath},
+    vfs::{DirTree, InvalidPathError, NodeState, StatefulVfs, Vfs, VirtualPath},
 };
 
 #[derive(Error, Debug)]
@@ -37,8 +37,8 @@ pub enum VfsReloadError {
 #[derive(Debug)]
 pub struct FileSystem<Backend: FSBackend> {
     concrete: ConcreteFS<Backend>,
-    status_vfs: Vfs<Backend::SyncInfo>,
-    loaded_vfs: Vfs<Backend::SyncInfo>,
+    status_vfs: StatefulVfs<Backend::SyncInfo>,
+    loaded_vfs: Option<Vfs<Backend::SyncInfo>>,
 }
 
 impl<Backend: FSBackend> FileSystem<Backend> {
@@ -46,7 +46,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         Self {
             concrete: ConcreteFS::new(backend),
             status_vfs: Vfs::empty(),
-            loaded_vfs: Vfs::empty(),
+            loaded_vfs: None,
         }
     }
 
@@ -62,8 +62,8 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         let new_vfs = self.backend().load_virtual().await.map_err(|e| e.into())?;
 
         let updates = self.status_vfs.diff(&new_vfs)?;
+        self.loaded_vfs = Some(new_vfs);
 
-        self.loaded_vfs = new_vfs;
         debug!("VFS from {} updated", Backend::TYPE_NAME);
         Ok(updates)
     }
@@ -71,7 +71,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     /// Returns the virtual view of this FileSystem.
     ///
     /// This view also holds the information about nodes that are in error or conflict.
-    pub fn vfs(&self) -> &Vfs<Backend::SyncInfo> {
+    pub fn vfs(&self) -> &StatefulVfs<Backend::SyncInfo> {
         &self.status_vfs
     }
 
@@ -79,12 +79,12 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     ///
     /// This representation matches exactly the state of the [`FSBackend`], but has no information
     /// about errors and conflicts.
-    pub fn loaded_vfs(&self) -> &Vfs<Backend::SyncInfo> {
-        &self.loaded_vfs
+    pub fn loaded_vfs(&self) -> Option<&Vfs<Backend::SyncInfo>> {
+        self.loaded_vfs.as_ref()
     }
 
     /// Returns a mutable ref to the virtual representation of this FileSystem
-    pub fn vfs_mut(&mut self) -> &mut Vfs<Backend::SyncInfo> {
+    pub fn vfs_mut(&mut self) -> &mut StatefulVfs<Backend::SyncInfo> {
         &mut self.status_vfs
     }
 
@@ -94,7 +94,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     }
 
     /// Returns a direct access to the backend behind the concrete filesystem
-    fn backend(&self) -> &Backend {
+    pub fn backend(&self) -> &Backend {
         self.concrete.backend()
     }
 
@@ -104,7 +104,10 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         &self,
         path: &VirtualPath,
     ) -> Result<&DirTree<Backend::SyncInfo>, InvalidPathError> {
-        self.loaded_vfs.find_dir(path)
+        self.loaded_vfs
+            .as_ref()
+            .map(|vfs| vfs.find_dir(path))
+            .unwrap_or(Err(InvalidPathError::NotFound(path.to_owned())))
     }
 
     /// Applies a list of updates to the [`Vfs`], by calling [`Self::apply_update_vfs`] on each of
@@ -124,7 +127,11 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         &mut self,
         update: &VfsUpdate<Backend::SyncInfo>,
     ) -> Result<(), VfsUpdateApplicationError> {
-        self.status_vfs.apply_update(update, &self.loaded_vfs)
+        let ref_vfs = self
+            .loaded_vfs
+            .as_ref()
+            .ok_or(VfsUpdateApplicationError::MissingReferenceVfs)?;
+        self.status_vfs.apply_update(update, ref_vfs)
     }
 
     /// Sets the state of a node in the [`Vfs`] to `state`

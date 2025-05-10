@@ -25,7 +25,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::{
     Error,
     update::{IsModified, ModificationState},
-    vfs::{DirTree, FileMeta, Vfs, VfsNode, VirtualPath},
+    vfs::{DirTree, FileInfo, Vfs, VfsNode, VirtualPath},
 };
 
 use super::{
@@ -159,7 +159,7 @@ impl FSBackend for LocalDir {
             let sync_info = LocalSyncInfo::load(&self.path).await?;
 
             let root = if metadata.is_file() {
-                VfsNode::File(FileMeta::new(
+                VfsNode::File(FileInfo::new(
                     self.path
                         .file_name()
                         .and_then(|s| s.to_str())

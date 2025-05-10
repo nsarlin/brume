@@ -12,7 +12,7 @@ use futures::{Stream, StreamExt, TryStreamExt, stream::BoxStream};
 use log::{debug, warn};
 use tokio::fs::{self, DirEntry, ReadDir};
 
-use crate::vfs::{DirTree, FileMeta, VfsNode};
+use crate::vfs::{DirTree, FileInfo, VfsNode};
 
 use super::{LocalDirError, LocalSyncInfo};
 
@@ -131,7 +131,7 @@ pub(crate) async fn build_vfs_subtree<P: LocalPath>(
                 .file_name()
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| LocalDirError::invalid_path(path))?;
-            let node = VfsNode::File(FileMeta::new(
+            let node = VfsNode::File(FileInfo::new(
                 file_name,
                 path.file_size()
                     .await
@@ -190,7 +190,7 @@ mod test {
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });
-        let parsed = VfsNode::Dir(root);
+        let parsed = VfsNode::Dir(root).as_ok();
 
         let reference = &D("", base).into_node();
 
@@ -209,7 +209,7 @@ mod test {
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });
-        let parsed = VfsNode::Dir(root);
+        let parsed = VfsNode::Dir(root).as_ok();
 
         let reference = D("", vec![D("link", vec![F("f1.md"), F("f2.pdf")])]).into_node();
 
@@ -225,7 +225,7 @@ mod test {
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });
-        let parsed = VfsNode::Dir(root);
+        let parsed = VfsNode::Dir(root).as_ok();
 
         let reference = D("", vec![D("Doc", vec![F("link"), F("f2.pdf")])]).into_node();
 
@@ -240,7 +240,7 @@ mod test {
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });
-        let parsed = VfsNode::Dir(root);
+        let parsed = VfsNode::Dir(root).as_ok();
 
         let reference = D("", vec![D("Doc", vec![F("f2.pdf")])]).into_node();
 

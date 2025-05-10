@@ -7,7 +7,10 @@ use uuid::Uuid;
 
 use brume::{
     update::{UpdateKind, VfsUpdate},
-    vfs::{DirTree, FileMeta, NodeKind, NodeState, Vfs, VfsNode},
+    vfs::{
+        DirTree, FileInfo, FileState, NodeKind, NodeState, StatefulDirTree, StatefulVfs,
+        StatefulVfsNode, Vfs, VfsNode,
+    },
 };
 use brume_daemon_proto::VirtualPath;
 
@@ -29,7 +32,7 @@ struct DbVfsNode {
     parent: Option<i32>,
 }
 
-impl<'a> TryFrom<&'a DbVfsNode> for VfsNode<Vec<u8>> {
+impl<'a> TryFrom<&'a DbVfsNode> for StatefulVfsNode<Vec<u8>> {
     type Error = DatabaseError;
 
     fn try_from(value: &'a DbVfsNode) -> Result<Self, Self::Error> {
@@ -46,8 +49,8 @@ impl<'a> TryFrom<&'a DbVfsNode> for VfsNode<Vec<u8>> {
             .unwrap_or(NodeState::NeedResync);
 
         Ok(match kind {
-            NodeKind::Dir => Self::Dir(DirTree::new_with_state(&value.name, state)),
-            NodeKind::File => Self::File(FileMeta::new_with_state(
+            NodeKind::Dir => Self::Dir(DirTree::new(&value.name, state)),
+            NodeKind::File => Self::File(FileInfo::new(
                 &value.name,
                 value
                     .size
@@ -128,7 +131,7 @@ impl Database {
     async fn load_nodes_rec(
         &self,
         parent_node: &DbVfsNode,
-    ) -> Result<VfsNode<Vec<u8>>, DatabaseError> {
+    ) -> Result<StatefulVfsNode<Vec<u8>>, DatabaseError> {
         let mut vfs_node = parent_node.try_into()?;
 
         if let VfsNode::Dir(dir) = &mut vfs_node {
@@ -155,7 +158,7 @@ impl Database {
     }
 
     /// Loads a vfs with all its node from the DB
-    pub async fn load_vfs(&self, fs_uuid: Uuid) -> Result<Vfs<Vec<u8>>, DatabaseError> {
+    pub async fn load_vfs(&self, fs_uuid: Uuid) -> Result<StatefulVfs<Vec<u8>>, DatabaseError> {
         let vfs_root = self.get_vfs_root(fs_uuid).await?;
 
         let loaded_root = self.load_nodes_rec(&vfs_root).await?;
@@ -196,7 +199,7 @@ impl Database {
     async fn insert_node_child(
         &self,
         parent_node: i32,
-        node: &VfsNode<Vec<u8>>,
+        node: &StatefulVfsNode<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         match node {
             VfsNode::Dir(dir_tree) => Box::pin(self.insert_dir_child(parent_node, dir_tree)).await,
@@ -208,7 +211,7 @@ impl Database {
     async fn insert_file_child(
         &self,
         parent_node: i32,
-        file: &FileMeta<Vec<u8>>,
+        file: &FileState<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
@@ -239,7 +242,7 @@ impl Database {
     async fn insert_dir_child(
         &self,
         parent_node: i32,
-        tree: &DirTree<Vec<u8>>,
+        tree: &StatefulDirTree<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
@@ -279,7 +282,7 @@ impl Database {
         &self,
         root: &DbVfsNode,
         path: &VirtualPath,
-        tree: &DirTree<Vec<u8>>,
+        tree: &StatefulDirTree<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         let parent_node = path
             .parent()
@@ -295,7 +298,7 @@ impl Database {
         &self,
         root: &DbVfsNode,
         path: &VirtualPath,
-        file: &FileMeta<Vec<u8>>,
+        file: &FileState<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
@@ -328,7 +331,7 @@ impl Database {
         &self,
         root: &DbVfsNode,
         path: &VirtualPath,
-        file: &FileMeta<Vec<u8>>,
+        file: &FileState<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         let parent_node = path
             .parent()
@@ -433,7 +436,7 @@ impl Database {
             VfsUpdate::FileCreated(file_creation) => {
                 let name = file_creation.path().name().to_owned();
                 let path = file_creation.path().to_owned();
-                let file = FileMeta::new(
+                let file = FileInfo::new_ok(
                     &name,
                     file_creation.file_size(),
                     file_creation.sync_info().clone(),
@@ -443,7 +446,7 @@ impl Database {
             VfsUpdate::FileModified(file_modification) => {
                 let name = file_modification.path().name().to_owned();
                 let path = file_modification.path().to_owned();
-                let file = FileMeta::new(
+                let file = FileInfo::new_ok(
                     &name,
                     file_modification.file_size(),
                     file_modification.sync_info().clone(),
@@ -463,7 +466,7 @@ impl Database {
                         self.insert_dir(&vfs_root, &path, &dir).await
                     }
                     UpdateKind::FileCreated => {
-                        let file = FileMeta::new_error(path.name(), 0, failed_update.clone());
+                        let file = FileInfo::new_error(path.name(), 0, failed_update.clone());
                         self.insert_file(&vfs_root, &path, &file).await
                     }
                     UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
@@ -480,11 +483,11 @@ impl Database {
                 // conflict
                 match vfs_diff.kind() {
                     UpdateKind::DirCreated => {
-                        let dir = DirTree::new_with_state(path.name(), state);
+                        let dir = DirTree::new(path.name(), state);
                         self.insert_dir(&vfs_root, &path, &dir).await
                     }
                     UpdateKind::FileCreated => {
-                        let file = FileMeta::new_with_state(path.name(), 0, state);
+                        let file = FileInfo::new(path.name(), 0, state);
                         self.insert_file(&vfs_root, &path, &file).await
                     }
                     UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
@@ -501,9 +504,9 @@ mod test {
     use std::io::{self, ErrorKind};
 
     use brume::{
-        concrete::local::LocalDirError,
+        concrete::{ToBytes, local::LocalDirError},
         update::{FailedUpdateApplication, VfsDiff, VfsDirCreation, VfsFileUpdate, VfsUpdate},
-        vfs::{DirTree, FileMeta, NodeKind, VfsNode},
+        vfs::{DirTree, FileInfo, NodeKind, NodeState, VfsNode},
     };
     use brume_daemon_proto::{
         AnyFsCreationInfo, FileSystemMeta, LocalDirCreationInfo, VirtualPath, VirtualPathBuf,
@@ -515,17 +518,17 @@ mod test {
     async fn test_update_db_vfs() {
         let db = Database::new(&DatabaseConfig::InMemory).await.unwrap();
 
-        let mut a = DirTree::new("a", ());
-        let f1 = FileMeta::new("f1", 10, ());
-        let mut b = DirTree::new("b", ());
-        let c = DirTree::new("c", ());
-        let d = DirTree::new("d", ());
+        let mut a = DirTree::new_ok("a", ());
+        let f1 = FileInfo::new_ok("f1", 10, ());
+        let mut b = DirTree::new_ok("b", ());
+        let c = DirTree::new_ok("c", ());
+        let d = DirTree::new_ok("d", ());
 
         b.insert_child(VfsNode::Dir(c));
         a.insert_child(VfsNode::File(f1));
         a.insert_child(VfsNode::Dir(b));
 
-        let mut base_root = DirTree::new("", ());
+        let mut base_root = DirTree::new_ok("", ());
         base_root.insert_child(VfsNode::Dir(a.clone()));
         let base_vfs = VfsNode::Dir(base_root);
 
@@ -545,6 +548,13 @@ mod test {
         db.update_vfs(fs_ref.id(), &creation_update.into())
             .await
             .unwrap();
+        db.update_vfs_node_state(
+            fs_ref.id(),
+            VirtualPath::root(),
+            &NodeState::Ok(().to_bytes()),
+        )
+        .await
+        .unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 5);

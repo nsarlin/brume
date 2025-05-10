@@ -16,7 +16,7 @@ use crate::{
     filesystem::FileSystem,
     sorted_vec::SortedVec,
     update::{AppliedUpdate, ReconciledUpdate, VfsDiff, VfsDiffList, VfsUpdate},
-    vfs::{NodeState, Vfs, VirtualPath},
+    vfs::{NodeState, StatefulVfs, VirtualPath},
 };
 
 #[derive(Debug)]
@@ -179,12 +179,28 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         local_updates: VfsDiffList,
         remote_updates: VfsDiffList,
     ) -> Result<SortedVec<ReconciledUpdate>, Error> {
+        let local_vfs = match self.local.loaded_vfs() {
+            Some(vfs) => vfs,
+            None => &self
+                .local
+                .backend()
+                .load_virtual()
+                .await
+                .map_err(|e| Error::vfs_reload(LocalBackend::TYPE_NAME, e.into()))?,
+        };
+
+        let remote_vfs = match self.remote.loaded_vfs() {
+            Some(vfs) => vfs,
+            None => &self
+                .remote
+                .backend()
+                .load_virtual()
+                .await
+                .map_err(|e| Error::vfs_reload(RemoteBackend::TYPE_NAME, e.into()))?,
+        };
+
         // Merge updates only looking at their content relative to the Vfs
-        let merged = local_updates.merge(
-            remote_updates,
-            self.local.loaded_vfs(),
-            self.remote.loaded_vfs(),
-        )?;
+        let merged = local_updates.merge(remote_updates, local_vfs, remote_vfs)?;
 
         // Check with concrete backend if the file differ, if duplicates are to be removed or if
         // they are conflicts
@@ -423,25 +439,33 @@ pub trait Synchronized {
     ///
     /// The type specific sync info are erased but the directory structure and node state is
     /// preserved
-    fn local_vfs(&self) -> Vfs<()>;
+    ///
+    /// [`Vfs`]: crate::vfs::Vfs
+    fn local_vfs(&self) -> StatefulVfs<()>;
 
     /// Returns the remote [`Vfs`]
     ///
     /// The type specific sync info are erased but the directory structure and node state is
     /// preserved
-    fn remote_vfs(&self) -> Vfs<()>;
+    ///
+    /// [`Vfs`]: crate::vfs::Vfs
+    fn remote_vfs(&self) -> StatefulVfs<()>;
 
     /// Updates the local [`Vfs`]
     ///
     /// The sync info are deserialized from bytes, this function returns an error if
     /// deserialization fails
-    fn set_local_vfs(&mut self, vfs: Vfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
+    ///
+    /// [`Vfs`]: crate::vfs::Vfs
+    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
 
     /// Updates the remote [`Vfs`]
     ///
     /// The sync info are deserialized from bytes, this function returns an error if
     /// deserialization fails
-    fn set_remote_vfs(&mut self, vfs: Vfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
+    ///
+    /// [`Vfs`]: crate::vfs::Vfs
+    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
 }
 
 impl<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static> Synchronized
@@ -506,21 +530,21 @@ where
         })
     }
 
-    fn local_vfs(&self) -> Vfs<()> {
+    fn local_vfs(&self) -> StatefulVfs<()> {
         self.local.vfs().into()
     }
 
-    fn remote_vfs(&self) -> Vfs<()> {
+    fn remote_vfs(&self) -> StatefulVfs<()> {
         self.remote.vfs().into()
     }
 
-    fn set_local_vfs(&mut self, vfs: Vfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
+    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
         let typed_vfs = vfs.try_into()?;
         *self.local.vfs_mut() = typed_vfs;
         Ok(())
     }
 
-    fn set_remote_vfs(&mut self, vfs: Vfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
+    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
         let typed_vfs = vfs.try_into()?;
         *self.remote.vfs_mut() = typed_vfs;
         Ok(())
@@ -585,7 +609,7 @@ mod test {
             TestNode::{D, FE, FF},
         },
         update::VfsDiff,
-        vfs::{Vfs, VirtualPathBuf},
+        vfs::VirtualPathBuf,
     };
 
     /// Check that duplicate diffs are correctly removed
@@ -822,14 +846,7 @@ mod test {
             FullSyncStatus::Ok
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(synchro.remote.vfs())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
     }
 
     /// Test conflict handling in synchro
@@ -921,14 +938,7 @@ mod test {
                 .status(),
             FullSyncStatus::Ok
         );
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(synchro.remote.vfs())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
     }
 
     /// Test conflict handling in synchro where a file is modified on one side and removed on the
@@ -1018,14 +1028,7 @@ mod test {
             FullSyncStatus::Ok
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(synchro.remote.vfs())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
     }
 
     // Test synchro with from scratch with a file where the concrete FS return an error
@@ -1065,14 +1068,7 @@ mod test {
             ],
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(&Vfs::new(expected_local.into_node()))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(synchro.local.backend(), &expected_local.into());
         assert!(
             synchro
                 .remote
@@ -1102,14 +1098,7 @@ mod test {
         );
 
         // Both filesystems should be perfectly in sync
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(synchro.remote.vfs())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
     }
 
     /// Test synchro with an error on a file that is only modified
@@ -1163,14 +1152,7 @@ mod test {
             ],
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(&Vfs::new(expected_local.into_node()))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(synchro.local.backend(), &expected_local.into());
         assert!(
             synchro
                 .remote
@@ -1202,14 +1184,7 @@ mod test {
             FullSyncStatus::Ok
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(synchro.remote.vfs())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
     }
 
     /// test with a created file in error that is then removed
@@ -1246,12 +1221,7 @@ mod test {
             ],
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .structural_eq(&Vfs::new(expected_local.into_node()))
-        );
+        assert_eq!(synchro.local.backend(), &expected_local.into());
 
         assert!(
             synchro
@@ -1282,7 +1252,7 @@ mod test {
         );
 
         // Both filesystems should be perfectly in sync
-        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert_eq!(synchro.local.backend(), synchro.remote.backend());
     }
 
     /// test with a modified file in error that is then removed
@@ -1336,14 +1306,7 @@ mod test {
             ],
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(&Vfs::new(expected_local.into_node()))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(synchro.local.backend(), &expected_local.into());
         assert!(
             synchro
                 .remote
@@ -1372,14 +1335,7 @@ mod test {
             FullSyncStatus::Ok
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(synchro.remote.vfs())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
     }
 
     /// test with a modified file in error that is modified on the local side before the error is
@@ -1434,14 +1390,7 @@ mod test {
             ],
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .diff(&Vfs::new(expected_local.into_node()))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(synchro.local.backend(), &expected_local.into());
         assert!(
             synchro
                 .remote
