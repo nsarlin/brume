@@ -409,6 +409,8 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             error!("Failed to clone file {path:?}: {e:?}");
             e.into()
         })?;
+
+        // TODO: what happens if the src file is modified during the clone?
         let src_info = ref_concrete
             .backend
             .get_sync_info(path)

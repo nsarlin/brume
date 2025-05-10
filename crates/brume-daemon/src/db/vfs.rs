@@ -6,7 +6,7 @@ use futures::future::Either;
 use uuid::Uuid;
 
 use brume::{
-    update::VfsUpdate,
+    update::{UpdateKind, VfsUpdate},
     vfs::{DirTree, FileMeta, NodeKind, NodeState, Vfs, VfsNode},
 };
 use brume_daemon_proto::VirtualPath;
@@ -360,9 +360,9 @@ impl Database {
     ) -> Result<(), DatabaseError> {
         use crate::schema::nodes::dsl::*;
 
-        let db_state = bincode::serialize(&node_state)?;
-
         let node = self.find_node(root, path).await?;
+
+        let db_state = bincode::serialize(&node_state)?;
 
         let conn = self.pool.get().await?;
 
@@ -454,13 +454,43 @@ impl Database {
             VfsUpdate::FileRemoved(path) => self.delete_node(&vfs_root, path).await,
             VfsUpdate::FailedApplication(failed_update) => {
                 let path = failed_update.path().to_owned();
-                let state = NodeState::Error(failed_update.clone());
-                self.set_node_state(&vfs_root, &path, &state).await
+
+                // If this is a failed creation, we need to create the node in the db to store the
+                // error
+                match failed_update.update().kind() {
+                    UpdateKind::DirCreated => {
+                        let dir = DirTree::new_error(path.name(), failed_update.clone());
+                        self.insert_dir(&vfs_root, &path, &dir).await
+                    }
+                    UpdateKind::FileCreated => {
+                        let file = FileMeta::new_error(path.name(), 0, failed_update.clone());
+                        self.insert_file(&vfs_root, &path, &file).await
+                    }
+                    UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
+                        let state = NodeState::Error(failed_update.clone());
+                        self.set_node_state(&vfs_root, &path, &state).await
+                    }
+                }
             }
             VfsUpdate::Conflict(vfs_diff) => {
                 let path = vfs_diff.path().to_owned();
                 let state = NodeState::Conflict(vfs_diff.clone());
-                self.set_node_state(&vfs_root, &path, &state).await
+
+                // If this is a creation, we need to create the node in the db to store the
+                // conflict
+                match vfs_diff.kind() {
+                    UpdateKind::DirCreated => {
+                        let dir = DirTree::new_with_state(path.name(), state);
+                        self.insert_dir(&vfs_root, &path, &dir).await
+                    }
+                    UpdateKind::FileCreated => {
+                        let file = FileMeta::new_with_state(path.name(), 0, state);
+                        self.insert_file(&vfs_root, &path, &file).await
+                    }
+                    UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
+                        self.set_node_state(&vfs_root, &path, &state).await
+                    }
+                }
             }
         }
     }
