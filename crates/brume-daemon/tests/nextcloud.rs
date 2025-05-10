@@ -182,7 +182,7 @@ async fn main() {
     std::fs::remove_dir_all(dir_a.path().to_path_buf().join("testdir")).unwrap();
 
     // Wait for propagation on both fs
-    wait_full_sync(sync_interval, &rpc).await;
+    wait_full_sync(2 * sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -190,7 +190,7 @@ async fn main() {
 
     fs_a.diff_vfs().await.unwrap();
     fs_b.diff_vfs().await.unwrap();
-    assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
+    assert!(fs_a.vfs().diff(fs_b.vfs()).unwrap().is_empty());
 
     // Test deletion
     let first_sync = list.keys().collect::<Vec<_>>()[0];
