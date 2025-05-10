@@ -2,6 +2,8 @@
 
 use std::cmp::Ordering;
 
+use serde::{Deserialize, Serialize};
+
 /// Trait used for sorting elements of a vec.
 ///
 /// Compared to Ord, this trait allows the sorting to be done not directly on the element
@@ -14,7 +16,7 @@ pub trait Sortable {
 
 /// A vec of elements, sorted and without duplicates. This struct is a wrapper over a `Vec<T>`
 /// that keeps the sorting invariant.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SortedVec<T>(Vec<T>);
 
 impl<T: Sortable> SortedVec<T> {
