@@ -475,13 +475,10 @@ impl<SyncInfo> StatefulDirTree<SyncInfo> {
     /// Returns the list of errors for this dir and its children
     pub fn get_errors(
         &self,
-        parent_path: &VirtualPath,
+        dir_path: &VirtualPath,
     ) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
-        let mut dir_path = parent_path.to_owned();
-        dir_path.push(self.name());
-
         let mut ret = if let NodeState::Error(err) = self.state() {
-            vec![(dir_path.clone(), err.to_owned())]
+            vec![(dir_path.to_owned(), err.to_owned())]
         } else {
             Vec::new()
         };
@@ -494,12 +491,9 @@ impl<SyncInfo> StatefulDirTree<SyncInfo> {
     }
 
     /// Returns the list of conflicts for this dir and its children
-    pub fn get_conflicts(&self, parent_path: &VirtualPath) -> Vec<VirtualPathBuf> {
-        let mut dir_path = parent_path.to_owned();
-        dir_path.push(self.name());
-
+    pub fn get_conflicts(&self, dir_path: &VirtualPath) -> Vec<VirtualPathBuf> {
         let mut ret = if self.state().is_conflict() {
-            vec![dir_path.clone()]
+            vec![dir_path.to_owned()]
         } else {
             Vec::new()
         };
@@ -918,13 +912,12 @@ impl<SyncInfo> VfsNode<NodeState<SyncInfo>> {
         &self,
         parent_path: &VirtualPath,
     ) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
-        let mut path = self.path(parent_path);
+        let path = self.path(parent_path);
 
         match self {
             VfsNode::Dir(dir) => dir.get_errors(&path),
             VfsNode::File(file) => {
                 if let NodeState::Error(err) = file.state() {
-                    path.push(file.name());
                     vec![(path, err.to_owned())]
                 } else {
                     Vec::new()
@@ -935,13 +928,12 @@ impl<SyncInfo> VfsNode<NodeState<SyncInfo>> {
 
     /// Returns the list of conflicts for this node and its children
     pub fn get_conflicts_list(&self, parent_path: &VirtualPath) -> Vec<VirtualPathBuf> {
-        let mut path = self.path(parent_path);
+        let path = self.path(parent_path);
 
         match self {
             VfsNode::Dir(dir) => dir.get_conflicts(&path),
             VfsNode::File(file) => {
                 if file.state().is_conflict() {
-                    path.push(file.name());
                     vec![path]
                 } else {
                     Vec::new()
