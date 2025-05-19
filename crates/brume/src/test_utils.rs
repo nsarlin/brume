@@ -1,6 +1,4 @@
-use std::{
-    ffi::OsStr, fmt::Display, io::ErrorKind, ops::Deref, sync::Arc, sync::RwLock, time::SystemTime,
-};
+use std::{ffi::OsStr, fmt::Display, ops::Deref, sync::Arc, sync::RwLock, time::SystemTime};
 
 use bytes::Bytes;
 use futures::{
@@ -696,10 +694,7 @@ impl FSBackend for ConcreteTestNode {
     {
         Box::pin(async move {
             // Read data
-            let mut reader = StreamReader::new(
-                data.map_ok(Bytes::from)
-                    .map_err(|e| io::Error::new(ErrorKind::Other, e)),
-            );
+            let mut reader = StreamReader::new(data.map_ok(Bytes::from).map_err(io::Error::other));
 
             let mut content = Vec::new();
             reader.read_to_end(&mut content).await?;

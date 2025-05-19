@@ -1,6 +1,6 @@
 //! Implementation of a Vec where the elements are always sorted
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::HashSet, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 
@@ -190,6 +190,56 @@ impl<T: Sortable> SortedVec<T> {
         }
 
         Ok(ret)
+    }
+
+    /// Remove duplicates in the sorted vec, using another key than the one from the [`Sortable`]
+    /// trait.
+    ///
+    /// # Example
+    /// ```
+    /// use brume::sorted_vec::SortedVec;
+    /// use brume::update::*;
+    /// use brume::vfs::VirtualPathBuf;
+    ///
+    /// let mut list = SortedVec::new();
+    ///
+    /// let update_a = VfsDiff::file_modified(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let applicable_a = ApplicableUpdate::new(UpdateTarget::Local, &update_a);
+    /// list.insert(applicable_a);
+    ///
+    /// let update_b = VfsDiff::file_created(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Local, &update_b);
+    /// list.insert(applicable_b.clone());
+    ///
+    /// let update_c = VfsDiff::file_created(VirtualPathBuf::new("/dir/a").unwrap());
+    /// let applicable_c = ApplicableUpdate::new(UpdateTarget::Remote, &update_c);
+    /// list.insert(applicable_c.clone());
+    ///
+    /// let update_d = VfsDiff::file_created(VirtualPathBuf::new("/dir/d").unwrap());
+    /// let applicable_d = ApplicableUpdate::new(UpdateTarget::Remote, &update_d);
+    /// list.insert(applicable_d.clone());
+    ///
+    /// let mut simplified = list.dedup_by(|update| (update.path().to_owned(), update.target()));
+    /// assert_eq!(simplified.len(), 3);
+    /// let first = simplified.pop().unwrap();
+    /// assert_eq!(first, applicable_d);
+    /// let second = simplified.pop().unwrap();
+    /// assert_eq!(second, applicable_c);
+    /// let third = simplified.pop().unwrap();
+    /// assert_eq!(third, applicable_b);
+    /// ```
+    pub fn dedup_by<K: Hash + Eq, F: Fn(&T) -> K>(self, f: F) -> Self {
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        for elem in self.into_iter() {
+            if seen.insert(f(&elem)) {
+                result.push(elem);
+            }
+        }
+
+        // Ok because if the input is sorted, the output will be too
+        SortedVec::unchecked_from_vec(result)
     }
 
     /// Creates a new [`SortedVec`] from a vector that is already sorted

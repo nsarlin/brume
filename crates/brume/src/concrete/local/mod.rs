@@ -4,7 +4,7 @@ pub mod path;
 
 use std::{
     fmt::{Debug, Display, Formatter},
-    io::{self, ErrorKind},
+    io::{self},
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -224,10 +224,7 @@ impl FSBackend for LocalDir {
             let mut f = File::create(&full_path)
                 .await
                 .map_err(|e| LocalDirError::io(&self.path, e))?;
-            let mut reader = StreamReader::new(
-                data.map_ok(Bytes::from)
-                    .map_err(|e| io::Error::new(ErrorKind::Other, e)),
-            );
+            let mut reader = StreamReader::new(data.map_ok(Bytes::from).map_err(io::Error::other));
 
             tokio::io::copy(&mut reader, &mut f)
                 .await

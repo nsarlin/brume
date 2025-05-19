@@ -429,6 +429,7 @@ impl SynchroList {
     }
 
     /// Deletes a synchronization from the list
+    #[allow(clippy::result_large_err)]
     pub fn remove(&mut self, id: SynchroId) -> Result<(), SynchroDeletionError> {
         if self.synchros.remove(&id).is_some() {
             info!("Synchro deleted: {id:?}");
