@@ -119,7 +119,6 @@ impl BrumeService for Server {
         side: SynchroSide,
     ) -> Result<(), String> {
         info!("Received conflict resolution request: id {id:?}, path {path:?}, side: {side:?}");
-        // Check if the synchro is valid and if the file exist to be able to return an early error
         let (local_vfs, remote_vfs) = {
             let list = self.synchro_list.read().await;
 
@@ -136,21 +135,39 @@ impl BrumeService for Server {
             (local, remote)
         };
 
-        let node = local_vfs
-            .find_node(&path)
-            .or_else(|| remote_vfs.find_node(&path))
-            .ok_or_else(|| "Invalid path".to_string())?;
+        let (selected_node, opposite_node) = match side {
+            SynchroSide::Local => (
+                local_vfs.find_conflict(&path),
+                remote_vfs.find_conflict(&path),
+            ),
+            SynchroSide::Remote => (
+                remote_vfs.find_conflict(&path),
+                local_vfs.find_conflict(&path),
+            ),
+        };
 
-        if !node.state().is_conflict() {
+        // If the conflict is something like:
+        // - Local: DirRemoved(/a/b)
+        // - Remote: FileModified(/a/b/c)
+        // - resolve_conflict(/a/b, Remote)
+        // /a/b won't appear as a conflict in remote fs. We need to get the conflict on the
+        // (opposite) local side and resolve it using the files it is conflicting with.
+        let path_to_resolve = if selected_node.is_some() {
+            vec![path]
+        } else if let Some(node) = opposite_node {
+            node.otherside_conflict_paths().to_vec()
+        } else {
             return Err("Node is not in conflict".to_string());
+        };
+
+        for path in path_to_resolve {
+            let request = ConflictResolutionRequest::new(id, path, side);
+            let command = UserCommand::ConflictResolution(request);
+
+            self.commands_chan
+                .send(command)
+                .map_err(|e| e.to_string())?;
         }
-
-        let request = ConflictResolutionRequest::new(id, path, side);
-        let command = UserCommand::ConflictResolution(request);
-
-        self.commands_chan
-            .send(command)
-            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

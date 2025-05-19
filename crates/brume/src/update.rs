@@ -503,59 +503,6 @@ impl SortedVec<ApplicableUpdate> {
 
         (local, remote)
     }
-
-    /// Remove duplicate updates that target the same nodes on the same FS.
-    ///
-    /// Only the first update will be kept for a given path and a given [`UpdateTarget`]. This means
-    /// that the priority will be based on the order of the [`UpdateKind`] enum. In practice,
-    /// file creation will be favored over file modifications.
-    ///
-    /// # Example
-    /// ```
-    /// use brume::sorted_vec::SortedVec;
-    /// use brume::update::*;
-    /// use brume::vfs::VirtualPathBuf;
-    ///
-    /// let mut list = SortedVec::new();
-    ///
-    /// let update_a = VfsDiff::file_modified(VirtualPathBuf::new("/dir/a").unwrap());
-    /// let applicable_a = ApplicableUpdate::new(UpdateTarget::Local, &update_a);
-    /// list.insert(applicable_a);
-    ///
-    /// let update_b = VfsDiff::file_created(VirtualPathBuf::new("/dir/a").unwrap());
-    /// let applicable_b = ApplicableUpdate::new(UpdateTarget::Local, &update_b);
-    /// list.insert(applicable_b.clone());
-    ///
-    /// let update_c = VfsDiff::file_created(VirtualPathBuf::new("/dir/a").unwrap());
-    /// let applicable_c = ApplicableUpdate::new(UpdateTarget::Remote, &update_c);
-    /// list.insert(applicable_c.clone());
-    ///
-    /// let update_d = VfsDiff::file_created(VirtualPathBuf::new("/dir/d").unwrap());
-    /// let applicable_d = ApplicableUpdate::new(UpdateTarget::Remote, &update_d);
-    /// list.insert(applicable_d.clone());
-    ///
-    /// let mut simplified = list.remove_duplicates();
-    /// assert_eq!(simplified.len(), 3);
-    /// let first = simplified.pop().unwrap();
-    /// assert_eq!(first, applicable_d);
-    /// let second = simplified.pop().unwrap();
-    /// assert_eq!(second, applicable_c);
-    /// let third = simplified.pop().unwrap();
-    /// assert_eq!(third, applicable_b);
-    /// ```
-    pub fn remove_duplicates(self) -> Self {
-        let mut seen = HashSet::new();
-        let mut result = Vec::new();
-
-        for update in self.into_iter() {
-            if seen.insert((update.path().to_owned(), update.target())) {
-                result.push(update);
-            }
-        }
-
-        // Ok because if the input is sorted, the output will be too
-        SortedVec::unchecked_from_vec(result)
-    }
 }
 
 /// An update that has been reconciled based on VFS diff but needs a check against the concrete FS
@@ -618,6 +565,88 @@ impl Sortable for VirtualReconciledUpdate {
     }
 }
 
+/// A conflict between two updates
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateConflict {
+    /// The update that was supposed to be applied
+    update: ApplicableUpdate,
+    /// The path which caused the conflict on the other fs in the syncro
+    otherfs_conflict_path: Vec<VirtualPathBuf>,
+}
+
+impl Sortable for UpdateConflict {
+    type Key = ApplicableUpdate;
+
+    fn key(&self) -> &Self::Key {
+        self.update()
+    }
+}
+
+impl UpdateConflict {
+    pub fn new(update: ApplicableUpdate, otherfs_conflict_path: &[VirtualPathBuf]) -> Self {
+        Self {
+            update,
+            otherfs_conflict_path: otherfs_conflict_path.to_vec(),
+        }
+    }
+
+    /// Create a conflict that is caused by the node at the same path in the other filesystem
+    pub fn new_same_path(update: ApplicableUpdate) -> Self {
+        let otherfs_conflict_path = vec![update.path().to_owned()];
+        Self {
+            update,
+            otherfs_conflict_path,
+        }
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        self.update.path()
+    }
+
+    pub fn update(&self) -> &ApplicableUpdate {
+        &self.update
+    }
+
+    pub fn otherfs_conflict_path(&self) -> &[VirtualPathBuf] {
+        &self.otherfs_conflict_path
+    }
+
+    /// The update removes a node (dir or file)
+    pub fn is_removal(&self) -> bool {
+        self.update.is_removal()
+    }
+
+    pub fn invert(self) -> Self {
+        let update = self.update.invert();
+
+        Self { update, ..self }
+    }
+}
+
+impl SortedVec<UpdateConflict> {
+    /// Split the list in two, with the updates for the local FS on one side and the updates for the
+    /// remote FS on the other side.
+    ///
+    /// Updates with [`UpdateTarget::Both`] are duplicated in both lists.
+    pub fn split_local_remote(self) -> (Vec<VfsConflict>, Vec<VfsConflict>) {
+        let mut local = Vec::new();
+        let mut remote = Vec::new();
+
+        for conflict in self.into_iter() {
+            match conflict.update().target() {
+                UpdateTarget::Local => local.push(conflict.into()),
+                UpdateTarget::Remote => remote.push(conflict.into()),
+                UpdateTarget::Both => {
+                    local.push(conflict.clone().into());
+                    remote.push(conflict.into())
+                }
+            }
+        }
+
+        (local, remote)
+    }
+}
+
 /// Output of the update reconciliation process. See [`reconcile`]
 ///
 /// [`reconcile`]: crate::synchro::Synchro::reconcile
@@ -626,21 +655,21 @@ pub enum ReconciledUpdate {
     /// Updates in this state can be applied to the target concrete FS
     Applicable(ApplicableUpdate),
     /// There is a conflict that needs user input for resolution before the update can be applied
-    Conflict(ApplicableUpdate),
+    Conflict(UpdateConflict),
 }
 
 impl ReconciledUpdate {
     pub fn path(&self) -> &VirtualPath {
         match self {
             ReconciledUpdate::Applicable(update) => update.path(),
-            ReconciledUpdate::Conflict(update) => update.path(),
+            ReconciledUpdate::Conflict(conflict) => conflict.path(),
         }
     }
 
     pub fn update(&self) -> &ApplicableUpdate {
         match self {
             ReconciledUpdate::Applicable(update) => update,
-            ReconciledUpdate::Conflict(update) => update,
+            ReconciledUpdate::Conflict(conflict) => conflict.update(),
         }
     }
 
@@ -655,19 +684,28 @@ impl ReconciledUpdate {
     }
 
     /// Create a new `Conflict` update with [`UpdateTarget::Local`]
-    pub fn conflict_local(update: &VfsDiff) -> Self {
-        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Local, update))
+    pub fn conflict_local(update: &VfsDiff, otherfs_conflict_path: &[VirtualPathBuf]) -> Self {
+        Self::Conflict(UpdateConflict::new(
+            ApplicableUpdate::new(UpdateTarget::Local, update),
+            otherfs_conflict_path,
+        ))
     }
 
     /// Create a new `Conflict` update with [`UpdateTarget::Remote`]
-    pub fn conflict_remote(update: &VfsDiff) -> Self {
-        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Remote, update))
+    pub fn conflict_remote(update: &VfsDiff, otherfs_conflict_path: &[VirtualPathBuf]) -> Self {
+        Self::Conflict(UpdateConflict::new(
+            ApplicableUpdate::new(UpdateTarget::Remote, update),
+            otherfs_conflict_path,
+        ))
     }
 
     /// Create two new `Conflict` updates with [`UpdateTarget::Local`] and
     /// [`UpdateTarget::Remote`]
     pub fn conflict_both(update: &VfsDiff) -> Self {
-        Self::Conflict(ApplicableUpdate::new(UpdateTarget::Both, update))
+        Self::Conflict(UpdateConflict::new_same_path(ApplicableUpdate::new(
+            UpdateTarget::Both,
+            update,
+        )))
     }
 }
 
@@ -700,14 +738,21 @@ impl SortedVec<ReconciledUpdate> {
                     {
                         conflict = true;
                         // Swap the targets because we store the conflicts in the source filesystem
-                        next_update =
-                            ReconciledUpdate::Conflict(next_update.update().invert_target());
+                        next_update = ReconciledUpdate::Conflict(UpdateConflict::new(
+                            next_update.update().invert_target(),
+                            &[parent_update.path().to_owned()],
+                        ));
                         updates.push(next_update);
                     }
 
                     if conflict {
-                        parent_update =
-                            ReconciledUpdate::Conflict(parent_update.update().invert_target())
+                        parent_update = ReconciledUpdate::Conflict(UpdateConflict::new(
+                            parent_update.update().invert_target(),
+                            &updates
+                                .iter()
+                                .map(|update| update.path().to_owned())
+                                .collect::<Vec<_>>(),
+                        ))
                     }
 
                     resolved.push(parent_update);
@@ -1040,6 +1085,49 @@ impl<SyncInfo: ToBytes> From<VfsFileUpdate<SyncInfo>> for VfsFileUpdate<Vec<u8>>
     }
 }
 
+/// A conflict between nodes that will be stored in the Vfs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VfsConflict {
+    update: VfsDiff,
+    otherside_conflict_paths: Vec<VirtualPathBuf>,
+}
+
+impl From<UpdateConflict> for VfsConflict {
+    fn from(value: UpdateConflict) -> Self {
+        Self {
+            update: value.update.update,
+            otherside_conflict_paths: value.otherfs_conflict_path,
+        }
+    }
+}
+
+impl VfsConflict {
+    pub fn new(update: VfsDiff, otherside_conflict_paths: &[VirtualPathBuf]) -> Self {
+        Self {
+            update,
+            otherside_conflict_paths: otherside_conflict_paths.to_vec(),
+        }
+    }
+
+    /// The updates that caused the conflict
+    pub fn update(&self) -> &VfsDiff {
+        &self.update
+    }
+
+    /// The path, in this filesystem, of the update that caused the conflict
+    pub fn path(&self) -> &VirtualPath {
+        self.update.path()
+    }
+
+    /// The path on the other side of the synchro that caused the conflict.
+    ///
+    /// Most of the time, this will be the same path as the one in the update. It may be different
+    /// when a directory has been removed and some of its children have been modified.
+    pub fn otherside_conflict_paths(&self) -> &[VirtualPathBuf] {
+        &self.otherside_conflict_paths
+    }
+}
+
 /// An update that can be applied to the [`Vfs`] at the end of the update lifecycle.
 ///
 /// [`Vfs`]: crate::vfs::Vfs
@@ -1051,7 +1139,7 @@ pub enum VfsUpdate<SyncInfo> {
     FileModified(VfsFileUpdate<SyncInfo>),
     FileRemoved(VirtualPathBuf),
     FailedApplication(FailedUpdateApplication),
-    Conflict(VfsDiff),
+    Conflict(VfsConflict),
     //TODO: detect moves
 }
 

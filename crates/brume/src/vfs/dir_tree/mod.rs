@@ -14,7 +14,7 @@ use crate::{
     Error, NameMismatchError,
     concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
     sorted_vec::{Sortable, SortedVec},
-    update::{FailedUpdateApplication, ModificationState, VirtualReconciledUpdate},
+    update::{FailedUpdateApplication, ModificationState, VfsConflict, VirtualReconciledUpdate},
 };
 
 use super::{
@@ -42,7 +42,7 @@ pub enum NodeState<SyncInfo> {
     /// next time
     Error(FailedUpdateApplication),
     /// There is a conflict on this node that needs to be manually resolved
-    Conflict(VfsDiff),
+    Conflict(VfsConflict),
 }
 
 impl<SyncInfo> NodeState<SyncInfo> {
@@ -484,7 +484,7 @@ impl<SyncInfo> StatefulDirTree<SyncInfo> {
         };
 
         for child in self.children().iter() {
-            ret.extend(child.get_errors_list(&dir_path));
+            ret.extend(child.get_errors_list(dir_path));
         }
 
         ret
@@ -499,7 +499,7 @@ impl<SyncInfo> StatefulDirTree<SyncInfo> {
         };
 
         for child in self.children().iter() {
-            ret.extend(child.get_conflicts_list(&dir_path));
+            ret.extend(child.get_conflicts_list(dir_path));
         }
 
         ret
@@ -990,7 +990,7 @@ impl<SyncInfo: IsModified + Debug> StatefulVfsNode<SyncInfo> {
 
         // If the node is in conflict, we retry it
         if let NodeState::Conflict(diff) = self.state() {
-            return Ok(VfsDiffList::from_vec(vec![diff.clone()]));
+            return Ok(VfsDiffList::from_vec(vec![diff.update().clone()]));
         }
 
         match (self, other) {

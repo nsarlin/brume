@@ -23,7 +23,8 @@ use crate::filesystem::FileSystem;
 use crate::sorted_vec::SortedVec;
 use crate::update::{
     AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, FailedUpdateApplication, IsModified,
-    ReconciledUpdate, ReconciliationError, UpdateKind, VfsDiff, VirtualReconciledUpdate,
+    ReconciledUpdate, ReconciliationError, UpdateConflict, UpdateKind, VfsDiff,
+    VirtualReconciledUpdate,
 };
 use crate::vfs::{
     DirTree, FileInfo, InvalidPathError, StatefulDirTree, Vfs, VfsNode, VirtualPath, VirtualPathBuf,
@@ -579,12 +580,14 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 {
                     Ok(None)
                 } else {
-                    Ok(Some(ReconciledUpdate::Conflict(update)))
+                    Ok(Some(ReconciledUpdate::Conflict(
+                        UpdateConflict::new_same_path(update),
+                    )))
                 }
             }
-            VirtualReconciledUpdate::Conflict(conflict) => {
-                Ok(Some(ReconciledUpdate::Conflict(conflict)))
-            }
+            VirtualReconciledUpdate::Conflict(conflict) => Ok(Some(ReconciledUpdate::Conflict(
+                UpdateConflict::new_same_path(conflict),
+            ))),
         }
     }
 

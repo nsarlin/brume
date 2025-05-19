@@ -17,7 +17,7 @@ use crate::{
     },
     filesystem::FileSystem,
     sorted_vec::SortedVec,
-    update::{AppliedUpdate, ReconciledUpdate, VfsDiff, VfsDiffList, VfsUpdate},
+    update::{AppliedUpdate, ReconciledUpdate, VfsConflict, VfsDiff, VfsDiffList, VfsUpdate},
     vfs::{NodeState, StatefulVfs, VirtualPath},
 };
 
@@ -249,22 +249,23 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
                 ReconciledUpdate::Applicable(applicable) => {
                     applicables.insert(applicable);
                 }
-                ReconciledUpdate::Conflict(update) => {
-                    warn!("conflict on {update:?}");
-                    if update.is_removal() {
+                ReconciledUpdate::Conflict(conflict) => {
+                    warn!("conflict on {:?}", conflict.update());
+                    if conflict.is_removal() {
                         // Don't push removal updates since the node will not exist anymore in the
                         // source Vfs. Instead, store a "reverse" update in the destination
                         // directory. For example, if the update was a removed dir in src, instead
                         // we store a created dir in dest.
-                        conflicts.insert(update.clone().invert());
-                        conflicts.insert(update);
+                        conflicts.insert(conflict.clone().invert());
+                        conflicts.insert(conflict);
                     } else {
-                        conflicts.insert(update);
+                        conflicts.insert(conflict.clone());
                     }
                 }
             }
         }
-        let conflicts = conflicts.remove_duplicates();
+        let conflicts =
+            conflicts.dedup_by(|conflict| (conflict.path().to_owned(), conflict.update().target()));
 
         let (local_updates, remote_updates) = applicables.split_local_remote();
         let (local_conflicts, remote_conflicts) = conflicts.split_local_remote();
@@ -306,17 +307,12 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
             }
         }
 
-        local_res.extend(
-            local_conflicts
-                .clone()
-                .into_iter()
-                .map(|update| VfsUpdate::Conflict(update.clone())),
-        );
+        local_res.extend(local_conflicts.clone().into_iter().map(VfsUpdate::Conflict));
         remote_res.extend(
             remote_conflicts
                 .clone()
                 .into_iter()
-                .map(|update| VfsUpdate::Conflict(update.clone())),
+                .map(VfsUpdate::Conflict),
         );
 
         Ok((
@@ -385,7 +381,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         )
     }
 
-    fn get_conflict_update(&self, path: &VirtualPath, side: SynchroSide) -> Option<VfsDiff> {
+    fn get_conflict_update(&self, path: &VirtualPath, side: SynchroSide) -> Option<VfsConflict> {
         match side {
             SynchroSide::Local => self.local.vfs().find_conflict(path).cloned(),
             SynchroSide::Remote => self.remote.vfs().find_conflict(path).cloned(),
@@ -524,8 +520,9 @@ where
         side: SynchroSide,
     ) -> BoxFuture<'a, Result<ConflictResolutionResult, Error>> {
         Box::pin(async move {
-            if let Some(update) = self.get_conflict_update(path, side) {
-                self.apply_update(side.invert(), update).await?;
+            if let Some(conflict) = self.get_conflict_update(path, side) {
+                self.apply_update(side.invert(), conflict.update().clone())
+                    .await?;
             } else {
                 // If no conflict is found, it probably means that it has been resolved in the
                 // meantime, // so we just log it
@@ -773,12 +770,14 @@ mod test {
 
         let reconciled_ref = SortedVec::from([
             ReconciledUpdate::conflict_both(&modif_update),
-            ReconciledUpdate::conflict_local(&VfsDiff::dir_removed(
-                VirtualPathBuf::new("/a/b").unwrap(),
-            )),
-            ReconciledUpdate::conflict_remote(&VfsDiff::file_created(
-                VirtualPathBuf::new("/a/b/test.log").unwrap(),
-            )),
+            ReconciledUpdate::conflict_local(
+                &VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
+                &[VirtualPathBuf::new("/a/b/test.log").unwrap()],
+            ),
+            ReconciledUpdate::conflict_remote(
+                &VfsDiff::file_created(VirtualPathBuf::new("/a/b/test.log").unwrap()),
+                &[VirtualPathBuf::new("/a/b").unwrap()],
+            ),
         ]);
 
         assert_eq!(reconciled, reconciled_ref);

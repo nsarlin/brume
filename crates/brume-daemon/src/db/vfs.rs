@@ -475,9 +475,10 @@ impl Database {
                     }
                 }
             }
-            VfsUpdate::Conflict(vfs_diff) => {
+            VfsUpdate::Conflict(conflict) => {
+                let vfs_diff = conflict.update();
                 let path = vfs_diff.path().to_owned();
-                let state = NodeState::Conflict(vfs_diff.clone());
+                let state = NodeState::Conflict(conflict.clone());
 
                 // If this is a creation, we need to create the node in the db to store the
                 // conflict
@@ -505,7 +506,9 @@ mod test {
 
     use brume::{
         concrete::{ToBytes, local::LocalDirError},
-        update::{FailedUpdateApplication, VfsDiff, VfsDirCreation, VfsFileUpdate, VfsUpdate},
+        update::{
+            FailedUpdateApplication, VfsConflict, VfsDiff, VfsDirCreation, VfsFileUpdate, VfsUpdate,
+        },
         vfs::{DirTree, FileInfo, NodeKind, NodeState, VfsNode},
     };
     use brume_daemon_proto::{
@@ -531,6 +534,8 @@ mod test {
         let mut base_root = DirTree::new_ok("", ());
         base_root.insert_child(VfsNode::Dir(a.clone()));
         let base_vfs = VfsNode::Dir(base_root);
+
+        let f2_path = VirtualPathBuf::new("/a/b/f2").unwrap();
 
         let creation_update = VfsUpdate::DirCreated(VfsDirCreation::new(VirtualPath::root(), a));
 
@@ -594,11 +599,7 @@ mod test {
 
         assert_eq!(node.kind, NodeKind::Dir.as_str());
 
-        let creation_update = VfsUpdate::FileCreated(VfsFileUpdate::new(
-            &VirtualPathBuf::new("/a/b/f2").unwrap(),
-            42,
-            (),
-        ));
+        let creation_update = VfsUpdate::FileCreated(VfsFileUpdate::new(&f2_path, 42, ()));
         db.update_vfs(fs_ref.id(), &creation_update.into())
             .await
             .unwrap();
@@ -606,19 +607,12 @@ mod test {
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 7);
 
-        let node = db
-            .find_node(&root, &VirtualPathBuf::new("/a/b/f2").unwrap())
-            .await
-            .unwrap();
+        let node = db.find_node(&root, &f2_path).await.unwrap();
 
         assert_eq!(node.kind, NodeKind::File.as_str());
         assert_eq!(node.size, Some(42));
 
-        let creation_update = VfsUpdate::FileModified(VfsFileUpdate::new(
-            &VirtualPathBuf::new("/a/b/f2").unwrap(),
-            54,
-            (),
-        ));
+        let creation_update = VfsUpdate::FileModified(VfsFileUpdate::new(&f2_path, 54, ()));
         db.update_vfs(fs_ref.id(), &creation_update.into())
             .await
             .unwrap();
@@ -626,19 +620,16 @@ mod test {
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 7);
 
-        let node = db
-            .find_node(&root, &VirtualPathBuf::new("/a/b/f2").unwrap())
-            .await
-            .unwrap();
+        let node = db.find_node(&root, &f2_path).await.unwrap();
 
         assert_eq!(node.kind, NodeKind::File.as_str());
         assert_eq!(node.size, Some(54));
 
-        let diff = VfsDiff::file_modified(VirtualPathBuf::new("/a/b/f2").unwrap());
+        let diff = VfsDiff::file_modified(f2_path.clone());
         let failed_diff = FailedUpdateApplication::new(
             diff.clone(),
             LocalDirError::io(
-                VirtualPathBuf::new("/a/b/f2").unwrap(),
+                f2_path.clone(),
                 io::Error::new(ErrorKind::AlreadyExists, "Error"),
             )
             .into(),
@@ -650,24 +641,18 @@ mod test {
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 7);
 
-        let node = db
-            .find_node(&root, &VirtualPathBuf::new("/a/b/f2").unwrap())
-            .await
-            .unwrap();
+        let node = db.find_node(&root, &f2_path).await.unwrap();
 
         let vfs_node = VfsNode::try_from(&node).unwrap();
         assert!(vfs_node.state().is_err());
 
-        let conflict = VfsUpdate::Conflict(diff);
+        let conflict = VfsUpdate::Conflict(VfsConflict::new(diff, &[f2_path.clone()]));
         db.update_vfs(fs_ref.id(), &conflict).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
         assert_eq!(nodes.len(), 7);
 
-        let node = db
-            .find_node(&root, &VirtualPathBuf::new("/a/b/f2").unwrap())
-            .await
-            .unwrap();
+        let node = db.find_node(&root, &f2_path).await.unwrap();
 
         let vfs_node = VfsNode::try_from(&node).unwrap();
         assert!(vfs_node.state().is_conflict());

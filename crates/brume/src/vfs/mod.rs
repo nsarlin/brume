@@ -17,8 +17,8 @@ use crate::{
     NameMismatchError,
     concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
     update::{
-        DiffError, FailedUpdateApplication, IsModified, VfsDiff, VfsDiffList, VfsUpdate,
-        VfsUpdateApplicationError,
+        DiffError, FailedUpdateApplication, IsModified, VfsConflict, VfsDiff, VfsDiffList,
+        VfsUpdate, VfsUpdateApplicationError,
     },
 };
 
@@ -94,7 +94,7 @@ impl<Meta> Vfs<Meta> {
 
 impl<SyncInfo> StatefulVfs<SyncInfo> {
     /// Returns the update inside a node that is in conflict state
-    pub fn find_conflict(&self, path: &VirtualPath) -> Option<&VfsDiff> {
+    pub fn find_conflict(&self, path: &VirtualPath) -> Option<&VfsConflict> {
         let node = self.find_node(path)?;
 
         match node.state() {
@@ -221,20 +221,20 @@ impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
 
                 Ok(())
             }
-            VfsUpdate::Conflict(update) => {
+            VfsUpdate::Conflict(conflict) => {
                 let mut node = loaded_vfs
-                    .find_node(update.path())
+                    .find_node(conflict.path())
                     .map(|node| node.clone().as_ok())
                     // If not found on the loaded vfs, it might have been removed so we try to get
                     // the node on the status one
-                    .or_else(|| self.find_node(update.path()).cloned())
+                    .or_else(|| self.find_node(conflict.path()).cloned())
                     .ok_or_else(|| {
                         VfsUpdateApplicationError::InvalidPath(InvalidPathError::NotFound(
-                            update.path().to_owned(),
+                            conflict.path().to_owned(),
                         ))
                     })?;
 
-                let state = NodeState::Conflict(update.clone());
+                let state = NodeState::Conflict(conflict.clone());
                 node.set_state(state);
 
                 // Ok to unwrap because we checked earlier that "parent" exists
