@@ -1126,6 +1126,48 @@ impl VfsConflict {
     pub fn otherside_conflict_paths(&self) -> &[VirtualPathBuf] {
         &self.otherside_conflict_paths
     }
+
+    /// Returns the list of directory that should be re-created for the conflict resolution
+    ///
+    /// # Example
+    /// Conflict is cause by a dir that has been removed remotely and a file modified locally
+    ///
+    /// ```
+    /// # use brume::update::{VfsConflict, VfsDiff};
+    /// # use brume::vfs::virtual_path::VirtualPathBuf;
+    ///
+    /// let diff = VfsDiff::file_modified(VirtualPathBuf::new("/a/b/c/d/e").unwrap());
+    /// let conflict = VfsConflict::new(diff, &[VirtualPathBuf::new("/a/b").unwrap()]);
+    /// let to_recreate = vec![
+    ///     VfsDiff::dir_created(VirtualPathBuf::new("/a/b").unwrap()),
+    ///     VfsDiff::dir_created(VirtualPathBuf::new("/a/b/c").unwrap()),
+    ///     VfsDiff::dir_created(VirtualPathBuf::new("/a/b/c/d").unwrap()),
+    /// ];
+    /// assert_eq!(conflict.otherside_dir_to_recreate(), to_recreate);
+    /// ```
+    pub fn otherside_dir_to_recreate(&self) -> Vec<VfsDiff> {
+        // Get the paths from the other side update that are parents of this update
+        let missing_paths = self
+            .otherside_conflict_paths
+            .iter()
+            .filter_map(|path| {
+                let diff = self.path().chroot(path).ok()?.parent()?;
+
+                let mut missing = vec![path.to_owned()];
+                let mut base = path.to_owned();
+                for item in diff.iter() {
+                    base.push(item);
+                    missing.push(base.clone());
+                }
+                Some(missing)
+            })
+            .flatten()
+            .collect();
+
+        let dedup_paths = SortedVec::from_vec(missing_paths);
+
+        dedup_paths.into_iter().map(VfsDiff::dir_created).collect()
+    }
 }
 
 /// An update that can be applied to the [`Vfs`] at the end of the update lifecycle.

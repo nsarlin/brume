@@ -165,9 +165,13 @@ impl<Meta> DirTree<Meta> {
     }
 
     /// Inserts a new child for this directory. If there is already a child with the same name,
-    /// returns false.
-    pub fn insert_child(&mut self, child: VfsNode<Meta>) -> bool {
-        self.children.insert(child)
+    /// its metadata will be updated
+    pub fn insert_child(&mut self, child: VfsNode<Meta>) {
+        if let Some(existing) = self.children.find_mut(child.name()) {
+            *existing = child;
+        } else {
+            self.children.insert(child);
+        }
     }
 
     pub fn name(&self) -> &str {

@@ -90,6 +90,27 @@ impl<Meta> Vfs<Meta> {
     pub fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Meta>> {
         self.root.find_node_mut(path)
     }
+
+    /// Deletes the node with the current path in the Vfs.
+    ///
+    /// Return an error if the path is not a valid node.
+    pub fn delete_node(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
+        self.root_mut().as_dir_mut()?.delete_node(path)
+    }
+
+    /// Deletes the dir with the current path in the Vfs.
+    ///
+    /// Returns an error if the path is not a valid directory.
+    pub fn delete_dir(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
+        self.root_mut().as_dir_mut()?.delete_dir(path)
+    }
+
+    /// Deletes the file with the current path in the Vfs.
+    ///
+    /// Returns an error if the path is not a valid file.
+    pub fn delete_file(&mut self, path: &VirtualPath) -> Result<(), DeleteNodeError> {
+        self.root_mut().as_dir_mut()?.delete_file(path)
+    }
 }
 
 impl<SyncInfo> StatefulVfs<SyncInfo> {
@@ -161,28 +182,18 @@ impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
                     }
                     .into());
                 }
-                if parent.insert_child(child) {
-                    Ok(())
-                } else {
-                    Err(VfsUpdateApplicationError::DirExists(path.to_owned()))
-                }
+                parent.insert_child(child);
+                Ok(())
             }
-            VfsUpdate::DirRemoved(path) => self
-                .root_mut()
-                .as_dir_mut()?
-                .delete_dir(path)
-                .map_err(|e| e.into()),
+            VfsUpdate::DirRemoved(path) => self.delete_dir(path).map_err(|e| e.into()),
             VfsUpdate::FileCreated(update) => {
                 let child = VfsNode::File(FileInfo::new(
                     path.name(),
                     update.file_size(),
                     NodeState::Ok(update.sync_info().clone()),
                 ));
-                if parent.insert_child(child) {
-                    Ok(())
-                } else {
-                    Err(VfsUpdateApplicationError::FileExists(path.to_owned()))
-                }
+                parent.insert_child(child);
+                Ok(())
             }
             VfsUpdate::FileModified(update) => {
                 let file = self.root_mut().find_file_mut(update.path())?;
@@ -191,11 +202,7 @@ impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
                 *state = NodeState::Ok(update.sync_info().clone());
                 Ok(())
             }
-            VfsUpdate::FileRemoved(path) => self
-                .root_mut()
-                .as_dir_mut()?
-                .delete_file(path)
-                .map_err(|e| e.into()),
+            VfsUpdate::FileRemoved(path) => self.delete_file(path).map_err(|e| e.into()),
             VfsUpdate::FailedApplication(failure) => {
                 let mut node = loaded_vfs
                     .find_node(failure.path())
@@ -597,18 +604,6 @@ mod test {
         let ref_vfs = Vfs::new(base.clone().unwrap());
 
         let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/e/f/h").unwrap());
-
-        assert!(vfs.apply_update(&update, &ref_vfs).is_err());
-
-        // Test double create
-        let mut vfs = Vfs::new(base.clone());
-
-        let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
-            &VirtualPathBuf::new("/e/g/tmp.txt").unwrap(),
-            0,
-            new_file_info,
-        ));
 
         assert!(vfs.apply_update(&update, &ref_vfs).is_err());
 
