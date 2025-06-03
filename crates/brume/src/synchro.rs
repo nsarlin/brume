@@ -51,14 +51,14 @@ pub enum ConflictResolutionState {
 }
 
 impl ConflictResolutionState {
-    fn new_local<SyncInfo: ToBytes>(info: Option<NodeState<SyncInfo>>) -> Self {
+    pub fn new_local<SyncInfo: ToBytes>(info: Option<NodeState<SyncInfo>>) -> Self {
         match info {
             Some(info) => Self::Local((&info).into()),
             None => Self::None,
         }
     }
 
-    fn new_remote<SyncInfo: ToBytes>(info: Option<NodeState<SyncInfo>>) -> Self {
+    pub fn new_remote<SyncInfo: ToBytes>(info: Option<NodeState<SyncInfo>>) -> Self {
         match info {
             Some(info) => Self::Remote((&info).into()),
             None => Self::None,
@@ -393,29 +393,21 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         &mut self,
         path: &VirtualPath,
         side: SynchroSide,
-    ) -> Result<ConflictResolutionState, Error>
+    ) -> ConflictResolutionState
     where
         LocalBackend::SyncInfo: ToBytes,
         RemoteBackend::SyncInfo: ToBytes,
     {
         match side {
             SynchroSide::Local => {
-                let maybe_state = self
-                    .local
-                    .reload_sync_info(path)
-                    .await
-                    .map_err(|e| Error::vfs_update_application::<LocalBackend>(e))?;
+                let maybe_state = self.remote.mark_conflict_resolved(path).await;
 
-                Ok(ConflictResolutionState::new_local(maybe_state))
+                ConflictResolutionState::new_remote(maybe_state)
             }
             SynchroSide::Remote => {
-                let maybe_state = self
-                    .remote
-                    .reload_sync_info(path)
-                    .await
-                    .map_err(|e| Error::vfs_update_application::<RemoteBackend>(e))?;
+                let maybe_state = self.remote.mark_conflict_resolved(path).await;
 
-                Ok(ConflictResolutionState::new_remote(maybe_state))
+                ConflictResolutionState::new_remote(maybe_state)
             }
         }
     }
@@ -521,15 +513,20 @@ where
     ) -> BoxFuture<'a, Result<ConflictResolutionResult, Error>> {
         Box::pin(async move {
             if let Some(conflict) = self.get_conflict_update(path, side) {
+                for to_recreate in conflict.otherside_dir_to_recreate() {
+                    self.apply_update(side.invert(), to_recreate).await?;
+                }
                 self.apply_update(side.invert(), conflict.update().clone())
                     .await?;
             } else {
                 // If no conflict is found, it probably means that it has been resolved in the
-                // meantime, // so we just log it
+                // meantime, so we just log it
                 warn!("conflict not found on node {path:?}");
             }
 
-            let state = self.mark_conflict_resolved(path, side).await?;
+            // On the other side, the conflict is automatically marked as resolved in the
+            // `apply_update` step
+            let state = self.mark_conflict_resolved(path, side).await;
 
             Ok(ConflictResolutionResult {
                 state,
@@ -958,9 +955,9 @@ mod test {
     }
 
     /// Test conflict handling in synchro where a file is modified on one side and removed on the
-    /// other
+    /// other. The conflict is resolved by confirming the deletion.
     #[tokio::test]
-    async fn test_full_sync_conflict_removed() {
+    async fn test_full_sync_conflict_removed_confirmed() {
         // First synchronize the folders cleanly
         let local_base = D("", vec![]);
         let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
@@ -1044,6 +1041,282 @@ mod test {
         assert_eq!(
             synchro
                 .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Remote)
+                .await
+                .unwrap()
+                .status(),
+            FullSyncStatus::Ok
+        );
+
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+    }
+
+    /// Test conflict handling in synchro where a file is modified on one side and removed on the
+    /// other. The conflict is resolved by cancelling the deletion.
+    #[tokio::test]
+    async fn test_full_sync_conflict_removed_cancelled() {
+        // First synchronize the folders cleanly
+        let local_base = D("", vec![]);
+        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(local_fs, remote_fs);
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
+
+        // Then do a modification on both sides
+        let local_modif = D(
+            "",
+            vec![
+                D(
+                    "Doc",
+                    vec![FF("f1.md", b"hello"), FF("f2.pdf", b"cruel world")],
+                ),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .local
+            .set_backend(ConcreteTestNode::from(local_modif));
+
+        let remote_modif = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .remote
+            .set_backend(ConcreteTestNode::from(remote_modif));
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        assert!(
+            synchro
+                .local
+                .vfs()
+                .find_node("/Doc/f2.pdf".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+        assert!(
+            synchro
+                .remote
+                .vfs()
+                .find_node("/Doc/f2.pdf".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+
+        // Do a second sync to check that the conflict is not lost
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        // Resolve the conflict
+        assert_eq!(
+            synchro
+                .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Local)
+                .await
+                .unwrap()
+                .status(),
+            FullSyncStatus::Ok
+        );
+
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+    }
+
+    /// Test conflict handling in synchro where a file is modified on one side and its parent is
+    /// removed on the other. The conflict is resolved by confirming the deletion.
+    #[tokio::test]
+    async fn test_full_sync_conflict_removed_parent_confirmed() {
+        // First synchronize the folders cleanly
+        let local_base = D("", vec![]);
+        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(local_fs, remote_fs);
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
+
+        // Then do a modification on both sides
+        let local_modif = D(
+            "",
+            vec![
+                D(
+                    "Doc",
+                    vec![FF("f1.md", b"hello"), FF("f2.pdf", b"cruel world")],
+                ),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .local
+            .set_backend(ConcreteTestNode::from(local_modif));
+
+        let remote_modif = D("", vec![FF("file.doc", b"content")]);
+
+        synchro
+            .remote
+            .set_backend(ConcreteTestNode::from(remote_modif));
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        assert!(
+            synchro
+                .local
+                .vfs()
+                .find_node("/Doc/f2.pdf".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+        assert!(
+            synchro
+                .remote
+                .vfs()
+                .find_node("/Doc".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+
+        // Do a second sync to check that the conflict is not lost
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        // Resolve the conflict
+        assert_eq!(
+            synchro
+                .resolve_conflict("/Doc".try_into().unwrap(), SynchroSide::Remote)
+                .await
+                .unwrap()
+                .status(),
+            FullSyncStatus::Ok
+        );
+
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+    }
+
+    /// Test conflict handling in synchro where a file is modified on one side and its parent is
+    /// removed on the other. The conflict is resolved by cancelling the deletion.
+    #[tokio::test]
+    async fn test_full_sync_conflict_removed_parent_cancelled() {
+        // First synchronize the folders cleanly
+        let local_base = D("", vec![]);
+        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(local_fs, remote_fs);
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
+
+        // Then do a modification on both sides
+        let local_modif = D(
+            "",
+            vec![
+                D(
+                    "Doc",
+                    vec![FF("f1.md", b"hello"), FF("f2.pdf", b"cruel world")],
+                ),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .local
+            .set_backend(ConcreteTestNode::from(local_modif));
+
+        let remote_modif = D("", vec![FF("file.doc", b"content")]);
+
+        synchro
+            .remote
+            .set_backend(ConcreteTestNode::from(remote_modif));
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        assert!(
+            synchro
+                .local
+                .vfs()
+                .find_node("/Doc/f2.pdf".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+        assert!(
+            synchro
+                .remote
+                .vfs()
+                .find_node("/Doc".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+
+        // Do a second sync to check that the conflict is not lost
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        // Resolve the conflict
+        assert_eq!(
+            synchro
+                .resolve_conflict("/Doc/f2.pdf".try_into().unwrap(), SynchroSide::Local)
                 .await
                 .unwrap()
                 .status(),

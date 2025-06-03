@@ -89,11 +89,8 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
         while entity.parent()? != Some(current_dir.name()) {
             let parent_opt = dirs.pop();
             if let Some(mut parent) = parent_opt {
-                if parent.insert_child(VfsNode::Dir(current_dir)) {
-                    current_dir = parent;
-                } else {
-                    return Err(NextcloudFsError::BadStructure);
-                }
+                parent.insert_child(VfsNode::Dir(current_dir));
+                current_dir = parent;
             } else {
                 return Err(NextcloudFsError::BadStructure);
             }
@@ -112,11 +109,8 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
     // If there are still directories in the stack, we need to recursively add them as children of
     // their parent.
     while let Some(mut parent) = dirs.pop() {
-        if parent.insert_child(VfsNode::Dir(current_dir)) {
-            current_dir = parent;
-        } else {
-            return Err(NextcloudFsError::BadStructure);
-        }
+        parent.insert_child(VfsNode::Dir(current_dir));
+        current_dir = parent;
     }
     Ok(current_dir)
 }

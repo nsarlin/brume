@@ -135,6 +135,8 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     }
 
     /// Sets the state of a node in the [`Vfs`] to `state`
+    ///
+    /// Returns an error if the path is not valid in the FS, or is the root node
     pub fn set_node_state_vfs(
         &mut self,
         path: &VirtualPath,
@@ -144,24 +146,44 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     }
 
     /// Fetches the sync info from the concrete FS and updates the [`Vfs`] accordingly
+    ///
+    /// Returns None if the node is not present in the Vfs, or an Error if it failed to access the
+    /// concrete FS
     pub async fn reload_sync_info(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<Option<NodeState<Backend::SyncInfo>>, VfsUpdateApplicationError> {
+    ) -> Option<NodeState<Backend::SyncInfo>> {
         // Skip if the node does not exist, meaning it has been removed so there is no state to
         // update
         if self.status_vfs.find_node(path).is_some() {
             let concrete = self.concrete();
             let state = match concrete.backend().get_sync_info(path).await {
                 Ok(info) => NodeState::Ok(info),
-                // If we can reach the concrete FS, we delay until the next full_sync
+                // If we can't reach the concrete FS, we delay until the next full_sync
                 Err(_) => NodeState::NeedResync,
             };
-            self.set_node_state_vfs(path, state.clone())?;
+            self.set_node_state_vfs(path, state.clone())
+                .expect("Path should be valid here because we retrieved it above");
 
-            Ok(Some(state))
+            Some(state)
         } else {
-            Ok(None)
+            None
+        }
+    }
+
+    /// Removes the "conflict" state of the node at the provided path, and returns the updated
+    /// syncinfo
+    pub async fn mark_conflict_resolved(
+        &mut self,
+        path: &VirtualPath,
+    ) -> Option<NodeState<Backend::SyncInfo>> {
+        let conflict = self.vfs().find_conflict(path)?;
+
+        if !conflict.update().is_removal() {
+            self.reload_sync_info(path).await
+        } else {
+            self.vfs_mut().delete_node(path).ok()?;
+            None
         }
     }
 }

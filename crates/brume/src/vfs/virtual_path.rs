@@ -36,7 +36,7 @@ pub struct VirtualPath {
     path: str,
 }
 
-impl Sortable for VirtualPath {
+impl Sortable for &VirtualPath {
     type Key = Self;
 
     fn key(&self) -> &Self::Key {
@@ -100,7 +100,11 @@ impl VirtualPath {
         let new_root_path = new_root.trimmed_path();
 
         if let Some(new_path) = self.path.strip_prefix(new_root_path) {
-            new_path.try_into()
+            if new_path.is_empty() {
+                Ok(Self::root())
+            } else {
+                new_path.try_into()
+            }
         } else {
             Err(VirtualPathError::NotASubpath {
                 base: self.path.to_string(),
@@ -167,7 +171,7 @@ impl VirtualPath {
     }
 
     /// Return the path split in two components, the top level and the rest. For example, the path
-    /// "a/b/c" will return Some("a", "/b/c"). Return None when called on a root path.
+    /// "/a/b/c" will return Some("/a", "/b/c"). Return None when called on a root path.
     pub fn top_level_split(&self) -> Option<(&str, &Self)> {
         if self.is_root() {
             return None;
@@ -367,6 +371,10 @@ mod test {
         let bad_root = VirtualPathBuf::new("/b/random").unwrap();
 
         assert!(base.chroot(&bad_root).is_err());
+
+        let same_path = VirtualPathBuf::new("/a/random/path").unwrap();
+
+        assert_eq!(base.chroot(&same_path).unwrap(), VirtualPath::root());
     }
 
     #[test]
