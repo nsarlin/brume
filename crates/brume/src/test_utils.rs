@@ -1,10 +1,11 @@
 use std::{ffi::OsStr, fmt::Display, ops::Deref, sync::Arc, sync::RwLock, time::SystemTime};
 
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures::{
-    Stream, StreamExt, TryStream, TryStreamExt,
     future::BoxFuture,
     stream::{self, BoxStream},
+    Stream, StreamExt, TryStream, TryStreamExt,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncReadExt};
@@ -13,8 +14,8 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
     concrete::{
-        FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
-        TryFromBytes, local::path::LocalPath,
+        local::path::LocalPath, FSBackend, FsBackendError, FsInstanceDescription,
+        InvalidBytesSyncInfo, Named, ToBytes, TryFromBytes,
     },
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},
@@ -70,11 +71,16 @@ impl TestNode<'_> {
         match self {
             Self::F(name) => {
                 let sync = RecursiveTestSyncInfo::new(0);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::FF(name, content) => {
                 let sync = RecursiveTestSyncInfo::new(xxh3_64(content));
-                VfsNode::File(FileInfo::new_ok(name, content.len() as u64, sync))
+                VfsNode::File(FileInfo::new_ok(
+                    name,
+                    content.len() as u64,
+                    Utc::now(),
+                    sync,
+                ))
             }
             Self::D(name, children) => {
                 let mut path = parent.to_owned();
@@ -106,7 +112,7 @@ impl TestNode<'_> {
             }
             Self::FH(name, hash) => {
                 let sync = RecursiveTestSyncInfo::new(hash);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::DH(name, hash, children) => {
                 let mut path = parent.to_owned();
@@ -140,7 +146,7 @@ impl TestNode<'_> {
                     VfsDiff::file_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
-                VfsNode::File(FileInfo::new_error(name, 0, failed_update))
+                VfsNode::File(FileInfo::new_error(name, 0, Utc::now(), failed_update))
             }
             Self::DE(name, error) => {
                 let mut path = parent.to_owned();
@@ -171,11 +177,16 @@ impl TestNode<'_> {
         match self {
             Self::F(name) => {
                 let sync = ShallowTestSyncInfo::new(0);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::FF(name, content) => {
                 let sync = ShallowTestSyncInfo::new(xxh3_64(content));
-                VfsNode::File(FileInfo::new_ok(name, content.len() as u64, sync))
+                VfsNode::File(FileInfo::new_ok(
+                    name,
+                    content.len() as u64,
+                    Utc::now(),
+                    sync,
+                ))
             }
             Self::D(name, children) => {
                 let mut path = parent.to_owned();
@@ -198,7 +209,7 @@ impl TestNode<'_> {
             }
             Self::FH(name, hash) => {
                 let sync = ShallowTestSyncInfo::new(hash);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::DH(name, hash, children) => {
                 let mut path = parent.to_owned();
@@ -232,7 +243,7 @@ impl TestNode<'_> {
                     VfsDiff::file_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
-                VfsNode::File(FileInfo::new_error(name, 0, failed_update))
+                VfsNode::File(FileInfo::new_error(name, 0, Utc::now(), failed_update))
             }
             Self::DE(name, error) => {
                 let mut path = parent.to_owned();
@@ -631,7 +642,7 @@ impl FSBackend for ConcreteTestNode {
         self.inner.read().unwrap().name().to_string()
     }
 
-    fn get_sync_info<'a>(
+    fn get_node_info<'a>(
         &'a self,
         path: &'a VirtualPath,
     ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
@@ -859,7 +870,7 @@ impl ToBytes for RecursiveTestSyncInfo {
 }
 
 impl TryFromBytes for RecursiveTestSyncInfo {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
         let array = bytes.try_into().unwrap();
         Ok(Self {
             hash: u64::from_le_bytes(array),
@@ -905,7 +916,7 @@ impl ToBytes for ShallowTestSyncInfo {
 }
 
 impl TryFromBytes for ShallowTestSyncInfo {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
         let array = bytes.try_into().unwrap();
         Ok(Self {
             hash: u64::from_le_bytes(array),

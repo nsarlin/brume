@@ -1,5 +1,6 @@
 //! Utilities to parse a dav response
 
+use chrono::{DateTime, Utc};
 use reqwest_dav::list_cmd::ListEntity;
 use thiserror::Error;
 use urlencoding::decode;
@@ -9,7 +10,7 @@ use crate::{
     vfs::{DirTree, FileInfo, VfsNode, VirtualPath, VirtualPathBuf, VirtualPathError},
 };
 
-use super::{NC_DAV_PATH_STR, NextcloudFsError, NextcloudSyncInfo};
+use super::{NextcloudFsError, NextcloudSyncInfo, NC_DAV_PATH_STR};
 
 /// Error encountered when parsing a tag in the WebDAV response
 #[derive(Error, Debug)]
@@ -160,6 +161,13 @@ impl DavEntity {
             .ok_or(TagError::MissingTag)
             .and_then(|tag| parse_dav_tag(tag).map_err(|_| TagError::InvalidTag(tag.to_string())))
     }
+
+    fn last_modified(&self) -> DateTime<Utc> {
+        match &self.entity {
+            ListEntity::File(file) => file.last_modified,
+            ListEntity::Folder(folder) => folder.last_modified,
+        }
+    }
 }
 
 impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
@@ -175,6 +183,7 @@ impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
             ListEntity::File(file) => Ok(VfsNode::File(FileInfo::new(
                 &name,
                 file.content_length as u64,
+                value.last_modified(),
                 sync,
             ))),
             ListEntity::Folder(_) => Ok(VfsNode::Dir(DirTree::new(&name, sync))),

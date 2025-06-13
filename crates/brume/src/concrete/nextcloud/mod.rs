@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture};
+use futures::{future::BoxFuture, Stream, TryStream, TryStreamExt};
 use reqwest::Body;
 use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
 use serde::{Deserialize, Serialize};
@@ -22,10 +22,10 @@ use crate::{
     vfs::{Vfs, VirtualPath, VirtualPathError},
 };
 
-use dav::{TagError, dav_parse_entity_tag, dav_parse_vfs};
+use dav::{dav_parse_entity_tag, dav_parse_vfs, TagError};
 
 use super::{
-    FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
+    FSBackend, FsBackendError, FsInstanceDescription, InvalidBytesSyncInfo, Named, ToBytes,
     TryFromBytes,
 };
 
@@ -138,7 +138,7 @@ impl FSBackend for Nextcloud {
         }
     }
 
-    fn get_sync_info<'a>(
+    fn get_node_info<'a>(
         &'a self,
         path: &'a VirtualPath,
     ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
@@ -274,8 +274,8 @@ impl ToBytes for NextcloudSyncInfo {
 }
 
 impl TryFromBytes for NextcloudSyncInfo {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
-        let byte_array: [u8; 16] = bytes.try_into().map_err(|_| InvalidByteSyncInfo)?;
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
+        let byte_array: [u8; 16] = bytes.try_into().map_err(|_| InvalidBytesSyncInfo)?;
         let tag = u128::from_le_bytes(byte_array);
 
         Ok(Self { tag })

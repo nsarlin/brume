@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
+    concrete::{InvalidBytesSyncInfo, ToBytes, TryFromBytes},
     update::FailedUpdateApplication,
 };
 
@@ -9,16 +9,16 @@ use super::NodeState;
 
 /// Description of a Directory node, with arbitrary user provided metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirInfo<Meta> {
+pub struct DirInfo<Data> {
     name: String,
-    metadata: Meta,
+    data: Data,
 }
 
-impl<Meta> DirInfo<Meta> {
-    pub fn new(name: &str, meta: Meta) -> Self {
+impl<Data> DirInfo<Data> {
+    pub fn new(name: &str, meta: Data) -> Self {
         Self {
             name: name.to_string(),
-            metadata: meta,
+            data: meta,
         }
     }
 
@@ -26,15 +26,19 @@ impl<Meta> DirInfo<Meta> {
         &self.name
     }
 
-    pub fn as_ok(self) -> DirState<Meta> {
+    pub fn into_ok(self) -> DirState<Data> {
         DirState {
             name: self.name,
-            metadata: NodeState::Ok(self.metadata),
+            data: NodeState::Ok(self.data),
         }
     }
 
-    pub fn metadata(&self) -> &Meta {
-        &self.metadata
+    pub fn metadata(&self) -> &Data {
+        &self.data
+    }
+
+    pub fn into_metadata(self) -> Data {
+        self.data
     }
 }
 
@@ -48,37 +52,37 @@ impl<SyncInfo> DirState<SyncInfo> {
     pub fn new_force_resync(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            metadata: NodeState::NeedResync,
+            data: NodeState::NeedResync,
         }
     }
 
     pub fn new_error(name: &str, error: FailedUpdateApplication) -> Self {
         Self {
             name: name.to_string(),
-            metadata: NodeState::Error(error),
+            data: NodeState::Error(error),
         }
     }
 
     pub fn state(&self) -> &NodeState<SyncInfo> {
-        &self.metadata
+        &self.data
     }
 
     pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
-        &mut self.metadata
+        &mut self.data
     }
 
     /// Invalidate the sync info to make them trigger a FSBackend sync on next run
     pub fn force_resync(&mut self) {
-        self.metadata = NodeState::NeedResync;
+        self.data = NodeState::NeedResync;
     }
 
     /// Extract the Ok state of the node, or panic
     #[cfg(test)]
     pub fn unwrap(self) -> DirInfo<SyncInfo> {
-        match self.metadata {
+        match self.data {
             NodeState::Ok(info) => DirInfo {
                 name: self.name,
-                metadata: info,
+                data: info,
             },
             NodeState::NeedResync => panic!("NeedResync"),
             NodeState::Error(_) => panic!("Error"),
@@ -91,7 +95,7 @@ impl<SyncInfo> From<&DirState<SyncInfo>> for DirState<()> {
     fn from(value: &DirState<SyncInfo>) -> Self {
         Self {
             name: value.name.clone(),
-            metadata: (&value.metadata).into(),
+            data: (&value.data).into(),
         }
     }
 }
@@ -100,18 +104,18 @@ impl<SyncInfo: ToBytes> From<&DirState<SyncInfo>> for DirState<Vec<u8>> {
     fn from(value: &DirState<SyncInfo>) -> Self {
         Self {
             name: value.name.clone(),
-            metadata: (&value.metadata).into(),
+            data: (&value.data).into(),
         }
     }
 }
 
 impl<SyncInfo: TryFromBytes> TryFrom<DirState<Vec<u8>>> for DirState<SyncInfo> {
-    type Error = InvalidByteSyncInfo;
+    type Error = InvalidBytesSyncInfo;
 
     fn try_from(value: DirState<Vec<u8>>) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name.clone(),
-            metadata: value.metadata.try_into()?,
+            data: value.data.try_into()?,
         })
     }
 }

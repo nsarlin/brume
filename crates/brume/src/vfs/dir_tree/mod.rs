@@ -11,10 +11,10 @@ pub use file::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, NameMismatchError,
-    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
+    concrete::{InvalidBytesSyncInfo, ToBytes, TryFromBytes},
     sorted_vec::{Sortable, SortedVec},
     update::{FailedUpdateApplication, ModificationState, VfsConflict, VirtualReconciledUpdate},
+    Error, NameMismatchError,
 };
 
 use super::{
@@ -33,9 +33,9 @@ type SortedNodeList<SyncInfo> = SortedVec<VfsNode<SyncInfo>>;
 
 /// The synchronization state of a node
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum NodeState<SyncInfo> {
+pub enum NodeState<Data> {
     /// The node has been correctly synchronized
-    Ok(SyncInfo),
+    Ok(Data),
     /// The node should be re-synchronized at the next synchro, whatever its state
     NeedResync,
     /// The previous synchronization of this node returned an error, it will be re-synchronized
@@ -108,9 +108,9 @@ impl<SyncInfo: ToBytes> From<&NodeState<SyncInfo>> for NodeState<Vec<u8>> {
 }
 
 impl<SyncInfo: TryFromBytes> TryFrom<NodeState<Vec<u8>>> for NodeState<SyncInfo> {
-    type Error = InvalidByteSyncInfo;
+    type Error = InvalidBytesSyncInfo;
 
-    fn try_from(value: NodeState<Vec<u8>>) -> Result<Self, InvalidByteSyncInfo> {
+    fn try_from(value: NodeState<Vec<u8>>) -> Result<Self, InvalidBytesSyncInfo> {
         Ok(match value {
             NodeState::Ok(syncinfo) => NodeState::Ok(SyncInfo::try_from_bytes(syncinfo)?),
             NodeState::NeedResync => NodeState::NeedResync,
@@ -124,17 +124,17 @@ impl<SyncInfo: TryFromBytes> TryFrom<NodeState<Vec<u8>>> for NodeState<SyncInfo>
 ///
 /// It is composed of metadata for the directory itself and a list of children.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirTree<Meta> {
-    info: DirInfo<Meta>,
+pub struct DirTree<Data> {
+    info: DirInfo<Data>,
     // TODO: handle having a dir and file with the same name
-    children: SortedNodeList<Meta>,
+    children: SortedNodeList<Data>,
 }
 
-pub type StatefulDirTree<SyncInfo> = DirTree<NodeState<SyncInfo>>;
+pub type StatefulDirTree<Data> = DirTree<NodeState<Data>>;
 
-impl<Meta> DirTree<Meta> {
+impl<Data> DirTree<Data> {
     /// Creates a new directory with no child and the provided name
-    pub fn new(name: &str, sync: Meta) -> Self {
+    pub fn new(name: &str, sync: Data) -> Self {
         Self {
             info: DirInfo::new(name, sync),
             children: SortedNodeList::new(),
@@ -142,21 +142,21 @@ impl<Meta> DirTree<Meta> {
     }
 
     /// Creates a new directory with the provided name and child nodes
-    pub fn new_with_children(name: &str, sync: Meta, children: Vec<VfsNode<Meta>>) -> Self {
+    pub fn new_with_children(name: &str, sync: Data, children: Vec<VfsNode<Data>>) -> Self {
         Self {
             info: DirInfo::new(name, sync),
             children: SortedNodeList::from_vec(children),
         }
     }
 
-    pub fn metadata(&self) -> &Meta {
+    pub fn metadata(&self) -> &Data {
         self.info.metadata()
     }
 
     /// Converts a stateless dir into a stateful one in the "Ok" state
-    pub fn as_ok(self) -> StatefulDirTree<Meta> {
+    pub fn as_ok(self) -> StatefulDirTree<Data> {
         StatefulDirTree {
-            info: self.info.as_ok(),
+            info: self.info.into_ok(),
             // We know that the input is already sorted
             children: SortedVec::unchecked_from_vec(
                 self.children.into_iter().map(|node| node.as_ok()).collect(),
@@ -166,7 +166,7 @@ impl<Meta> DirTree<Meta> {
 
     /// Inserts a new child for this directory. If there is already a child with the same name,
     /// its metadata will be updated
-    pub fn insert_child(&mut self, child: VfsNode<Meta>) {
+    pub fn insert_child(&mut self, child: VfsNode<Data>) {
         if let Some(existing) = self.children.find_mut(child.name()) {
             *existing = child;
         } else {
@@ -178,14 +178,14 @@ impl<Meta> DirTree<Meta> {
         self.info.name()
     }
 
-    pub fn children(&self) -> &SortedNodeList<Meta> {
+    pub fn children(&self) -> &SortedNodeList<Data> {
         &self.children
     }
 
     /// Returns a reference to the dir at the given path.
     ///
     /// Returns an error if the path does not point to a valid directory node.
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Meta>, InvalidPathError> {
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Data>, InvalidPathError> {
         if path.is_root() {
             Ok(self)
         } else {
@@ -198,7 +198,7 @@ impl<Meta> DirTree<Meta> {
     /// Returns a reference to the file at the given path.
     ///
     /// Returns an error if the path does not point to a valid file.
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Meta>, InvalidPathError> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Data>, InvalidPathError> {
         self.find_node(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| node.as_file())
@@ -207,7 +207,7 @@ impl<Meta> DirTree<Meta> {
     /// Returns a reference to the node at the given path.
     ///
     /// Returns an error if the path does not point to a valid node.
-    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<Meta>> {
+    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<Data>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
                 self.children.find(top_level)
@@ -230,7 +230,7 @@ impl<Meta> DirTree<Meta> {
     pub fn find_dir_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut DirTree<Meta>, InvalidPathError> {
+    ) -> Result<&mut DirTree<Data>, InvalidPathError> {
         if path.is_root() {
             Ok(self)
         } else {
@@ -246,7 +246,7 @@ impl<Meta> DirTree<Meta> {
     pub fn find_file_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
+    ) -> Result<&mut FileInfo<Data>, InvalidPathError> {
         self.find_node_mut(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| node.as_file_mut())
@@ -255,7 +255,7 @@ impl<Meta> DirTree<Meta> {
     /// Returns a mutable reference to the node at the given path.
     ///
     /// Returns None if the path does not point to a valid node.
-    fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Meta>> {
+    fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Data>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
                 self.children.find_mut(top_level)
@@ -289,7 +289,7 @@ impl<Meta> DirTree<Meta> {
     ///
     /// If there were no child with this name returns None. If a child exists but the predicates is
     /// not verified, returns Some(false).
-    pub fn remove_child_if<F: FnOnce(&VfsNode<Meta>) -> bool>(
+    pub fn remove_child_if<F: FnOnce(&VfsNode<Data>) -> bool>(
         &mut self,
         child_name: &str,
         condition: F,
@@ -370,9 +370,9 @@ impl<Meta> DirTree<Meta> {
     ///
     /// This will perform a structural diff between both trees, and return a
     /// [`VirtualReconciledUpdate::NeedBackendCheck`] when two files with the same name are found.
-    pub(crate) fn reconciliation_diff<OtherSyncInfo>(
+    pub(crate) fn reconciliation_diff<OtherData>(
         &self,
-        other: &DirTree<OtherSyncInfo>,
+        other: &DirTree<OtherData>,
         parent_path: &VirtualPath,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, DiffError> {
         let mut dir_path = parent_path.to_owned();
@@ -405,11 +405,11 @@ impl<Meta> DirTree<Meta> {
     }
 }
 
-impl<SyncInfo> StatefulDirTree<SyncInfo> {
+impl<Data> StatefulDirTree<Data> {
     /// Creates a new directory in the `Ok` state
     ///
     /// [`state`]: NodeState
-    pub fn new_ok(name: &str, info: SyncInfo) -> Self {
+    pub fn new_ok(name: &str, info: Data) -> Self {
         Self {
             info: DirInfo::new(name, NodeState::Ok(info)),
             children: SortedNodeList::new(),
@@ -434,18 +434,18 @@ impl<SyncInfo> StatefulDirTree<SyncInfo> {
         }
     }
 
-    pub fn state(&self) -> &NodeState<SyncInfo> {
+    pub fn state(&self) -> &NodeState<Data> {
         self.info.state()
     }
 
-    pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
+    pub fn state_mut(&mut self) -> &mut NodeState<Data> {
         self.info.state_mut()
     }
 
     /// Checks if the two directories are structurally equals.
     ///
     /// This means that their trees are composed of nodes with the same kind and the same name.
-    pub fn structural_eq<OtherSyncInfo>(&self, other: &StatefulDirTree<OtherSyncInfo>) -> bool {
+    pub fn structural_eq<OtherData>(&self, other: &StatefulDirTree<OtherData>) -> bool {
         self.name() == other.name()
             && self.state().matches(other.state())
             && self.children.len() == other.children.len()
@@ -463,7 +463,7 @@ impl<SyncInfo> StatefulDirTree<SyncInfo> {
 
     /// Extract the Ok state of the node, or panic
     #[cfg(test)]
-    pub fn unwrap(self) -> DirTree<SyncInfo> {
+    pub fn unwrap(self) -> DirTree<Data> {
         DirTree {
             info: self.info.unwrap(),
             // input vec is sorted
@@ -510,20 +510,20 @@ impl<SyncInfo> StatefulDirTree<SyncInfo> {
     }
 }
 
-impl<SyncInfo: Clone> DirTree<SyncInfo> {
+impl<Data: Clone> DirTree<Data> {
     /// Replaces an existing existing child based on its name, or insert a new one.
     ///
     /// Returns the replaced child if any, or None if there was no child with this name.
-    pub fn replace_child(&mut self, child: VfsNode<SyncInfo>) -> Option<VfsNode<SyncInfo>> {
+    pub fn replace_child(&mut self, child: VfsNode<Data>) -> Option<VfsNode<Data>> {
         self.children.replace(child)
     }
 }
 
-impl<SyncInfo: IsModified + Debug> StatefulDirTree<SyncInfo> {
+impl<Data: IsModified + Debug> StatefulDirTree<Data> {
     /// Diff two directories based on their content.
     pub fn diff(
         &self,
-        other: &DirTree<SyncInfo>,
+        other: &DirTree<Data>,
         parent_path: &VirtualPath,
     ) -> Result<VfsDiffList, DiffError> {
         let mut dir_path = parent_path.to_owned();
@@ -588,8 +588,8 @@ impl<SyncInfo: IsModified + Debug> StatefulDirTree<SyncInfo> {
     }
 }
 
-impl<SyncInfo> From<&StatefulDirTree<SyncInfo>> for StatefulDirTree<()> {
-    fn from(value: &StatefulDirTree<SyncInfo>) -> Self {
+impl<Data> From<&StatefulDirTree<Data>> for StatefulDirTree<()> {
+    fn from(value: &StatefulDirTree<Data>) -> Self {
         Self {
             info: (&value.info).into(),
             // Ok to use unchecked because the input list is sorted
@@ -600,8 +600,8 @@ impl<SyncInfo> From<&StatefulDirTree<SyncInfo>> for StatefulDirTree<()> {
     }
 }
 
-impl<SyncInfo: ToBytes> From<&StatefulDirTree<SyncInfo>> for StatefulDirTree<Vec<u8>> {
-    fn from(value: &StatefulDirTree<SyncInfo>) -> Self {
+impl<Data: ToBytes> From<&StatefulDirTree<Data>> for StatefulDirTree<Vec<u8>> {
+    fn from(value: &StatefulDirTree<Data>) -> Self {
         Self {
             info: (&value.info).into(),
             // Ok to use unchecked because the input list is sorted
@@ -612,8 +612,8 @@ impl<SyncInfo: ToBytes> From<&StatefulDirTree<SyncInfo>> for StatefulDirTree<Vec
     }
 }
 
-impl<SyncInfo: TryFromBytes> TryFrom<StatefulDirTree<Vec<u8>>> for StatefulDirTree<SyncInfo> {
-    type Error = InvalidByteSyncInfo;
+impl<Data: TryFromBytes> TryFrom<StatefulDirTree<Vec<u8>>> for StatefulDirTree<Data> {
+    type Error = InvalidBytesSyncInfo;
 
     fn try_from(value: StatefulDirTree<Vec<u8>>) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -622,7 +622,7 @@ impl<SyncInfo: TryFromBytes> TryFrom<StatefulDirTree<Vec<u8>>> for StatefulDirTr
                 value
                     .children
                     .into_iter()
-                    .map(StatefulVfsNode::<SyncInfo>::try_from)
+                    .map(StatefulVfsNode::<Data>::try_from)
                     .collect::<Result<_, _>>()?,
             ),
         })
@@ -659,15 +659,30 @@ impl TryFrom<&str> for NodeKind {
 
 /// A node in a File System tree. Can represent a directory or a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum VfsNode<Meta> {
-    Dir(DirTree<Meta>),
-    File(FileInfo<Meta>),
+pub enum VfsNode<Data> {
+    Dir(DirTree<Data>),
+    File(FileInfo<Data>),
+}
+
+/// Metadata of a node
+pub enum NodeInfo<Data> {
+    Dir(DirInfo<Data>),
+    File(FileInfo<Data>),
+}
+
+impl<Data> NodeInfo<Data> {
+    pub fn into_metadata(self) -> Data {
+        match self {
+            NodeInfo::Dir(dir_info) => dir_info.into_metadata(),
+            NodeInfo::File(file_info) => file_info.into_metadata(),
+        }
+    }
 }
 
 /// A [`VfsNode`] associated with a [`NodeState`]
-pub type StatefulVfsNode<SyncInfo> = VfsNode<NodeState<SyncInfo>>;
+pub type StatefulVfsNode<Data> = VfsNode<NodeState<Data>>;
 
-impl<Meta> Sortable for VfsNode<Meta> {
+impl<Data> Sortable for VfsNode<Data> {
     type Key = str;
 
     fn key(&self) -> &Self::Key {
@@ -675,7 +690,7 @@ impl<Meta> Sortable for VfsNode<Meta> {
     }
 }
 
-impl<Meta> VfsNode<Meta> {
+impl<Data> VfsNode<Data> {
     /// Returns the name of the file or directory represented by this node
     pub fn name(&self) -> &str {
         match self {
@@ -684,17 +699,17 @@ impl<Meta> VfsNode<Meta> {
         }
     }
 
-    pub fn metadata(&self) -> &Meta {
+    pub fn metadata(&self) -> &Data {
         match self {
             VfsNode::Dir(dir_tree) => dir_tree.metadata(),
             VfsNode::File(file_info) => file_info.metadata(),
         }
     }
 
-    pub fn as_ok(self) -> StatefulVfsNode<Meta> {
+    pub fn as_ok(self) -> StatefulVfsNode<Data> {
         match self {
             Self::Dir(dir_tree) => StatefulVfsNode::Dir(dir_tree.as_ok()),
-            Self::File(file_info) => StatefulVfsNode::File(file_info.as_ok()),
+            Self::File(file_info) => StatefulVfsNode::File(file_info.into_ok()),
         }
     }
 
@@ -719,23 +734,23 @@ impl<Meta> VfsNode<Meta> {
         }
     }
 
-    pub fn as_dir(&self) -> Result<&DirTree<Meta>, InvalidPathError> {
+    pub fn as_dir(&self) -> Result<&DirTree<Data>, InvalidPathError> {
         self.find_dir(VirtualPath::root())
     }
 
-    pub fn as_dir_mut(&mut self) -> Result<&mut DirTree<Meta>, InvalidPathError> {
+    pub fn as_dir_mut(&mut self) -> Result<&mut DirTree<Data>, InvalidPathError> {
         self.find_dir_mut(VirtualPath::root())
     }
 
-    pub fn as_file(&self) -> Result<&FileInfo<Meta>, InvalidPathError> {
+    pub fn as_file(&self) -> Result<&FileInfo<Data>, InvalidPathError> {
         self.find_file(VirtualPath::root())
     }
 
-    pub fn as_file_mut(&mut self) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
+    pub fn as_file_mut(&mut self) -> Result<&mut FileInfo<Data>, InvalidPathError> {
         self.find_file_mut(VirtualPath::root())
     }
 
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Meta>, InvalidPathError> {
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Data>, InvalidPathError> {
         self.find_node(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -744,7 +759,7 @@ impl<Meta> VfsNode<Meta> {
             })
     }
 
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Meta>, InvalidPathError> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Data>, InvalidPathError> {
         self.find_node(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -773,7 +788,7 @@ impl<Meta> VfsNode<Meta> {
     pub fn find_dir_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut DirTree<Meta>, InvalidPathError> {
+    ) -> Result<&mut DirTree<Data>, InvalidPathError> {
         self.find_node_mut(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -785,7 +800,7 @@ impl<Meta> VfsNode<Meta> {
     pub fn find_file_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
+    ) -> Result<&mut FileInfo<Data>, InvalidPathError> {
         self.find_node_mut(path)
             .ok_or(InvalidPathError::NotFound(path.to_owned()))
             .and_then(|node| match node {
@@ -830,9 +845,9 @@ impl<Meta> VfsNode<Meta> {
     ///
     /// Structurally compare both FS, and return a `NeedBackendCheck` when two files have the same
     /// name.
-    fn reconciliation_diff<OtherSyncInfo>(
+    fn reconciliation_diff<OtherData>(
         &self,
-        other: &VfsNode<OtherSyncInfo>,
+        other: &VfsNode<OtherData>,
         parent_path: &VirtualPath,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, DiffError> {
         match (self, other) {
@@ -887,15 +902,15 @@ impl<Meta> VfsNode<Meta> {
     }
 }
 
-impl<SyncInfo> VfsNode<NodeState<SyncInfo>> {
-    pub fn set_state(&mut self, state: NodeState<SyncInfo>) {
+impl<Data> VfsNode<NodeState<Data>> {
+    pub fn set_state(&mut self, state: NodeState<Data>) {
         match self {
             VfsNode::Dir(dir_tree) => *dir_tree.state_mut() = state,
             VfsNode::File(file_meta) => *file_meta.state_mut() = state,
         }
     }
 
-    pub fn state(&self) -> &NodeState<SyncInfo> {
+    pub fn state(&self) -> &NodeState<Data> {
         match self {
             VfsNode::Dir(dir_tree) => dir_tree.state(),
             VfsNode::File(file_meta) => file_meta.state(),
@@ -904,7 +919,7 @@ impl<SyncInfo> VfsNode<NodeState<SyncInfo>> {
 
     /// Extract the Ok state of the node, or panic
     #[cfg(test)]
-    pub fn unwrap(self) -> VfsNode<SyncInfo> {
+    pub fn unwrap(self) -> VfsNode<Data> {
         match self {
             VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.unwrap()),
             VfsNode::File(file_info) => VfsNode::File(file_info.unwrap()),
@@ -950,7 +965,7 @@ impl<SyncInfo> VfsNode<NodeState<SyncInfo>> {
     ///
     /// Two trees are structurally equals if they have the same shape and are composed of nodes with
     /// the same names.
-    pub fn structural_eq<OtherSyncInfo>(&self, other: &StatefulVfsNode<OtherSyncInfo>) -> bool {
+    pub fn structural_eq<OtherData>(&self, other: &StatefulVfsNode<OtherData>) -> bool {
         match (self, other) {
             (VfsNode::Dir(dself), VfsNode::Dir(dother)) => dself.structural_eq(dother),
             (VfsNode::Dir(_), VfsNode::File(_)) | (VfsNode::File(_), VfsNode::Dir(_)) => false,
@@ -970,13 +985,13 @@ impl<SyncInfo> VfsNode<NodeState<SyncInfo>> {
     }
 }
 
-impl<SyncInfo: IsModified + Debug> StatefulVfsNode<SyncInfo> {
+impl<Data: IsModified + Debug> StatefulVfsNode<Data> {
     /// Diff two nodes based on their content.
     ///
-    /// This uses the `SyncInfo` metadata and does not need to query the concrete filesystem.g
+    /// This uses the `Data` metadata and does not need to query the concrete filesystem.g
     pub fn diff(
         &self,
-        other: &VfsNode<SyncInfo>,
+        other: &VfsNode<Data>,
         parent_path: &VirtualPath,
     ) -> Result<VfsDiffList, DiffError> {
         if self.name() != other.name() {
@@ -1039,7 +1054,7 @@ impl<SyncInfo: ToBytes> From<&StatefulVfsNode<SyncInfo>> for StatefulVfsNode<Vec
 }
 
 impl<SyncInfo: TryFromBytes> TryFrom<StatefulVfsNode<Vec<u8>>> for StatefulVfsNode<SyncInfo> {
-    type Error = InvalidByteSyncInfo;
+    type Error = InvalidBytesSyncInfo;
 
     fn try_from(value: StatefulVfsNode<Vec<u8>>) -> Result<Self, Self::Error> {
         Ok(match value {
@@ -1068,16 +1083,14 @@ mod test {
 
         let node_ref = F("f1.md").into_node();
 
-        assert!(
-            base.find_node(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
-        assert!(
-            base.find_node_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
+        assert!(base
+            .find_node(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
+        assert!(base
+            .find_node_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
         assert_eq!(
             base.find_file(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
                 .unwrap()
@@ -1090,71 +1103,57 @@ mod test {
                 .name(),
             "f1.md"
         );
-        assert!(
-            base.find_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .is_err()
-        );
+        assert!(base
+            .find_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir_mut(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .is_err());
 
         let node_ref = D("b", vec![D("c", vec![])]).into_node();
         let dir_ref = D("b", vec![D("c", vec![])]).into_dir();
 
-        assert!(
-            base.find_node(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
-        assert!(
-            base.find_node_mut(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&node_ref)
-        );
-        assert!(
-            base.find_file(&VirtualPathBuf::new("/a/b").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_file_mut(&VirtualPathBuf::new("/a/b").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&dir_ref)
-        );
-        assert!(
-            base.find_dir_mut(&VirtualPathBuf::new("/a/b").unwrap())
-                .unwrap()
-                .structural_eq(&dir_ref)
-        );
+        assert!(base
+            .find_node(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
+        assert!(base
+            .find_node_mut(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&node_ref));
+        assert!(base
+            .find_file(&VirtualPathBuf::new("/a/b").unwrap())
+            .is_err());
+        assert!(base
+            .find_file_mut(&VirtualPathBuf::new("/a/b").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&dir_ref));
+        assert!(base
+            .find_dir_mut(&VirtualPathBuf::new("/a/b").unwrap())
+            .unwrap()
+            .structural_eq(&dir_ref));
 
-        assert!(
-            base.find_node(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_none()
-        );
-        assert!(
-            base.find_node_mut(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_none()
-        );
-        assert!(
-            base.find_file(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_file_mut(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
-        assert!(
-            base.find_dir_mut(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(base
+            .find_node(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_none());
+        assert!(base
+            .find_node_mut(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_none());
+        assert!(base
+            .find_file(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
+        assert!(base
+            .find_file_mut(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
+        assert!(base
+            .find_dir_mut(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
     }
 
     #[test]
@@ -1206,11 +1205,9 @@ mod test {
         assert!(without_f1.structural_eq(&without_f1_ref));
 
         let mut without_f1 = base.clone();
-        assert!(
-            without_f1
-                .delete_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
-                .is_err()
-        );
+        assert!(without_f1
+            .delete_dir(&VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            .is_err());
         assert!(without_f1.structural_eq(&base));
 
         let mut without_b = base.clone();
@@ -1228,35 +1225,27 @@ mod test {
         assert!(without_b.structural_eq(&without_b_ref));
 
         let mut without_b = base.clone();
-        assert!(
-            without_b
-                .delete_file(&VirtualPathBuf::new("/a/b").unwrap())
-                .is_err()
-        );
+        assert!(without_b
+            .delete_file(&VirtualPathBuf::new("/a/b").unwrap())
+            .is_err());
         assert!(without_b.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(
-            identical
-                .delete_node(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(identical
+            .delete_node(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
         assert!(identical.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(
-            identical
-                .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(identical
+            .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
         assert!(identical.structural_eq(&base));
 
         let mut identical = base.clone();
-        assert!(
-            identical
-                .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
-                .is_err()
-        );
+        assert!(identical
+            .delete_file(&VirtualPathBuf::new("/e/h").unwrap())
+            .is_err());
         assert!(identical.structural_eq(&base));
 
         let mut empty = base.clone();
@@ -1274,11 +1263,9 @@ mod test {
         assert!(empty.structural_eq(&empty_ref));
 
         let mut empty = base.clone();
-        assert!(
-            empty
-                .delete_file(&VirtualPathBuf::new("/").unwrap())
-                .is_err()
-        );
+        assert!(empty
+            .delete_file(&VirtualPathBuf::new("/").unwrap())
+            .is_err());
         assert!(empty.structural_eq(&base));
     }
 

@@ -1,13 +1,18 @@
 //! Various prompts that can be used for user interactions
 mod autocomplete;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
-use brume::{sorted_vec::SortedVec, vfs::StatefulVfs};
+use brume::{
+    sorted_vec::SortedVec,
+    update::{UpdateKind, VfsConflict},
+    vfs::StatefulVfs,
+};
 use brume_daemon_proto::{
     AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroId, SynchroMeta,
-    SynchroSide, VirtualPathBuf,
+    SynchroSide, VirtualPath, VirtualPathBuf,
 };
+use chrono::{DateTime, Utc};
 use comfy_table::Table;
 use inquire::{Password, Select, Text};
 
@@ -102,6 +107,53 @@ pub fn prompt_side() -> Result<SynchroSide, String> {
     }
 }
 
+struct PromptedConlict<'a> {
+    path: &'a VirtualPath,
+    update_kind: UpdateKind,
+    last_modified: DateTime<Utc>,
+}
+
+impl<'a> PromptedConlict<'a> {
+    fn new(conflict: &VfsConflict) -> Self {
+        todo!()
+    }
+
+    fn find(
+        path: &VirtualPath,
+        local_vfs: &StatefulVfs<()>,
+        remote_vfs: &StatefulVfs<()>,
+    ) -> Option<(Vec<Self>, Vec<Self>)> {
+        if let Some(local) = local_vfs.find_conflict(&path) {
+            let remote_conflicts = local
+                .otherside_conflict_paths()
+                .iter()
+                .flat_map(|path| remote_vfs.find_conflict(path).cloned())
+                .collect();
+
+            Some((vec![local.clone()], remote_conflicts))
+        } else {
+            let remote = remote_vfs.find_conflict(&path)?;
+            let local_conflicts = remote
+                .otherside_conflict_paths()
+                .iter()
+                .flat_map(|path| local_vfs.find_conflict(path).cloned())
+                .collect();
+
+            Some((local_conflicts, vec![remote.clone()]))
+        }
+    }
+}
+
+impl<'a> Display for PromptedConlict<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}\n{}\nLast modified: {}",
+            self.path, self.update_kind, self.last_modified
+        )
+    }
+}
+
 /// Prompt for a path with a conflict inside a synchro
 pub fn prompt_conflict_path(
     local_vfs: &StatefulVfs<()>,
@@ -117,25 +169,7 @@ pub fn prompt_conflict_path(
         .map_err(|e| e.to_string())?;
 
     let (local_conflicts, remote_conflicts) =
-        if let Some(local) = local_vfs.find_conflict(&selected) {
-            let remote_conflicts = local
-                .otherside_conflict_paths()
-                .iter()
-                .flat_map(|path| remote_vfs.find_conflict(path).cloned())
-                .collect();
-
-            (vec![local.clone()], remote_conflicts)
-        } else if let Some(remote) = remote_vfs.find_conflict(&selected) {
-            let local_conflicts = remote
-                .otherside_conflict_paths()
-                .iter()
-                .flat_map(|path| local_vfs.find_conflict(path).cloned())
-                .collect();
-
-            (local_conflicts, vec![remote.clone()])
-        } else {
-            panic!()
-        };
+        PromptedConlict::find(&selected, local_vfs, remote_vfs);
 
     let max_len = local_conflicts.len().max(remote_conflicts.len());
 
@@ -144,12 +178,12 @@ pub fn prompt_conflict_path(
 
     let local_column = local_conflicts
         .into_iter()
-        .map(|conflict| format!("{}\n{}", conflict.path(), conflict.update().kind()))
+        .map(|conflict| format!("{}", conflict))
         .chain(std::iter::repeat(String::new()))
         .take(max_len);
     let remote_column = remote_conflicts
         .into_iter()
-        .map(|conflict| format!("{}\n{}", conflict.path(), conflict.update().kind()))
+        .map(|conflict| format!("{}", conflict))
         .chain(std::iter::repeat(String::new()))
         .take(max_len);
 

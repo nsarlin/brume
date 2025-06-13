@@ -8,7 +8,7 @@ use std::{
     time::SystemTime,
 };
 
-use futures::{Stream, StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{stream::BoxStream, Stream, StreamExt, TryStreamExt};
 use log::{debug, warn};
 use tokio::fs::{self, DirEntry, ReadDir};
 
@@ -117,14 +117,16 @@ pub(crate) async fn build_vfs_subtree<P: LocalPath>(
 ) -> Result<Vec<VfsNode<LocalSyncInfo>>, LocalDirError> {
     let mut nodes = Vec::new();
     for path in children {
-        let sync = match path.modification_time().await {
-            Ok(time) => LocalSyncInfo::new(time.into()),
+        let time = match path.modification_time().await {
+            Ok(time) => time.into(),
             Err(err) => {
                 // File might be an invalid symlink, so we just log and skip it
                 warn!("skipping file {path:?}: {err}");
                 continue;
             }
         };
+
+        let sync = LocalSyncInfo::new(time);
 
         if path.is_file().await {
             let file_name = path
@@ -136,6 +138,7 @@ pub(crate) async fn build_vfs_subtree<P: LocalPath>(
                 path.file_size()
                     .await
                     .map_err(|e| LocalDirError::io(path, e))?,
+                time,
                 sync,
             ));
             nodes.push(node);

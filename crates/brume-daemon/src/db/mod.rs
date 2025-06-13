@@ -3,14 +3,14 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use brume::concrete::InvalidByteSyncInfo;
+use brume::concrete::InvalidBytesSyncInfo;
 use deadpool_diesel::PoolError;
 use deadpool_diesel::{
-    Runtime,
     sqlite::{Manager, Pool},
+    Runtime,
 };
 use diesel::prelude::*;
-use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use futures::future::try_join;
 use thiserror::Error;
 use uuid::Uuid;
@@ -173,8 +173,8 @@ impl DatabaseError {
     }
 }
 
-impl From<InvalidByteSyncInfo> for DatabaseError {
-    fn from(value: InvalidByteSyncInfo) -> Self {
+impl From<InvalidBytesSyncInfo> for DatabaseError {
+    fn from(value: InvalidBytesSyncInfo) -> Self {
         Self::InvalidData {
             column: "state".to_string(),
             table: "nodes".to_string(),

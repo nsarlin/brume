@@ -256,6 +256,7 @@ dependencies = [
  "anyhow",
  "brume",
  "brume-daemon-proto",
+ "chrono",
  "clap",
  "comfy-table",
  "fuzzy-matcher",

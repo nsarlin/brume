@@ -3,22 +3,22 @@
 use std::fmt::Display;
 
 use futures::{
+    future::{try_join_all, BoxFuture},
     TryFutureExt,
-    future::{BoxFuture, try_join_all},
 };
 use log::warn;
 use serde::{Deserialize, Serialize};
 use tokio::try_join;
 
 use crate::{
-    Error,
     concrete::{
-        ConcreteUpdateApplicationError, FSBackend, InvalidByteSyncInfo, ToBytes, TryFromBytes,
+        ConcreteUpdateApplicationError, FSBackend, InvalidBytesSyncInfo, ToBytes, TryFromBytes,
     },
     filesystem::FileSystem,
     sorted_vec::SortedVec,
     update::{AppliedUpdate, ReconciledUpdate, VfsConflict, VfsDiff, VfsDiffList, VfsUpdate},
     vfs::{NodeState, StatefulVfs, VirtualPath},
+    Error,
 };
 
 #[derive(Debug)]
@@ -456,7 +456,7 @@ pub trait Synchronized {
     /// deserialization fails
     ///
     /// [`Vfs`]: crate::vfs::Vfs
-    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
+    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo>;
 
     /// Updates the remote [`Vfs`]
     ///
@@ -464,7 +464,7 @@ pub trait Synchronized {
     /// deserialization fails
     ///
     /// [`Vfs`]: crate::vfs::Vfs
-    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
+    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo>;
 }
 
 impl<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static> Synchronized
@@ -543,13 +543,13 @@ where
         self.remote.vfs().into()
     }
 
-    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
+    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo> {
         let typed_vfs = vfs.try_into()?;
         *self.local.vfs_mut() = typed_vfs;
         Ok(())
     }
 
-    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
+    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo> {
         let typed_vfs = vfs.try_into()?;
         *self.remote.vfs_mut() = typed_vfs;
         Ok(())
@@ -917,24 +917,20 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
+        assert!(synchro
+            .local
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
 
         // Do a second sync to check that the conflict is not lost
         assert_eq!(
@@ -1012,24 +1008,20 @@ mod test {
             FullSyncStatus::Conflict
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
+        assert!(synchro
+            .local
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
 
         // Do a second sync to check that the conflict is not lost
         assert_eq!(
@@ -1108,24 +1100,20 @@ mod test {
             FullSyncStatus::Conflict
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
+        assert!(synchro
+            .local
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
 
         // Do a second sync to check that the conflict is not lost
         assert_eq!(
@@ -1198,24 +1186,20 @@ mod test {
             FullSyncStatus::Conflict
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
+        assert!(synchro
+            .local
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
 
         // Do a second sync to check that the conflict is not lost
         assert_eq!(
@@ -1288,24 +1272,20 @@ mod test {
             FullSyncStatus::Conflict
         );
 
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
+        assert!(synchro
+            .local
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
 
         // Do a second sync to check that the conflict is not lost
         assert_eq!(
@@ -1364,15 +1344,13 @@ mod test {
         );
 
         assert_eq!(synchro.local.backend(), &expected_local.into());
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_err()
-        );
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_err());
 
         // fix the error
         let remote_fixed = D(
@@ -1448,15 +1426,13 @@ mod test {
         );
 
         assert_eq!(synchro.local.backend(), &expected_local.into());
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_err()
-        );
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_err());
 
         // Then fix the error
         let remote_fixed = D(
@@ -1518,15 +1494,13 @@ mod test {
 
         assert_eq!(synchro.local.backend(), &expected_local.into());
 
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_err()
-        );
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_err());
 
         // Remove the file
         let remote_fixed = D(
@@ -1602,15 +1576,13 @@ mod test {
         );
 
         assert_eq!(synchro.local.backend(), &expected_local.into());
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_err()
-        );
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_err());
 
         // Now remove the file in error
         let remote_fixed = D(
@@ -1686,15 +1658,13 @@ mod test {
         );
 
         assert_eq!(synchro.local.backend(), &expected_local.into());
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_err()
-        );
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_err());
 
         // Modify the file on the local side
         let modified_local = D(
@@ -1735,23 +1705,19 @@ mod test {
 
         // This should create a conflict
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
-        assert!(
-            synchro
-                .local
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
-        assert!(
-            synchro
-                .remote
-                .vfs()
-                .find_node("/Doc/f2.pdf".try_into().unwrap())
-                .unwrap()
-                .state()
-                .is_conflict()
-        );
+        assert!(synchro
+            .local
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
+        assert!(synchro
+            .remote
+            .vfs()
+            .find_node("/Doc/f2.pdf".try_into().unwrap())
+            .unwrap()
+            .state()
+            .is_conflict());
     }
 }
