@@ -117,14 +117,16 @@ pub(crate) async fn build_vfs_subtree<P: LocalPath>(
 ) -> Result<Vec<VfsNode<LocalSyncInfo>>, LocalDirError> {
     let mut nodes = Vec::new();
     for path in children {
-        let sync = match path.modification_time().await {
-            Ok(time) => LocalSyncInfo::new(time.into()),
+        let time = match path.modification_time().await {
+            Ok(time) => time.into(),
             Err(err) => {
                 // File might be an invalid symlink, so we just log and skip it
                 warn!("skipping file {path:?}: {err}");
                 continue;
             }
         };
+
+        let sync = LocalSyncInfo::new(time);
 
         if path.is_file().await {
             let file_name = path
@@ -136,6 +138,7 @@ pub(crate) async fn build_vfs_subtree<P: LocalPath>(
                 path.file_size()
                     .await
                     .map_err(|e| LocalDirError::io(path, e))?,
+                time,
                 sync,
             ));
             nodes.push(node);
@@ -144,7 +147,7 @@ pub(crate) async fn build_vfs_subtree<P: LocalPath>(
                 .file_name()
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| LocalDirError::invalid_path(path))?;
-            let mut dir_tree = DirTree::new(dir_name, sync);
+            let mut dir_tree = DirTree::new(dir_name, time, sync);
 
             let sub_children = path
                 .read_dir()
@@ -186,7 +189,7 @@ mod test {
 
         let children_nodes = build_vfs_subtree(&base).await.unwrap();
 
-        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
+        let mut root = DirTree::new("", Utc::now(), LocalSyncInfo::new(Utc::now()));
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });
@@ -205,7 +208,7 @@ mod test {
 
         let children_nodes = build_vfs_subtree(&base).await.unwrap();
 
-        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
+        let mut root = DirTree::new("", Utc::now(), LocalSyncInfo::new(Utc::now()));
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });
@@ -221,7 +224,7 @@ mod test {
 
         let children_nodes = build_vfs_subtree(&base).await.unwrap();
 
-        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
+        let mut root = DirTree::new("", Utc::now(), LocalSyncInfo::new(Utc::now()));
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });
@@ -236,7 +239,7 @@ mod test {
 
         let children_nodes = build_vfs_subtree(&base).await.unwrap();
 
-        let mut root = DirTree::new("", LocalSyncInfo::new(Utc::now()));
+        let mut root = DirTree::new("", Utc::now(), LocalSyncInfo::new(Utc::now()));
         children_nodes.into_iter().for_each(|n| {
             root.insert_child(n);
         });

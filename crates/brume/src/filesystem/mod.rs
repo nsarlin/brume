@@ -157,8 +157,8 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         // update
         if self.status_vfs.find_node(path).is_some() {
             let concrete = self.concrete();
-            let state = match concrete.backend().get_sync_info(path).await {
-                Ok(info) => NodeState::Ok(info),
+            let state = match concrete.backend().get_node_info(path).await {
+                Ok(info) => NodeState::Ok(info.into_metadata()),
                 // If we can't reach the concrete FS, we delay until the next full_sync
                 Err(_) => NodeState::NeedResync,
             };

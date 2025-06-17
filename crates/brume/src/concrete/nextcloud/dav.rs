@@ -1,12 +1,18 @@
 //! Utilities to parse a dav response
 
+use std::borrow::Cow;
+
+use chrono::{DateTime, Utc};
 use reqwest_dav::list_cmd::ListEntity;
 use thiserror::Error;
 use urlencoding::decode;
 
 use crate::{
     sorted_vec::{Sortable, SortedVec},
-    vfs::{DirTree, FileInfo, VfsNode, VirtualPath, VirtualPathBuf, VirtualPathError},
+    vfs::{
+        DirInfo, DirTree, FileInfo, NodeInfo, VfsNode, VirtualPath, VirtualPathBuf,
+        VirtualPathError,
+    },
 };
 
 use super::{NC_DAV_PATH_STR, NextcloudFsError, NextcloudSyncInfo};
@@ -58,18 +64,29 @@ pub(crate) fn dav_parse_vfs(
     Ok(root)
 }
 
-pub(crate) fn dav_parse_entity_tag(
+pub(crate) fn dav_parse_entity_meta(
     entity: ListEntity,
-) -> Result<NextcloudSyncInfo, NextcloudFsError> {
+) -> Result<NodeInfo<NextcloudSyncInfo>, NextcloudFsError> {
     let entity = DavEntity {
         entity,
         folder_name: String::new(),
     };
 
-    entity
-        .tag()
-        .map_err(|e| e.into())
-        .map(NextcloudSyncInfo::new)
+    let sync_info = entity.tag().map(NextcloudSyncInfo::new)?;
+
+    match &entity.entity {
+        ListEntity::File(list_file) => Ok(NodeInfo::File(FileInfo::new(
+            &entity.name()?,
+            list_file.content_length as u64,
+            list_file.last_modified,
+            sync_info,
+        ))),
+        ListEntity::Folder(list_folder) => Ok(NodeInfo::Dir(DirInfo::new(
+            &entity.name()?,
+            list_folder.last_modified,
+            sync_info,
+        ))),
+    }
 }
 
 /// Build the tree-like structure of a VFS from a flat list of paths. This function assumes that
@@ -124,8 +141,11 @@ struct DavEntity {
 impl DavEntity {
     /// Return the name of the entity, without its path. Can fail if the path is not valid for the
     /// dav folder.
-    fn name(&self) -> Result<&str, VirtualPathError> {
-        self.path().map(|path| path.name())
+    fn name(&self) -> Result<Cow<str>, NextcloudFsError> {
+        self.path()
+            .map(|path| path.name())
+            .map_err(|e| e.into())
+            .and_then(|name| decode(name).map_err(|e| e.into()))
     }
 
     /// Return the name of the direct parent of the entity. Can fail if the path is not valid for
@@ -160,13 +180,20 @@ impl DavEntity {
             .ok_or(TagError::MissingTag)
             .and_then(|tag| parse_dav_tag(tag).map_err(|_| TagError::InvalidTag(tag.to_string())))
     }
+
+    fn last_modified(&self) -> DateTime<Utc> {
+        match &self.entity {
+            ListEntity::File(file) => file.last_modified,
+            ListEntity::Folder(folder) => folder.last_modified,
+        }
+    }
 }
 
 impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
     type Error = NextcloudFsError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
-        let name = decode(value.name()?)?;
+        let name = value.name()?;
         let tag = value.tag()?;
 
         let sync = NextcloudSyncInfo::new(tag);
@@ -175,9 +202,14 @@ impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
             ListEntity::File(file) => Ok(VfsNode::File(FileInfo::new(
                 &name,
                 file.content_length as u64,
+                value.last_modified(),
                 sync,
             ))),
-            ListEntity::Folder(_) => Ok(VfsNode::Dir(DirTree::new(&name, sync))),
+            ListEntity::Folder(_) => Ok(VfsNode::Dir(DirTree::new(
+                &name,
+                value.last_modified(),
+                sync,
+            ))),
         }
     }
 }

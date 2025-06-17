@@ -17,6 +17,7 @@ diesel::table! {
         state -> Nullable<Binary>,
         size -> Nullable<BigInt>,
         parent -> Nullable<Integer>,
+        last_modified -> Nullable<Timestamp>,
     }
 }
 

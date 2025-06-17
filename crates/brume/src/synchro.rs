@@ -13,7 +13,7 @@ use tokio::try_join;
 use crate::{
     Error,
     concrete::{
-        ConcreteUpdateApplicationError, FSBackend, InvalidByteSyncInfo, ToBytes, TryFromBytes,
+        ConcreteUpdateApplicationError, FSBackend, InvalidBytesSyncInfo, ToBytes, TryFromBytes,
     },
     filesystem::FileSystem,
     sorted_vec::SortedVec,
@@ -414,7 +414,7 @@ pub trait Synchronized {
     /// deserialization fails
     ///
     /// [`Vfs`]: crate::vfs::Vfs
-    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
+    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo>;
 
     /// Updates the remote [`Vfs`]
     ///
@@ -422,7 +422,7 @@ pub trait Synchronized {
     /// deserialization fails
     ///
     /// [`Vfs`]: crate::vfs::Vfs
-    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo>;
+    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo>;
 }
 
 impl<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static> Synchronized
@@ -497,13 +497,13 @@ where
         self.remote.vfs().into()
     }
 
-    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
+    fn set_local_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo> {
         let typed_vfs = vfs.try_into()?;
         *self.local.vfs_mut() = typed_vfs;
         Ok(())
     }
 
-    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidByteSyncInfo> {
+    fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo> {
         let typed_vfs = vfs.try_into()?;
         *self.remote.vfs_mut() = typed_vfs;
         Ok(())

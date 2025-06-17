@@ -19,13 +19,13 @@ mod dav;
 
 use crate::{
     update::{IsModified, ModificationState},
-    vfs::{Vfs, VirtualPath, VirtualPathError},
+    vfs::{DirInfo, FileInfo, NodeInfo, Vfs, VirtualPath, VirtualPathError},
 };
 
-use dav::{TagError, dav_parse_entity_tag, dav_parse_vfs};
+use dav::{TagError, dav_parse_entity_meta, dav_parse_vfs};
 
 use super::{
-    FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
+    FSBackend, FsBackendError, FsInstanceDescription, InvalidBytesSyncInfo, Named, ToBytes,
     TryFromBytes,
 };
 
@@ -138,16 +138,16 @@ impl FSBackend for Nextcloud {
         }
     }
 
-    fn get_sync_info<'a>(
+    fn get_node_info<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+    ) -> BoxFuture<'a, Result<NodeInfo<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async {
             let elements = self.client.list(path.into(), Depth::Number(0)).await?;
 
             let elem = elements.first().ok_or(NextcloudFsError::BadStructure)?;
 
-            dav_parse_entity_tag(elem.clone())
+            dav_parse_entity_meta(elem.clone())
         })
     }
 
@@ -182,7 +182,7 @@ impl FSBackend for Nextcloud {
         &'a self,
         path: &'a VirtualPath,
         data: Data,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>
+    ) -> BoxFuture<'a, Result<FileInfo<Self::SyncInfo>, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
@@ -197,7 +197,8 @@ impl FSBackend for Nextcloud {
             entities
                 .pop()
                 .ok_or(NextcloudFsError::BadStructure)
-                .and_then(dav_parse_entity_tag)
+                .and_then(dav_parse_entity_meta)
+                .and_then(|info| info.into_file_info().ok_or(NextcloudFsError::BadStructure))
         })
     }
 
@@ -208,7 +209,7 @@ impl FSBackend for Nextcloud {
     fn mkdir<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+    ) -> BoxFuture<'a, Result<DirInfo<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async {
             self.client.mkcol(path.into()).await?;
 
@@ -217,7 +218,8 @@ impl FSBackend for Nextcloud {
             entities
                 .pop()
                 .ok_or(NextcloudFsError::BadStructure)
-                .and_then(dav_parse_entity_tag)
+                .and_then(dav_parse_entity_meta)
+                .and_then(|info| info.into_dir_info().ok_or(NextcloudFsError::BadStructure))
         })
     }
 
@@ -274,8 +276,8 @@ impl ToBytes for NextcloudSyncInfo {
 }
 
 impl TryFromBytes for NextcloudSyncInfo {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
-        let byte_array: [u8; 16] = bytes.try_into().map_err(|_| InvalidByteSyncInfo)?;
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
+        let byte_array: [u8; 16] = bytes.try_into().map_err(|_| InvalidBytesSyncInfo)?;
         let tag = u128::from_le_bytes(byte_array);
 
         Ok(Self { tag })

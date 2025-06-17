@@ -24,13 +24,17 @@
 
 use std::fmt::Display;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, NameMismatchError,
     concrete::{ConcreteFileCloneResult, FsBackendError, Named, ToBytes},
     sorted_vec::{Sortable, SortedVec},
-    vfs::{DeleteNodeError, InvalidPathError, StatefulDirTree, Vfs, VirtualPath, VirtualPathBuf},
+    vfs::{
+        DeleteNodeError, FileInfo, InvalidPathError, StatefulDirTree, Vfs, VirtualPath,
+        VirtualPathBuf,
+    },
 };
 
 /// Error encountered during a diff operation
@@ -351,10 +355,10 @@ pub type VfsDiffList = SortedVec<VfsDiff>;
 impl VfsDiffList {
     /// Merge two update lists by calling [`VfsDiff::merge`] on their elements one by
     /// one
-    pub(crate) fn merge<SyncInfo: Named, RemoteSyncInfo: Named>(
+    pub(crate) fn merge<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
         remote_updates: VfsDiffList,
-        local_vfs: &Vfs<SyncInfo>,
+        local_vfs: &Vfs<LocalSyncInfo>,
         remote_vfs: &Vfs<RemoteSyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
         let res = self.iter_zip_map(
@@ -828,21 +832,19 @@ impl<SrcSyncInfo, DstSyncInfo> From<AppliedDirCreation<SrcSyncInfo, DstSyncInfo>
 #[derive(Clone, Debug)]
 pub struct AppliedFileUpdate<SrcSyncInfo, DstSyncInfo> {
     path: VirtualPathBuf,
-    src_file_info: SrcSyncInfo,
-    dst_file_info: DstSyncInfo,
-    file_size: u64,
+    src_file_info: FileInfo<SrcSyncInfo>,
+    dst_file_info: FileInfo<DstSyncInfo>,
 }
 
 impl<SrcSyncInfo, DstSyncInfo> AppliedFileUpdate<SrcSyncInfo, DstSyncInfo> {
     pub fn new(
         path: &VirtualPath,
-        file_size: u64,
-        src_file_info: SrcSyncInfo,
-        dst_file_info: DstSyncInfo,
+        src_file_info: FileInfo<SrcSyncInfo>,
+        dst_file_info: FileInfo<DstSyncInfo>,
     ) -> Self {
         Self {
             path: path.to_owned(),
-            file_size,
+
             src_file_info,
             dst_file_info,
         }
@@ -852,9 +854,8 @@ impl<SrcSyncInfo, DstSyncInfo> AppliedFileUpdate<SrcSyncInfo, DstSyncInfo> {
         path: &VirtualPath,
         clone_result: ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>,
     ) -> Self {
-        let file_size = clone_result.file_size();
         let (src_file_info, dst_file_info) = clone_result.into();
-        Self::new(path, file_size, src_file_info, dst_file_info)
+        Self::new(path, src_file_info, dst_file_info)
     }
 }
 
@@ -862,16 +863,22 @@ impl<SrcSyncInfo, DstSyncInfo> From<AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>>
     for (VfsFileUpdate<SrcSyncInfo>, VfsFileUpdate<DstSyncInfo>)
 {
     fn from(value: AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>) -> Self {
+        let src_size = value.src_file_info.size();
+        let src_modified = value.src_file_info.last_modified();
         let src_update = VfsFileUpdate {
             path: value.path.clone(),
-            file_info: value.src_file_info,
-            file_size: value.file_size,
+            file_info: value.src_file_info.into_metadata(),
+            file_size: src_size,
+            last_modified: src_modified,
         };
 
+        let dst_size = value.dst_file_info.size();
+        let dst_modified = value.dst_file_info.last_modified();
         let dst_update = VfsFileUpdate {
-            path: value.path,
-            file_info: value.dst_file_info,
-            file_size: value.file_size,
+            path: value.path.clone(),
+            file_info: value.dst_file_info.into_metadata(),
+            file_size: dst_size,
+            last_modified: dst_modified,
         };
 
         (src_update, dst_update)
@@ -972,7 +979,7 @@ pub struct FailedUpdateApplication {
 }
 
 impl FailedUpdateApplication {
-    pub fn new(update: VfsDiff, error: FsBackendError) -> Self {
+    pub fn new<E: Display>(update: VfsDiff, error: E) -> Self {
         Self {
             update,
             error: format!("{error}"),
@@ -1050,14 +1057,21 @@ impl<SyncInfo: ToBytes> From<VfsDirCreation<SyncInfo>> for VfsDirCreation<Vec<u8
 pub struct VfsFileUpdate<SyncInfo> {
     path: VirtualPathBuf,
     file_info: SyncInfo,
+    last_modified: DateTime<Utc>,
     file_size: u64,
 }
 
 impl<SyncInfo> VfsFileUpdate<SyncInfo> {
-    pub fn new(path: &VirtualPath, file_size: u64, file_info: SyncInfo) -> Self {
+    pub fn new(
+        path: &VirtualPath,
+        file_size: u64,
+        last_modified: DateTime<Utc>,
+        file_info: SyncInfo,
+    ) -> Self {
         Self {
             path: path.to_owned(),
             file_info,
+            last_modified,
             file_size,
         }
     }
@@ -1070,6 +1084,10 @@ impl<SyncInfo> VfsFileUpdate<SyncInfo> {
         self.file_size
     }
 
+    pub fn last_modified(&self) -> DateTime<Utc> {
+        self.last_modified
+    }
+
     pub fn sync_info(&self) -> &SyncInfo {
         &self.file_info
     }
@@ -1080,6 +1098,7 @@ impl<SyncInfo: ToBytes> From<VfsFileUpdate<SyncInfo>> for VfsFileUpdate<Vec<u8>>
         Self {
             path: value.path,
             file_size: value.file_size,
+            last_modified: value.last_modified,
             file_info: value.file_info.to_bytes(),
         }
     }

@@ -9,6 +9,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::SystemTime,
 };
 
 use bytes::Bytes;
@@ -25,11 +26,11 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::{
     Error,
     update::{IsModified, ModificationState},
-    vfs::{DirTree, FileInfo, Vfs, VfsNode, VirtualPath},
+    vfs::{DirInfo, DirTree, FileInfo, NodeInfo, Vfs, VfsNode, VirtualPath},
 };
 
 use super::{
-    FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
+    FSBackend, FsBackendError, FsInstanceDescription, InvalidBytesSyncInfo, Named, ToBytes,
     TryFromBytes,
 };
 
@@ -141,10 +142,10 @@ impl FSBackend for LocalDir {
         LocalDirDescription::new(&self.path)
     }
 
-    fn get_sync_info<'a>(
+    fn get_node_info<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+    ) -> BoxFuture<'a, Result<NodeInfo<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async {
             let full_path = self.full_path(path);
             LocalSyncInfo::load(full_path).await
@@ -156,7 +157,9 @@ impl FSBackend for LocalDir {
             let metadata = fs::metadata(&self.path)
                 .await
                 .map_err(|e| LocalDirError::io(&self.path, e))?;
-            let sync_info = LocalSyncInfo::load(&self.path).await?;
+            let modified = metadata
+                .modified()
+                .map_err(|e| LocalDirError::io(&self.path, e))?;
 
             let root = if metadata.is_file() {
                 VfsNode::File(FileInfo::new(
@@ -165,10 +168,11 @@ impl FSBackend for LocalDir {
                         .and_then(|s| s.to_str())
                         .ok_or(LocalDirError::invalid_path(&self.path))?,
                     metadata.len(),
-                    sync_info,
+                    modified.into(),
+                    modified.into(),
                 ))
             } else if metadata.is_dir() {
-                let mut root = DirTree::new("", sync_info);
+                let mut root = DirTree::new("", modified.into(), modified.into());
                 let children = self
                     .path
                     .read_dir()
@@ -214,7 +218,7 @@ impl FSBackend for LocalDir {
         &'a self,
         path: &'a VirtualPath,
         data: Data,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>
+    ) -> BoxFuture<'a, Result<FileInfo<Self::SyncInfo>, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
@@ -230,11 +234,22 @@ impl FSBackend for LocalDir {
                 .await
                 .map_err(|e| LocalDirError::io(&self.path, e))?;
 
-            full_path
+            let modified = full_path
                 .modification_time()
                 .await
-                .map(|time| LocalSyncInfo::new(time.into()))
-                .map_err(|e| LocalDirError::io(&self.path, e))
+                .map_err(|e| LocalDirError::io(&self.path, e))?;
+
+            let size = full_path
+                .file_size()
+                .await
+                .map_err(|e| LocalDirError::io(&self.path, e))?;
+
+            Ok(FileInfo::new(
+                path.name(),
+                size,
+                modified.into(),
+                modified.into(),
+            ))
         })
     }
 
@@ -250,7 +265,7 @@ impl FSBackend for LocalDir {
     fn mkdir<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+    ) -> BoxFuture<'a, Result<DirInfo<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async {
             let full_path = self.full_path(path);
             fs::create_dir(&full_path)
@@ -260,7 +275,7 @@ impl FSBackend for LocalDir {
             full_path
                 .modification_time()
                 .await
-                .map(|time| LocalSyncInfo::new(time.into()))
+                .map(|time| DirInfo::new(path.name(), Utc::now(), LocalSyncInfo::new(time.into())))
                 .map_err(|e| LocalDirError::io(&self.path, e))
         })
     }
@@ -295,18 +310,41 @@ impl LocalSyncInfo {
         Self { last_modified }
     }
 
-    pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self, LocalDirError> {
+    pub async fn load<P: AsRef<Path>>(path: P) -> Result<NodeInfo<Self>, LocalDirError> {
         let path = path.as_ref();
         let metadata = fs::metadata(path)
             .await
             .map_err(|e| LocalDirError::io(path, e))?;
+        let modified = metadata
+            .modified()
+            .map_err(|e| LocalDirError::io(path, e))?;
+        let name = path.file_name().unwrap().to_string_lossy();
 
-        Ok(LocalSyncInfo::new(
-            metadata
-                .modified()
-                .map_err(|e| LocalDirError::io(path, e))?
-                .into(),
-        ))
+        let info = if metadata.is_dir() {
+            NodeInfo::Dir(DirInfo::new(&name, modified.into(), modified.into()))
+        } else if metadata.is_file() {
+            NodeInfo::File(FileInfo::new(
+                &name,
+                metadata.len(),
+                modified.into(),
+                modified.into(),
+            ))
+        } else {
+            return Err(LocalDirError::io(
+                path,
+                io::Error::new(io::ErrorKind::InvalidInput, "Expected a file or directory"),
+            ));
+        };
+
+        Ok(info)
+    }
+}
+
+impl From<SystemTime> for LocalSyncInfo {
+    fn from(value: SystemTime) -> Self {
+        Self {
+            last_modified: value.into(),
+        }
     }
 }
 
@@ -347,9 +385,9 @@ impl ToBytes for LocalSyncInfo {
 }
 
 impl TryFromBytes for LocalSyncInfo {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
         if bytes.len() != 12 {
-            return Err(InvalidByteSyncInfo);
+            return Err(InvalidBytesSyncInfo);
         }
 
         // Ok to unwrap because size has been checked
@@ -359,7 +397,7 @@ impl TryFromBytes for LocalSyncInfo {
         let secs = i64::from_le_bytes(secs_bytes);
         let nanos = u32::from_le_bytes(nanos_bytes);
 
-        let last_modified = DateTime::from_timestamp(secs, nanos).ok_or(InvalidByteSyncInfo)?;
+        let last_modified = DateTime::from_timestamp(secs, nanos).ok_or(InvalidBytesSyncInfo)?;
 
         Ok(Self { last_modified })
     }

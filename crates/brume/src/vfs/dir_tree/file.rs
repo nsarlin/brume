@@ -1,7 +1,8 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
+    concrete::{InvalidBytesSyncInfo, ToBytes, TryFromBytes},
     update::FailedUpdateApplication,
 };
 
@@ -9,18 +10,20 @@ use super::NodeState;
 
 /// Description of a File node, with arbitrary user provided metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileInfo<Meta> {
+pub struct FileInfo<Data> {
     name: String,
     size: u64,
-    metadata: Meta,
+    last_modified: DateTime<Utc>,
+    data: Data,
 }
 
-impl<Meta> FileInfo<Meta> {
-    pub fn new(name: &str, size: u64, meta: Meta) -> Self {
+impl<Data> FileInfo<Data> {
+    pub fn new(name: &str, size: u64, last_modified: DateTime<Utc>, meta: Data) -> Self {
         Self {
             name: name.to_string(),
             size,
-            metadata: meta,
+            last_modified,
+            data: meta,
         }
     }
 
@@ -32,19 +35,28 @@ impl<Meta> FileInfo<Meta> {
         self.size
     }
 
-    pub fn metadata(&self) -> &Meta {
-        &self.metadata
+    pub fn last_modified(&self) -> DateTime<Utc> {
+        self.last_modified
+    }
+
+    pub fn metadata(&self) -> &Data {
+        &self.data
+    }
+
+    pub fn into_metadata(self) -> Data {
+        self.data
     }
 
     pub fn set_size(&mut self, size: u64) {
         self.size = size;
     }
 
-    pub fn as_ok(self) -> FileState<Meta> {
+    pub fn into_ok(self) -> FileState<Data> {
         FileState {
             name: self.name,
             size: self.size,
-            metadata: NodeState::Ok(self.metadata),
+            last_modified: self.last_modified,
+            data: NodeState::Ok(self.data),
         }
     }
 }
@@ -52,34 +64,41 @@ impl<Meta> FileInfo<Meta> {
 pub type FileState<SyncInfo> = FileInfo<NodeState<SyncInfo>>;
 
 impl<SyncInfo> FileState<SyncInfo> {
-    pub fn new_ok(name: &str, size: u64, info: SyncInfo) -> Self {
-        Self::new(name, size, NodeState::Ok(info))
+    pub fn new_ok(name: &str, size: u64, last_modified: DateTime<Utc>, info: SyncInfo) -> Self {
+        Self::new(name, size, last_modified, NodeState::Ok(info))
     }
 
-    pub fn new_error(name: &str, size: u64, error: FailedUpdateApplication) -> Self {
+    pub fn new_error(
+        name: &str,
+        size: u64,
+        last_modified: DateTime<Utc>,
+        error: FailedUpdateApplication,
+    ) -> Self {
         Self {
             name: name.to_string(),
             size,
-            metadata: NodeState::Error(error),
+            last_modified,
+            data: NodeState::Error(error),
         }
     }
 
     pub fn state(&self) -> &NodeState<SyncInfo> {
-        &self.metadata
+        &self.data
     }
 
     pub fn state_mut(&mut self) -> &mut NodeState<SyncInfo> {
-        &mut self.metadata
+        &mut self.data
     }
 
     /// Extract the Ok state of the node, or panic
     #[cfg(test)]
     pub fn unwrap(self) -> FileInfo<SyncInfo> {
-        match self.metadata {
+        match self.data {
             NodeState::Ok(info) => FileInfo {
                 name: self.name,
                 size: self.size,
-                metadata: info,
+                last_modified: self.last_modified,
+                data: info,
             },
             NodeState::NeedResync => panic!("NeedResync"),
             NodeState::Error(_) => panic!("Error"),
@@ -93,7 +112,8 @@ impl<SyncInfo> From<&FileState<SyncInfo>> for FileState<()> {
         Self {
             name: value.name.clone(),
             size: value.size,
-            metadata: (&value.metadata).into(),
+            last_modified: value.last_modified,
+            data: (&value.data).into(),
         }
     }
 }
@@ -103,19 +123,21 @@ impl<SyncInfo: ToBytes> From<&FileState<SyncInfo>> for FileState<Vec<u8>> {
         Self {
             name: value.name.clone(),
             size: value.size,
-            metadata: (&value.metadata).into(),
+            last_modified: value.last_modified,
+            data: (&value.data).into(),
         }
     }
 }
 
 impl<SyncInfo: TryFromBytes> TryFrom<FileState<Vec<u8>>> for FileState<SyncInfo> {
-    type Error = InvalidByteSyncInfo;
+    type Error = InvalidBytesSyncInfo;
 
     fn try_from(value: FileState<Vec<u8>>) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name.clone(),
             size: value.size,
-            metadata: value.metadata.try_into()?,
+            last_modified: value.last_modified,
+            data: value.data.try_into()?,
         })
     }
 }
