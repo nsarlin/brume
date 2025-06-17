@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, thread::sleep, time::Duration};
 use brume::{
     concrete::{FsBackendError, local::LocalDir, nextcloud::Nextcloud},
     filesystem::FileSystem,
-    synchro::{ConflictResolutionState, FullSyncStatus, Synchro, SynchroSide, Synchronized},
+    synchro::{FullSyncResult, FullSyncStatus, Synchro, SynchroSide, Synchronized},
     vfs::{StatefulVfs, VirtualPath},
 };
 use futures::{StreamExt, future::join_all, stream};
@@ -454,13 +454,11 @@ impl SynchroList {
 
         // TODO: what to do if synchro is paused? Store the request in a queue or process it
         // immediately? Or return an error?
-        self.resolve_conflict_sync(id, synchro, path, side, db)
-            .await
+        Self::resolve_conflict_sync(id, synchro, path, side, db).await
     }
 
     /// Resolves a conflict on a synchro in the list by applying the update from the chosen side
     async fn resolve_conflict_sync(
-        &self,
         id: SynchroId,
         synchro_lock: &RwLock<RegisteredSynchro>,
         path: &VirtualPath,
@@ -489,39 +487,47 @@ impl SynchroList {
             mutex.resolve_conflict(path, side).await
         };
 
+        Self::handle_sync_result(id, res, synchro_lock, db).await
+    }
+
+    /// Handles the result of a sync, updating the database and the synchro status
+    async fn handle_sync_result(
+        id: SynchroId,
+        res: Result<FullSyncResult, brume::Error>,
+        synchro_lock: &RwLock<RegisteredSynchro>,
+        db: &Database,
+    ) -> Result<(), SyncError> {
         match res {
-            Ok(conflict_result) => {
-                let status = conflict_result.status().into();
-                synchro_lock.write().await.set_status(status);
+            Ok(sync_res) => {
+                let mut status = sync_res.status();
+
+                // Propagate updates to the db
+                let res = db
+                    .apply_sync_updates(
+                        sync_res.local_updates(),
+                        synchro_lock.read().await.local().id(),
+                        sync_res.remote_updates(),
+                        synchro_lock.read().await.remote().id(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        status = FullSyncStatus::Desync;
+                        e.into()
+                    });
+
+                let mut synchro = synchro_lock.write().await;
+                debug!(
+                    "Synchro {} returned with status: {status:?}",
+                    synchro.name()
+                );
+                let status = status.into();
+                synchro.set_status(status);
                 db.set_synchro_status(id, status).await?;
-
-                match conflict_result.state() {
-                    ConflictResolutionState::Local(node_state) => {
-                        db.update_vfs_node_state(
-                            synchro_lock.read().await.local().id(),
-                            path,
-                            node_state,
-                        )
-                        .await?
-                    }
-                    ConflictResolutionState::Remote(node_state) => {
-                        db.update_vfs_node_state(
-                            synchro_lock.read().await.remote().id(),
-                            path,
-                            node_state,
-                        )
-                        .await?
-                    }
-                    ConflictResolutionState::None => {
-                        db.delete_vfs_node(synchro_lock.read().await.local().id(), path)
-                            .await?
-                    }
-                }
-                Ok(())
+                res
             }
-
             Err(err) => {
                 let mut synchro = synchro_lock.write().await;
+                error!("Synchro {} returned an error: {err}", synchro.name());
                 let status = FullSyncStatus::from(&err).into();
                 synchro.set_status(status);
                 db.set_synchro_status(id, status).await?;
@@ -538,7 +544,6 @@ impl SynchroList {
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
     async fn sync_one(
-        &self,
         id: SynchroId,
         synchro_lock: &RwLock<RegisteredSynchro>,
         db: &Database,
@@ -564,43 +569,7 @@ impl SynchroList {
             mutex.full_sync().await
         };
 
-        match res {
-            Ok(sync_res) => {
-                // Propagate updates to the db
-                for update in sync_res.local_updates() {
-                    db.update_vfs(synchro_lock.read().await.local().id(), update)
-                        .await?;
-                }
-
-                for update in sync_res.remote_updates() {
-                    db.update_vfs(synchro_lock.read().await.remote().id(), update)
-                        .await?;
-                }
-
-                let status = sync_res.status();
-                let mut synchro = synchro_lock.write().await;
-                debug!(
-                    "Synchro {} returned with status: {status:?}",
-                    synchro.name()
-                );
-                let status = status.into();
-                synchro.set_status(status);
-                db.set_synchro_status(id, status).await?;
-                Ok(())
-            }
-            Err(err) => {
-                let mut synchro = synchro_lock.write().await;
-                error!("Synchro {} returned an error: {err}", synchro.name());
-                let status = FullSyncStatus::from(&err).into();
-                synchro.set_status(status);
-                db.set_synchro_status(id, status).await?;
-                Err(SynchroFailed {
-                    synchro: synchro.meta.clone(),
-                    source: err,
-                }
-                .into())
-            }
-        }
+        Self::handle_sync_result(id, res, synchro_lock, db).await
     }
 
     /// Performs a [`full_sync`] on all the synchro in the list
@@ -615,7 +584,7 @@ impl SynchroList {
                     return Ok(());
                 }
 
-                self.sync_one(*id, synchro, db).await
+                Self::sync_one(*id, synchro, db).await
             })
             .collect();
 

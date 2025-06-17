@@ -170,22 +170,6 @@ impl<Backend: FSBackend> FileSystem<Backend> {
             None
         }
     }
-
-    /// Removes the "conflict" state of the node at the provided path, and returns the updated
-    /// syncinfo
-    pub async fn mark_conflict_resolved(
-        &mut self,
-        path: &VirtualPath,
-    ) -> Option<NodeState<Backend::SyncInfo>> {
-        let conflict = self.vfs().find_conflict(path)?;
-
-        if !conflict.update().is_removal() {
-            self.reload_sync_info(path).await
-        } else {
-            self.vfs_mut().delete_node(path).ok()?;
-            None
-        }
-    }
 }
 
 #[cfg(test)]

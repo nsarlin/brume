@@ -498,6 +498,25 @@ impl Database {
             }
         }
     }
+
+    /// Apply all updates to the db after a sync
+    pub async fn apply_sync_updates(
+        &self,
+        local_updates: &[VfsUpdate<Vec<u8>>],
+        local_fs_uuid: Uuid,
+        remote_updates: &[VfsUpdate<Vec<u8>>],
+        remote_fs_uuid: Uuid,
+    ) -> Result<(), DatabaseError> {
+        for update in local_updates {
+            self.update_vfs(local_fs_uuid, update).await?;
+        }
+
+        for update in remote_updates {
+            self.update_vfs(remote_fs_uuid, update).await?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

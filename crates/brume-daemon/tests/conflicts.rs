@@ -195,6 +195,81 @@ async fn main() {
     assert_eq!(sync_a.status(), SynchroStatus::Ok);
     assert_eq!(sync_b.status(), SynchroStatus::Ok);
 
+    // Create a second conflict
+    rpc.pause_synchro(context::current(), sync_id_a)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let content_a = b"This is a second test";
+    std::fs::write(
+        dir_a.path().to_path_buf().join("Templates/Readme.md"),
+        content_a,
+    )
+    .unwrap();
+
+    let content_b = b"This is a second toast";
+    std::fs::write(
+        dir_b.path().to_path_buf().join("Templates/Readme.md"),
+        content_b,
+    )
+    .unwrap();
+
+    // Wait for propagation on the first fs
+    wait_full_sync(sync_interval, &rpc).await;
+    if !daemon.is_running() {
+        stop_nextcloud(container).await;
+        exit(1)
+    }
+
+    // Resume the synchro
+    rpc.resume_synchro(context::current(), sync_id_a)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Wait for another propagation
+    wait_full_sync(sync_interval, &rpc).await;
+    if !daemon.is_running() {
+        stop_nextcloud(container).await;
+        exit(1)
+    }
+
+    let list = rpc.list_synchros(context::current()).await.unwrap();
+    let sync_a = list.get(&sync_id_a).unwrap();
+    let sync_b = list.get(&sync_id_b).unwrap();
+    assert_eq!(sync_a.status(), SynchroStatus::Conflict);
+    assert_eq!(sync_b.status(), SynchroStatus::Ok);
+
+    rpc.resolve_conflict(
+        context::current(),
+        sync_id_a,
+        VirtualPathBuf::new("/Templates/Readme.md").unwrap(),
+        SynchroSide::Local,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // Wait for a full propagation
+    wait_full_sync(sync_interval, &rpc).await;
+    if !daemon.is_running() {
+        stop_nextcloud(container).await;
+        exit(1)
+    }
+
+    fs_a.diff_vfs().await.unwrap();
+    fs_b.diff_vfs().await.unwrap();
+    assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
+    let content_b = std::fs::read(dir_a.path().to_path_buf().join("Templates/Readme.md")).unwrap();
+    assert_eq!(content_a, content_b.as_slice());
+
+    let list = rpc.list_synchros(context::current()).await.unwrap();
+    let sync_a = list.get(&sync_id_a).unwrap();
+    let sync_b = list.get(&sync_id_b).unwrap();
+    assert_eq!(sync_a.status(), SynchroStatus::Ok);
+    assert_eq!(sync_b.status(), SynchroStatus::Ok);
+
     daemon.stop();
     daemon_task.await.unwrap().unwrap();
 }
