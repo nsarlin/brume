@@ -1,6 +1,5 @@
 //! Definition of the file operations on real local or remote file systems
 
-mod byte_counter;
 pub mod local;
 pub mod nextcloud;
 
@@ -8,10 +7,9 @@ use std::error::Error;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
-use byte_counter::ByteCounterExt;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures::future::{BoxFuture, join_all, try_join_all};
 use futures::{Stream, TryStream, TryStreamExt};
 use log::{error, info};
@@ -27,13 +25,14 @@ use crate::update::{
     VirtualReconciledUpdate,
 };
 use crate::vfs::{
-    DirTree, FileInfo, InvalidPathError, StatefulDirTree, Vfs, VfsNode, VirtualPath, VirtualPathBuf,
+    DirInfo, DirTree, FileInfo, InvalidPathError, NodeInfo, StatefulDirTree, Vfs, VfsNode,
+    VirtualPath, VirtualPathBuf,
 };
 
-/// The sync info stored in bytes is invalid
+/// The SyncInfo stored in bytes is invalid
 #[derive(Error, Debug)]
 #[error("Failed to load SyncInfo from raw bytes")]
-pub struct InvalidByteSyncInfo;
+pub struct InvalidBytesSyncInfo;
 
 /// A SyncInfo that can be converted to bytes
 ///
@@ -52,15 +51,15 @@ impl ToBytes for () {
 ///
 /// This allows application to load it regardless of its concrete type
 pub trait TryFromBytes: Sized {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo>;
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo>;
 }
 
 impl TryFromBytes for () {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
         if bytes.is_empty() {
             Ok(())
         } else {
-            Err(InvalidByteSyncInfo)
+            Err(InvalidBytesSyncInfo)
         }
     }
 }
@@ -123,6 +122,15 @@ pub enum ConcreteUpdateApplicationError {
     PathIsRoot,
 }
 
+/// Failed to clone a file between filesystems
+#[derive(Error, Debug)]
+pub enum CloneFileError {
+    #[error("The metadata returned by the backend are invalid")]
+    InvalidBackendMeta,
+    #[error("Error returned by the underlying backend")]
+    BackendError(#[from] FsBackendError),
+}
+
 pub trait FsInstanceDescription: Display {
     fn name(&self) -> &str;
 }
@@ -164,11 +172,11 @@ pub trait FSBackend:
     /// form.
     fn description(&self) -> Self::Description;
 
-    /// Returns updated `SyncInfo` for a specific node
-    fn get_sync_info<'a>(
+    /// Returns updated metadata for a specific node
+    fn get_node_info<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>;
+    ) -> BoxFuture<'a, Result<NodeInfo<Self::SyncInfo>, Self::IoError>>;
 
     /// Loads a virtual FS from the concrete one, by parsing its structure
     fn load_virtual(&self) -> BoxFuture<'_, Result<Vfs<Self::SyncInfo>, Self::IoError>>;
@@ -192,7 +200,7 @@ pub trait FSBackend:
         &'a self,
         path: &'a VirtualPath,
         data: Data,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>
+    ) -> BoxFuture<'a, Result<FileInfo<Self::SyncInfo>, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>;
@@ -204,7 +212,7 @@ pub trait FSBackend:
     fn mkdir<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>;
+    ) -> BoxFuture<'a, Result<DirInfo<Self::SyncInfo>, Self::IoError>>;
 
     /// Removes a directory on the concrete filesystem
     fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>>;
@@ -221,27 +229,29 @@ impl<T: FSBackend> Named for T {
 ///
 /// [`Vfs`]: crate::vfs::Vfs
 pub struct ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo> {
-    src_file_info: SrcSyncInfo,
-    dst_file_info: DstSyncInfo,
-    file_size: u64,
+    src_file_info: FileInfo<SrcSyncInfo>,
+    dst_file_info: FileInfo<DstSyncInfo>,
 }
 
 impl<SrcSyncInfo, DstSyncInfo> ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo> {
-    pub fn new(file_size: u64, src_file_info: SrcSyncInfo, dst_file_info: DstSyncInfo) -> Self {
+    pub fn new(src_file_info: FileInfo<SrcSyncInfo>, dst_file_info: FileInfo<DstSyncInfo>) -> Self {
         Self {
-            file_size,
             src_file_info,
             dst_file_info,
         }
     }
 
     pub fn file_size(&self) -> u64 {
-        self.file_size
+        self.src_file_info.size()
+    }
+
+    pub fn last_modified(&self) -> DateTime<Utc> {
+        self.src_file_info.last_modified()
     }
 }
 
 impl<SrcSyncInfo, DstSyncInfo> From<ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>>
-    for (SrcSyncInfo, DstSyncInfo)
+    for (FileInfo<SrcSyncInfo>, FileInfo<DstSyncInfo>)
 {
     fn from(value: ConcreteFileCloneResult<SrcSyncInfo, DstSyncInfo>) -> Self {
         (value.src_file_info, value.dst_file_info)
@@ -305,7 +315,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         ref_dir: &DirTree<RefBackend::SyncInfo>,
         path: &VirtualPath,
     ) -> ConcreteDirCloneResult<RefBackend::SyncInfo, Backend::SyncInfo> {
-        let src_info = match ref_concrete.backend().get_sync_info(path).await {
+        let src_info = match ref_concrete.backend().get_node_info(path).await {
             Ok(dir_info) => dir_info,
             Err(err) => {
                 error!("Failed to create dir {path:?}: {err:?}");
@@ -321,8 +331,16 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             }
         };
 
-        let mut dst_dir = DirTree::new_ok(path.name(), dst_info);
-        let mut src_dir = DirTree::new_ok(path.name(), src_info);
+        let mut dst_dir = DirTree::new_ok(
+            path.name(),
+            dst_info.last_modified(),
+            dst_info.into_metadata(),
+        );
+        let mut src_dir = DirTree::new_ok(
+            path.name(),
+            src_info.last_modified(),
+            src_info.into_metadata(),
+        );
         let mut errors = Vec::new();
 
         let children: Vec<_> = ref_dir
@@ -353,12 +371,9 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 } else {
                     match self.clone_file(ref_concrete, &child_path).await {
                         Ok(clone_result) => {
-                            let size = clone_result.file_size();
                             let (src_info, dst_info) = clone_result.into();
-                            let src_node =
-                                VfsNode::File(FileInfo::new_ok(child_path.name(), size, src_info));
-                            let dst_node =
-                                VfsNode::File(FileInfo::new_ok(child_path.name(), size, dst_info));
+                            let src_node = VfsNode::File(src_info.into_ok());
+                            let dst_node = VfsNode::File(dst_info.into_ok());
                             (Some((src_node, dst_node)), Vec::new())
                         }
                         Err(error) => {
@@ -394,7 +409,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         &self,
         ref_concrete: &ConcreteFS<RefBackend>,
         path: &VirtualPath,
-    ) -> Result<ConcreteFileCloneResult<RefBackend::SyncInfo, Backend::SyncInfo>, FsBackendError>
+    ) -> Result<ConcreteFileCloneResult<RefBackend::SyncInfo, Backend::SyncInfo>, CloneFileError>
     {
         info!(
             "Cloning file {:?} from {} to {}",
@@ -402,16 +417,10 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             RefBackend::TYPE_NAME,
             Backend::TYPE_NAME
         );
-        let counter = Arc::new(AtomicU64::new(0));
-        let stream = ref_concrete
-            .backend
-            .read_file(path)
-            .await
-            .map_err(|e| {
-                error!("Failed to read file {path:?}: {e:?}");
-                e.into()
-            })?
-            .count_bytes(counter.clone());
+        let stream = ref_concrete.backend.read_file(path).await.map_err(|e| {
+            error!("Failed to read file {path:?}: {e:?}");
+            e.into()
+        })?;
         let dst_info = self.backend().write_file(path, stream).await.map_err(|e| {
             error!("Failed to clone file {path:?}: {e:?}");
             e.into()
@@ -420,18 +429,18 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         // TODO: what happens if the src file is modified during the clone?
         let src_info = ref_concrete
             .backend
-            .get_sync_info(path)
+            .get_node_info(path)
             .await
             .map_err(|e| {
                 error!("Failed to read src sync info {path:?}: {e:?}");
                 e.into()
-            })?;
-
-        let size = counter.load(std::sync::atomic::Ordering::SeqCst);
+            })?
+            .into_file_info()
+            .ok_or(CloneFileError::InvalidBackendMeta)?;
 
         info!("File {path:?} successfully cloned");
 
-        Ok(ConcreteFileCloneResult::new(size, src_info, dst_info))
+        Ok(ConcreteFileCloneResult::new(src_info, dst_info))
     }
 
     /// Apply an update on the concrete fs.

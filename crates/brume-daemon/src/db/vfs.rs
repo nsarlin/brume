@@ -1,6 +1,7 @@
 //! How the VFS nodes are stored in the DB
 use std::fmt::Debug;
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use futures::future::Either;
 use uuid::Uuid;
@@ -30,6 +31,7 @@ struct DbVfsNode {
     size: Option<i64>,
     state: Option<Vec<u8>>,
     parent: Option<i32>,
+    last_modified: Option<NaiveDateTime>,
 }
 
 impl<'a> TryFrom<&'a DbVfsNode> for StatefulVfsNode<Vec<u8>> {
@@ -48,14 +50,20 @@ impl<'a> TryFrom<&'a DbVfsNode> for StatefulVfsNode<Vec<u8>> {
             .transpose()?
             .unwrap_or(NodeState::NeedResync);
 
+        let last_modified = value
+            .last_modified
+            .map(|dt| dt.and_utc())
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+
         Ok(match kind {
-            NodeKind::Dir => Self::Dir(DirTree::new(&value.name, state)),
+            NodeKind::Dir => Self::Dir(DirTree::new(&value.name, last_modified, state)),
             NodeKind::File => Self::File(FileInfo::new(
                 &value.name,
                 value
                     .size
                     .ok_or_else(|| DatabaseError::invalid_data("size", "nodes", None))?
                     as u64,
+                last_modified,
                 state,
             )),
         })
@@ -71,6 +79,7 @@ struct DbNewVfsNode<'a> {
     size: Option<i64>,
     state: Option<&'a [u8]>,
     parent: Option<i32>,
+    last_modified: NaiveDateTime,
 }
 
 /// Information returned by an update of a VFS node in the db
@@ -78,6 +87,7 @@ struct DbNewVfsNode<'a> {
 #[diesel(table_name = nodes)]
 struct DbUpdatedVfsNode<'a> {
     size: Option<i64>,
+    last_modified: NaiveDateTime,
     state: Option<&'a [u8]>,
 }
 
@@ -95,6 +105,7 @@ impl DbNewVfsNode<'static> {
             size: None,
             state: None,
             parent: None,
+            last_modified: NaiveDateTime::MIN,
         }
     }
 }
@@ -217,6 +228,7 @@ impl Database {
 
         let file_name = file.name().to_string();
         let file_size = file.size() as i64;
+        let file_last_modified = file.last_modified().naive_utc();
         let file_state = bincode::serialize(file.state()).unwrap();
 
         let conn = self.pool.get().await?;
@@ -228,6 +240,7 @@ impl Database {
                 size: Some(file_size),
                 state: Some(&file_state),
                 parent: Some(parent_node),
+                last_modified: file_last_modified,
             };
 
             diesel::insert_into(nodes).values(&db_node).execute(conn)
@@ -247,6 +260,7 @@ impl Database {
         use crate::schema::nodes::dsl::*;
 
         let dir_name = tree.name().to_string();
+        let dir_last_modified = tree.last_modified().naive_utc();
         let dir_state = bincode::serialize(tree.state()).unwrap();
 
         let new_id = {
@@ -259,6 +273,7 @@ impl Database {
                     size: None,
                     state: Some(&dir_state),
                     parent: Some(parent_node),
+                    last_modified: dir_last_modified
                 };
 
                 diesel::insert_into(nodes)
@@ -307,12 +322,14 @@ impl Database {
 
         let node = self.find_node(root, path).await?;
 
+        let file_last_modified = file.last_modified().naive_utc();
         let conn = self.pool.get().await?;
 
         conn.interact(move |conn| {
             let update = DbUpdatedVfsNode {
                 size: Some(file_size),
                 state: Some(&file_state),
+                last_modified: file_last_modified,
             };
 
             diesel::update(nodes)
@@ -439,6 +456,7 @@ impl Database {
                 let file = FileInfo::new_ok(
                     &name,
                     file_creation.file_size(),
+                    file_creation.last_modified(),
                     file_creation.sync_info().clone(),
                 );
                 self.insert_file(&vfs_root, &path, &file).await
@@ -449,6 +467,7 @@ impl Database {
                 let file = FileInfo::new_ok(
                     &name,
                     file_modification.file_size(),
+                    file_modification.last_modified(),
                     file_modification.sync_info().clone(),
                 );
 
@@ -462,11 +481,20 @@ impl Database {
                 // error
                 match failed_update.update().kind() {
                     UpdateKind::DirCreated => {
-                        let dir = DirTree::new_error(path.name(), failed_update.clone());
+                        let dir = DirTree::new_error(
+                            path.name(),
+                            DateTime::<Utc>::MIN_UTC,
+                            failed_update.clone(),
+                        );
                         self.insert_dir(&vfs_root, &path, &dir).await
                     }
                     UpdateKind::FileCreated => {
-                        let file = FileInfo::new_error(path.name(), 0, failed_update.clone());
+                        let file = FileInfo::new_error(
+                            path.name(),
+                            0,
+                            DateTime::<Utc>::MIN_UTC,
+                            failed_update.clone(),
+                        );
                         self.insert_file(&vfs_root, &path, &file).await
                     }
                     UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
@@ -484,11 +512,11 @@ impl Database {
                 // conflict
                 match vfs_diff.kind() {
                     UpdateKind::DirCreated => {
-                        let dir = DirTree::new(path.name(), state);
+                        let dir = DirTree::new(path.name(), DateTime::<Utc>::MIN_UTC, state);
                         self.insert_dir(&vfs_root, &path, &dir).await
                     }
                     UpdateKind::FileCreated => {
-                        let file = FileInfo::new(path.name(), 0, state);
+                        let file = FileInfo::new(path.name(), 0, DateTime::<Utc>::MIN_UTC, state);
                         self.insert_file(&vfs_root, &path, &file).await
                     }
                     UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
@@ -533,6 +561,7 @@ mod test {
     use brume_daemon_proto::{
         AnyFsCreationInfo, FileSystemMeta, LocalDirCreationInfo, VirtualPath, VirtualPathBuf,
     };
+    use chrono::Utc;
 
     use crate::db::{Database, DatabaseConfig};
 
@@ -540,17 +569,17 @@ mod test {
     async fn test_update_db_vfs() {
         let db = Database::new(&DatabaseConfig::InMemory).await.unwrap();
 
-        let mut a = DirTree::new_ok("a", ());
-        let f1 = FileInfo::new_ok("f1", 10, ());
-        let mut b = DirTree::new_ok("b", ());
-        let c = DirTree::new_ok("c", ());
-        let d = DirTree::new_ok("d", ());
+        let mut a = DirTree::new_ok("a", Utc::now(), ());
+        let f1 = FileInfo::new_ok("f1", 10, Utc::now(), ());
+        let mut b = DirTree::new_ok("b", Utc::now(), ());
+        let c = DirTree::new_ok("c", Utc::now(), ());
+        let d = DirTree::new_ok("d", Utc::now(), ());
 
         b.insert_child(VfsNode::Dir(c));
         a.insert_child(VfsNode::File(f1));
         a.insert_child(VfsNode::Dir(b));
 
-        let mut base_root = DirTree::new_ok("", ());
+        let mut base_root = DirTree::new_ok("", Utc::now(), ());
         base_root.insert_child(VfsNode::Dir(a.clone()));
         let base_vfs = VfsNode::Dir(base_root);
 
@@ -618,7 +647,8 @@ mod test {
 
         assert_eq!(node.kind, NodeKind::Dir.as_str());
 
-        let creation_update = VfsUpdate::FileCreated(VfsFileUpdate::new(&f2_path, 42, ()));
+        let creation_update =
+            VfsUpdate::FileCreated(VfsFileUpdate::new(&f2_path, 42, Utc::now(), ()));
         db.update_vfs(fs_ref.id(), &creation_update.into())
             .await
             .unwrap();
@@ -631,7 +661,8 @@ mod test {
         assert_eq!(node.kind, NodeKind::File.as_str());
         assert_eq!(node.size, Some(42));
 
-        let creation_update = VfsUpdate::FileModified(VfsFileUpdate::new(&f2_path, 54, ()));
+        let creation_update =
+            VfsUpdate::FileModified(VfsFileUpdate::new(&f2_path, 54, Utc::now(), ()));
         db.update_vfs(fs_ref.id(), &creation_update.into())
             .await
             .unwrap();
@@ -650,8 +681,7 @@ mod test {
             LocalDirError::io(
                 f2_path.clone(),
                 io::Error::new(ErrorKind::AlreadyExists, "Error"),
-            )
-            .into(),
+            ),
         );
 
         let failed_update = VfsUpdate::FailedApplication(failed_diff);

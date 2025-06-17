@@ -9,13 +9,14 @@ pub mod virtual_path;
 
 use std::fmt::Debug;
 
+use chrono::{DateTime, Utc};
 pub use dir_tree::*;
 use serde::{Deserialize, Serialize};
 pub use virtual_path::*;
 
 use crate::{
     NameMismatchError,
-    concrete::{InvalidByteSyncInfo, ToBytes, TryFromBytes},
+    concrete::{InvalidBytesSyncInfo, ToBytes, TryFromBytes},
     update::{
         DiffError, FailedUpdateApplication, IsModified, VfsConflict, VfsDiff, VfsDiffList,
         VfsUpdate, VfsUpdateApplicationError,
@@ -28,45 +29,44 @@ use crate::{
 /// - Detecting [`updates`] by comparing its structure and metadata at different points in time
 /// - Storing status information such as errors or conflicts
 ///
-/// `Meta` is a metadata type that will be stored with FS nodes and used for more efficient VFS
-/// comparison, using their implementation of the [`IsModified`] trait.
+/// `Data` is a custom metadata type that will be stored with FS nodes.
 ///
 /// [`updates`]: crate::update
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Vfs<Meta> {
-    root: VfsNode<Meta>,
+pub struct Vfs<Data> {
+    root: VfsNode<Data>,
 }
 
 /// A [`Vfs`] storing a [`NodeState`] inside each nodes
-pub type StatefulVfs<SyncInfo> = Vfs<NodeState<SyncInfo>>;
+pub type StatefulVfs<Data> = Vfs<NodeState<Data>>;
 
-impl<Meta> Vfs<Meta> {
-    pub fn new(root: VfsNode<Meta>) -> Self {
+impl<Data> Vfs<Data> {
+    pub fn new(root: VfsNode<Data>) -> Self {
         Self { root }
     }
 
     /// Return the root node of the VFS
-    pub fn root(&self) -> &VfsNode<Meta> {
+    pub fn root(&self) -> &VfsNode<Data> {
         &self.root
     }
 
     /// Returns a mutable access to the root node of the VFS
-    pub fn root_mut(&mut self) -> &mut VfsNode<Meta> {
+    pub fn root_mut(&mut self) -> &mut VfsNode<Data> {
         &mut self.root
     }
 
     /// Returns the dir at `path` in the VFS
-    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Meta>, InvalidPathError> {
+    pub fn find_dir(&self, path: &VirtualPath) -> Result<&DirTree<Data>, InvalidPathError> {
         self.root.find_dir(path)
     }
 
     /// Returns the file at `path` in the VFS
-    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Meta>, InvalidPathError> {
+    pub fn find_file(&self, path: &VirtualPath) -> Result<&FileInfo<Data>, InvalidPathError> {
         self.root.find_file(path)
     }
 
     /// Returns the node at `path` in the VFS
-    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<Meta>> {
+    pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<Data>> {
         self.root.find_node(path)
     }
 
@@ -74,7 +74,7 @@ impl<Meta> Vfs<Meta> {
     pub fn find_dir_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut DirTree<Meta>, InvalidPathError> {
+    ) -> Result<&mut DirTree<Data>, InvalidPathError> {
         self.root.find_dir_mut(path)
     }
 
@@ -82,12 +82,12 @@ impl<Meta> Vfs<Meta> {
     pub fn find_file_mut(
         &mut self,
         path: &VirtualPath,
-    ) -> Result<&mut FileInfo<Meta>, InvalidPathError> {
+    ) -> Result<&mut FileInfo<Data>, InvalidPathError> {
         self.root.find_file_mut(path)
     }
 
     /// Returns the node at `path` in the VFS, as mutable
-    pub fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Meta>> {
+    pub fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Data>> {
         self.root.find_node_mut(path)
     }
 
@@ -113,7 +113,7 @@ impl<Meta> Vfs<Meta> {
     }
 }
 
-impl<SyncInfo> StatefulVfs<SyncInfo> {
+impl<Data> StatefulVfs<Data> {
     /// Returns the update inside a node that is in conflict state
     pub fn find_conflict(&self, path: &VirtualPath) -> Option<&VfsConflict> {
         let node = self.find_node(path)?;
@@ -132,7 +132,7 @@ impl<SyncInfo> StatefulVfs<SyncInfo> {
 
     pub fn empty() -> Self {
         Self {
-            root: VfsNode::Dir(DirTree::new_force_resync("")),
+            root: VfsNode::Dir(DirTree::new_force_resync("", DateTime::<Utc>::MIN_UTC)),
         }
     }
 
@@ -147,14 +147,14 @@ impl<SyncInfo> StatefulVfs<SyncInfo> {
     }
 }
 
-impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
+impl<Data: Clone> StatefulVfs<Data> {
     /// Applies an update to the Vfs, by adding or removing nodes.
     ///
     /// The created or modified nodes uses the SyncInfo from the [`VfsUpdate`].
     pub fn apply_update(
         &mut self,
-        update: &VfsUpdate<SyncInfo>,
-        loaded_vfs: &Vfs<SyncInfo>,
+        update: &VfsUpdate<Data>,
+        loaded_vfs: &Vfs<Data>,
     ) -> Result<(), VfsUpdateApplicationError> {
         let path = update.path().to_owned();
 
@@ -190,6 +190,7 @@ impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
                 let child = VfsNode::File(FileInfo::new(
                     path.name(),
                     update.file_size(),
+                    update.last_modified(),
                     NodeState::Ok(update.sync_info().clone()),
                 ));
                 parent.insert_child(child);
@@ -261,7 +262,7 @@ impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
     pub fn update_node_state(
         &mut self,
         path: &VirtualPath,
-        state: NodeState<SyncInfo>,
+        state: NodeState<Data>,
     ) -> Result<(), VfsUpdateApplicationError> {
         let parent = self
             .root_mut()
@@ -279,7 +280,7 @@ impl<SyncInfo: Clone> StatefulVfs<SyncInfo> {
     }
 }
 
-impl<SyncInfo: IsModified + Clone + Debug> StatefulVfs<SyncInfo> {
+impl<Data: IsModified + Clone + Debug> StatefulVfs<Data> {
     /// Diff two VFS by comparing their nodes.
     ///
     /// This function returns a sorted list of [`VfsDiff`].
@@ -287,28 +288,28 @@ impl<SyncInfo: IsModified + Clone + Debug> StatefulVfs<SyncInfo> {
     /// [`modification_state`]. The result of the SyncInfo comparison on node is trusted.
     ///
     /// [`modification_state`]: IsModified::modification_state
-    pub fn diff(&self, other: &Vfs<SyncInfo>) -> Result<VfsDiffList, DiffError> {
+    pub fn diff(&self, other: &Vfs<Data>) -> Result<VfsDiffList, DiffError> {
         self.root.diff(other.root(), VirtualPath::root())
     }
 }
 
 // Converts into a generic vfs by dropping the backend specific sync info
-impl<SyncInfo> From<&StatefulVfs<SyncInfo>> for StatefulVfs<()> {
-    fn from(value: &StatefulVfs<SyncInfo>) -> Self {
+impl<Data> From<&StatefulVfs<Data>> for StatefulVfs<()> {
+    fn from(value: &StatefulVfs<Data>) -> Self {
         Self {
             root: (&value.root).into(),
         }
     }
 }
 
-impl<SyncInfo: ToBytes> From<&StatefulVfs<SyncInfo>> for StatefulVfs<Vec<u8>> {
-    fn from(value: &StatefulVfs<SyncInfo>) -> Self {
+impl<Data: ToBytes> From<&StatefulVfs<Data>> for StatefulVfs<Vec<u8>> {
+    fn from(value: &StatefulVfs<Data>) -> Self {
         Vfs::new((&value.root).into())
     }
 }
 
-impl<SyncInfo: TryFromBytes> TryFrom<StatefulVfs<Vec<u8>>> for StatefulVfs<SyncInfo> {
-    type Error = InvalidByteSyncInfo;
+impl<Data: TryFromBytes> TryFrom<StatefulVfs<Vec<u8>>> for StatefulVfs<Data> {
+    type Error = InvalidBytesSyncInfo;
 
     fn try_from(value: StatefulVfs<Vec<u8>>) -> Result<Self, Self::Error> {
         value.root.try_into().map(Vfs::new)
@@ -317,6 +318,8 @@ impl<SyncInfo: TryFromBytes> TryFrom<StatefulVfs<Vec<u8>>> for StatefulVfs<SyncI
 
 #[cfg(test)]
 mod test {
+    use chrono::Utc;
+
     use crate::{
         test_utils::ShallowTestSyncInfo,
         update::{VfsDirCreation, VfsFileUpdate},
@@ -407,6 +410,7 @@ mod test {
         let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
             &VirtualPathBuf::new("/e/g/file.bin").unwrap(),
             0,
+            Utc::now(),
             new_file_info,
         ));
         let ref_vfs = Vfs::new(updated);
@@ -433,6 +437,7 @@ mod test {
         let update = VfsUpdate::FileModified(VfsFileUpdate::new(
             &VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             0,
+            Utc::now(),
             new_file_info,
         ));
         let ref_vfs = Vfs::new(updated);
@@ -542,6 +547,7 @@ mod test {
         let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
             &VirtualPathBuf::new("/file.bin").unwrap(),
             0,
+            Utc::now(),
             new_file_info,
         ));
         let ref_vfs = Vfs::new(updated.clone());
@@ -557,6 +563,7 @@ mod test {
         let update = VfsUpdate::FileModified(VfsFileUpdate::new(
             &VirtualPathBuf::new("/file.bin").unwrap(),
             0,
+            Utc::now(),
             new_file_info,
         ));
         let ref_vfs = Vfs::new(updated.clone());

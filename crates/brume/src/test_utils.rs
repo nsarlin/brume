@@ -1,6 +1,7 @@
 use std::{ffi::OsStr, fmt::Display, ops::Deref, sync::Arc, sync::RwLock, time::SystemTime};
 
 use bytes::Bytes;
+use chrono::Utc;
 use futures::{
     Stream, StreamExt, TryStream, TryStreamExt,
     future::BoxFuture,
@@ -13,14 +14,14 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::{
     concrete::{
-        FSBackend, FsBackendError, FsInstanceDescription, InvalidByteSyncInfo, Named, ToBytes,
+        FSBackend, FsBackendError, FsInstanceDescription, InvalidBytesSyncInfo, Named, ToBytes,
         TryFromBytes, local::path::LocalPath,
     },
     filesystem::FileSystem,
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},
     vfs::{
-        DirTree, FileInfo, NodeState, StatefulDirTree, StatefulVfsNode, Vfs, VfsNode, VirtualPath,
-        VirtualPathBuf,
+        DirInfo, DirTree, FileInfo, NodeInfo, NodeState, StatefulDirTree, StatefulVfsNode, Vfs,
+        VfsNode, VirtualPath, VirtualPathBuf,
     },
 };
 
@@ -70,11 +71,16 @@ impl TestNode<'_> {
         match self {
             Self::F(name) => {
                 let sync = RecursiveTestSyncInfo::new(0);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::FF(name, content) => {
                 let sync = RecursiveTestSyncInfo::new(xxh3_64(content));
-                VfsNode::File(FileInfo::new_ok(name, content.len() as u64, sync))
+                VfsNode::File(FileInfo::new_ok(
+                    name,
+                    content.len() as u64,
+                    Utc::now(),
+                    sync,
+                ))
             }
             Self::D(name, children) => {
                 let mut path = parent.to_owned();
@@ -102,11 +108,16 @@ impl TestNode<'_> {
                 );
 
                 let sync = NodeState::Ok(RecursiveTestSyncInfo::new(hash));
-                VfsNode::Dir(DirTree::new_with_children(name, sync, children_nodes))
+                VfsNode::Dir(DirTree::new_with_children(
+                    name,
+                    Utc::now(),
+                    sync,
+                    children_nodes,
+                ))
             }
             Self::FH(name, hash) => {
                 let sync = RecursiveTestSyncInfo::new(hash);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::DH(name, hash, children) => {
                 let mut path = parent.to_owned();
@@ -115,6 +126,7 @@ impl TestNode<'_> {
                 let sync = NodeState::Ok(RecursiveTestSyncInfo::new(hash));
                 VfsNode::Dir(DirTree::new_with_children(
                     name,
+                    Utc::now(),
                     sync,
                     children
                         .into_iter()
@@ -140,7 +152,7 @@ impl TestNode<'_> {
                     VfsDiff::file_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
-                VfsNode::File(FileInfo::new_error(name, 0, failed_update))
+                VfsNode::File(FileInfo::new_error(name, 0, Utc::now(), failed_update))
             }
             Self::DE(name, error) => {
                 let mut path = parent.to_owned();
@@ -151,7 +163,7 @@ impl TestNode<'_> {
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
 
-                VfsNode::Dir(DirTree::new_error(name, failed_update))
+                VfsNode::Dir(DirTree::new_error(name, Utc::now(), failed_update))
             }
         }
     }
@@ -171,11 +183,16 @@ impl TestNode<'_> {
         match self {
             Self::F(name) => {
                 let sync = ShallowTestSyncInfo::new(0);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::FF(name, content) => {
                 let sync = ShallowTestSyncInfo::new(xxh3_64(content));
-                VfsNode::File(FileInfo::new_ok(name, content.len() as u64, sync))
+                VfsNode::File(FileInfo::new_ok(
+                    name,
+                    content.len() as u64,
+                    Utc::now(),
+                    sync,
+                ))
             }
             Self::D(name, children) => {
                 let mut path = parent.to_owned();
@@ -194,11 +211,16 @@ impl TestNode<'_> {
                         .collect::<Vec<_>>(),
                 );
                 let sync = NodeState::Ok(ShallowTestSyncInfo::new(hash));
-                VfsNode::Dir(DirTree::new_with_children(name, sync, children_nodes))
+                VfsNode::Dir(DirTree::new_with_children(
+                    name,
+                    Utc::now(),
+                    sync,
+                    children_nodes,
+                ))
             }
             Self::FH(name, hash) => {
                 let sync = ShallowTestSyncInfo::new(hash);
-                VfsNode::File(FileInfo::new_ok(name, 0, sync))
+                VfsNode::File(FileInfo::new_ok(name, 0, Utc::now(), sync))
             }
             Self::DH(name, hash, children) => {
                 let mut path = parent.to_owned();
@@ -207,6 +229,7 @@ impl TestNode<'_> {
                 let sync = NodeState::Ok(ShallowTestSyncInfo::new(hash));
                 VfsNode::Dir(DirTree::new_with_children(
                     name,
+                    Utc::now(),
                     sync,
                     children
                         .into_iter()
@@ -232,7 +255,7 @@ impl TestNode<'_> {
                     VfsDiff::file_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
-                VfsNode::File(FileInfo::new_error(name, 0, failed_update))
+                VfsNode::File(FileInfo::new_error(name, 0, Utc::now(), failed_update))
             }
             Self::DE(name, error) => {
                 let mut path = parent.to_owned();
@@ -242,7 +265,7 @@ impl TestNode<'_> {
                     VfsDiff::dir_created(path),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
-                VfsNode::Dir(DirTree::new_error(name, failed_update))
+                VfsNode::Dir(DirTree::new_error(name, Utc::now(), failed_update))
             }
         }
     }
@@ -271,7 +294,7 @@ impl TestNode<'_> {
                 );
 
                 let sync = NodeState::Ok(ShallowTestSyncInfo::new(hash));
-                DirTree::new_with_children(name, sync, children_nodes)
+                DirTree::new_with_children(name, Utc::now(), sync, children_nodes)
             }
             Self::FH(_, _) => {
                 panic!()
@@ -280,6 +303,7 @@ impl TestNode<'_> {
                 let sync = NodeState::Ok(ShallowTestSyncInfo::new(hash));
                 DirTree::new_with_children(
                     name,
+                    Utc::now(),
                     sync,
                     children
                         .into_iter()
@@ -301,7 +325,7 @@ impl TestNode<'_> {
                     VfsDiff::file_created(VirtualPathBuf::root()),
                     FsBackendError::from(io::Error::new(io::ErrorKind::InvalidInput, error)),
                 );
-                DirTree::new_error(name, failed_update)
+                DirTree::new_error(name, Utc::now(), failed_update)
             }
         }
     }
@@ -631,15 +655,15 @@ impl FSBackend for ConcreteTestNode {
         self.inner.read().unwrap().name().to_string()
     }
 
-    fn get_sync_info<'a>(
+    fn get_node_info<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+    ) -> BoxFuture<'a, Result<NodeInfo<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async {
             let inner: VfsNode<_> = self.into();
 
             let node = inner.find_node(path).unwrap();
-            Ok(node.metadata().clone())
+            Ok(node.into())
         })
     }
 
@@ -687,7 +711,7 @@ impl FSBackend for ConcreteTestNode {
         &'a self,
         path: &'a VirtualPath,
         data: Data,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>>
+    ) -> BoxFuture<'a, Result<FileInfo<Self::SyncInfo>, Self::IoError>>
     where
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
@@ -717,15 +741,27 @@ impl FSBackend for ConcreteTestNode {
                     for child in children.iter_mut() {
                         if child.name() == path.name() {
                             let hash = xxh3_64(&content);
+                            let size = content.len() as u64;
                             *child = InnerConcreteTestNode::FF(path.name().to_owned(), content);
-                            return Ok(ShallowTestSyncInfo::new(hash));
+                            return Ok(FileInfo::new(
+                                path.name(),
+                                size,
+                                Utc::now(),
+                                ShallowTestSyncInfo::new(hash),
+                            ));
                         }
                     }
 
                     // Create file
                     let hash = xxh3_64(&content);
+                    let size = content.len() as u64;
                     children.push(InnerConcreteTestNode::FF(path.name().to_owned(), content));
-                    Ok(ShallowTestSyncInfo::new(hash))
+                    Ok(FileInfo::new(
+                        path.name(),
+                        size,
+                        Utc::now(),
+                        ShallowTestSyncInfo::new(hash),
+                    ))
                 }
                 _ => panic!("{path:?}"),
             }
@@ -766,7 +802,7 @@ impl FSBackend for ConcreteTestNode {
     fn mkdir<'a>(
         &'a self,
         path: &'a VirtualPath,
-    ) -> BoxFuture<'a, Result<Self::SyncInfo, Self::IoError>> {
+    ) -> BoxFuture<'a, Result<DirInfo<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async move {
             let mut inner = self.inner.write().unwrap();
             if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
@@ -793,7 +829,11 @@ impl FSBackend for ConcreteTestNode {
                             .collect::<Vec<_>>(),
                     );
 
-                    Ok(ShallowTestSyncInfo::new(hash))
+                    Ok(DirInfo::new(
+                        path.name(),
+                        Utc::now(),
+                        ShallowTestSyncInfo::new(hash),
+                    ))
                 }
                 _ => panic!("{path:?}"),
             }
@@ -859,7 +899,7 @@ impl ToBytes for RecursiveTestSyncInfo {
 }
 
 impl TryFromBytes for RecursiveTestSyncInfo {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
         let array = bytes.try_into().unwrap();
         Ok(Self {
             hash: u64::from_le_bytes(array),
@@ -905,7 +945,7 @@ impl ToBytes for ShallowTestSyncInfo {
 }
 
 impl TryFromBytes for ShallowTestSyncInfo {
-    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidByteSyncInfo> {
+    fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
         let array = bytes.try_into().unwrap();
         Ok(Self {
             hash: u64::from_le_bytes(array),

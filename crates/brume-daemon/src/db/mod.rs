@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use brume::concrete::InvalidByteSyncInfo;
+use brume::concrete::InvalidBytesSyncInfo;
 use deadpool_diesel::PoolError;
 use deadpool_diesel::{
     Runtime,
@@ -173,8 +173,8 @@ impl DatabaseError {
     }
 }
 
-impl From<InvalidByteSyncInfo> for DatabaseError {
-    fn from(value: InvalidByteSyncInfo) -> Self {
+impl From<InvalidBytesSyncInfo> for DatabaseError {
+    fn from(value: InvalidBytesSyncInfo) -> Self {
         Self::InvalidData {
             column: "state".to_string(),
             table: "nodes".to_string(),
