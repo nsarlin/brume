@@ -18,10 +18,10 @@ use crate::{
     filesystem::FileSystem,
     sorted_vec::SortedVec,
     update::{AppliedUpdate, ReconciledUpdate, VfsConflict, VfsDiff, VfsDiffList, VfsUpdate},
-    vfs::{NodeState, StatefulVfs, VirtualPath},
+    vfs::{StatefulVfs, VirtualPath},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FullSyncResult {
     local_updates: Vec<VfsUpdate<Vec<u8>>>,
     remote_updates: Vec<VfsUpdate<Vec<u8>>>,
@@ -29,6 +29,11 @@ pub struct FullSyncResult {
 }
 
 impl FullSyncResult {
+    /// Create an empty result that can be updated using [`Self::merge`]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
     pub fn status(&self) -> FullSyncStatus {
         self.status
     }
@@ -40,44 +45,12 @@ impl FullSyncResult {
     pub fn remote_updates(&self) -> &[VfsUpdate<Vec<u8>>] {
         &self.remote_updates
     }
-}
 
-#[derive(Debug)]
-pub enum ConflictResolutionState {
-    Local(NodeState<Vec<u8>>),
-    Remote(NodeState<Vec<u8>>),
-    /// The conflict was a node removal, so no sync info are provided
-    None,
-}
-
-impl ConflictResolutionState {
-    pub fn new_local<SyncInfo: ToBytes>(info: Option<NodeState<SyncInfo>>) -> Self {
-        match info {
-            Some(info) => Self::Local((&info).into()),
-            None => Self::None,
-        }
-    }
-
-    pub fn new_remote<SyncInfo: ToBytes>(info: Option<NodeState<SyncInfo>>) -> Self {
-        match info {
-            Some(info) => Self::Remote((&info).into()),
-            None => Self::None,
-        }
-    }
-}
-
-pub struct ConflictResolutionResult {
-    state: ConflictResolutionState,
-    status: FullSyncStatus,
-}
-
-impl ConflictResolutionResult {
-    pub fn state(&self) -> &ConflictResolutionState {
-        &self.state
-    }
-
-    pub fn status(&self) -> FullSyncStatus {
-        self.status
+    /// Merge the results from 2 update applications
+    pub fn merge(&mut self, other: Self) {
+        self.local_updates.extend(other.local_updates);
+        self.remote_updates.extend(other.remote_updates);
+        self.status = self.status.merge(other.status);
     }
 }
 
@@ -92,7 +65,9 @@ impl ConflictResolutionResult {
 /// [`full_sync`]: Synchro::full_sync
 /// [`NodeState`]: crate::vfs::dir_tree::NodeState
 /// [`Error`]: enum@crate::Error
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+// The statuses are sorted from "best" to "worse", were a bad status will have priority over a good
+// one
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Default)]
 pub enum FullSyncStatus {
     /// No node in any FS is in Conflict or Error state
     #[default]
@@ -113,6 +88,13 @@ impl From<&Error> for FullSyncStatus {
         } else {
             Self::Desync
         }
+    }
+}
+
+impl FullSyncStatus {
+    /// Merge the statuses from 2 update applications, giving priority to the worst statuses
+    pub fn merge(self, other: Self) -> Self {
+        self.max(other)
     }
 }
 
@@ -387,30 +369,6 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
             SynchroSide::Remote => self.remote.vfs().find_conflict(path).cloned(),
         }
     }
-
-    /// Removes the "Conflict" state of a node. Sets the state to Ok with updated SyncInfo.
-    async fn mark_conflict_resolved(
-        &mut self,
-        path: &VirtualPath,
-        side: SynchroSide,
-    ) -> ConflictResolutionState
-    where
-        LocalBackend::SyncInfo: ToBytes,
-        RemoteBackend::SyncInfo: ToBytes,
-    {
-        match side {
-            SynchroSide::Local => {
-                let maybe_state = self.remote.mark_conflict_resolved(path).await;
-
-                ConflictResolutionState::new_remote(maybe_state)
-            }
-            SynchroSide::Remote => {
-                let maybe_state = self.remote.mark_conflict_resolved(path).await;
-
-                ConflictResolutionState::new_remote(maybe_state)
-            }
-        }
-    }
 }
 
 pub trait Synchronized {
@@ -432,7 +390,7 @@ pub trait Synchronized {
         &'a mut self,
         path: &'a VirtualPath,
         side: SynchroSide,
-    ) -> BoxFuture<'a, Result<ConflictResolutionResult, Error>>;
+    ) -> BoxFuture<'a, Result<FullSyncResult, Error>>;
 
     /// Returns the local [`Vfs`]
     ///
@@ -510,28 +468,24 @@ where
         &'a mut self,
         path: &'a VirtualPath,
         side: SynchroSide,
-    ) -> BoxFuture<'a, Result<ConflictResolutionResult, Error>> {
+    ) -> BoxFuture<'a, Result<FullSyncResult, Error>> {
         Box::pin(async move {
+            let mut result = FullSyncResult::empty();
             if let Some(conflict) = self.get_conflict_update(path, side) {
                 for to_recreate in conflict.otherside_dir_to_recreate() {
-                    self.apply_update(side.invert(), to_recreate).await?;
+                    result.merge(self.apply_update(side.invert(), to_recreate).await?);
                 }
-                self.apply_update(side.invert(), conflict.update().clone())
-                    .await?;
+                result.merge(
+                    self.apply_update(side.invert(), conflict.update().clone())
+                        .await?,
+                );
             } else {
                 // If no conflict is found, it probably means that it has been resolved in the
                 // meantime, so we just log it
                 warn!("conflict not found on node {path:?}");
             }
 
-            // On the other side, the conflict is automatically marked as resolved in the
-            // `apply_update` step
-            let state = self.mark_conflict_resolved(path, side).await;
-
-            Ok(ConflictResolutionResult {
-                state,
-                status: self.get_status(),
-            })
+            Ok(result)
         })
     }
 
