@@ -118,7 +118,7 @@ impl BrumeService for Server {
         path: VirtualPathBuf,
         side: SynchroSide,
     ) -> Result<(), String> {
-        info!("Received conflict resolution request: id {id:?}, path {path:?}, side: {side:?}");
+        info!("Received conflict resolution request: id {id:?}, path {path}, side: {side:?}");
         let (local_vfs, remote_vfs) = {
             let list = self.synchro_list.read().await;
 

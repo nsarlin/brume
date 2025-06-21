@@ -318,7 +318,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         let src_info = match ref_concrete.backend().get_node_info(path).await {
             Ok(dir_info) => dir_info,
             Err(err) => {
-                error!("Failed to create dir {path:?}: {err:?}");
+                error!("Failed to create dir {path}: {err:?}");
                 return ConcreteDirCloneResult::new_mkdir_failed(path, err);
             }
         };
@@ -326,7 +326,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         let dst_info = match self.backend().mkdir(path).await {
             Ok(dir_info) => dir_info,
             Err(err) => {
-                error!("Failed to create dir {path:?}: {err:?}");
+                error!("Failed to create dir {path}: {err:?}");
                 return ConcreteDirCloneResult::new_mkdir_failed(path, err);
             }
         };
@@ -412,17 +412,17 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
     ) -> Result<ConcreteFileCloneResult<RefBackend::SyncInfo, Backend::SyncInfo>, CloneFileError>
     {
         info!(
-            "Cloning file {:?} from {} to {}",
+            "Cloning file {} from {} to {}",
             path,
             RefBackend::TYPE_NAME,
             Backend::TYPE_NAME
         );
         let stream = ref_concrete.backend.read_file(path).await.map_err(|e| {
-            error!("Failed to read file {path:?}: {e:?}");
+            error!("Failed to read file {path}: {e:?}");
             e.into()
         })?;
         let dst_info = self.backend().write_file(path, stream).await.map_err(|e| {
-            error!("Failed to clone file {path:?}: {e:?}");
+            error!("Failed to clone file {path}: {e:?}");
             e.into()
         })?;
 
@@ -432,13 +432,13 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             .get_node_info(path)
             .await
             .map_err(|e| {
-                error!("Failed to read src sync info {path:?}: {e:?}");
+                error!("Failed to read src sync info {path}: {e:?}");
                 e.into()
             })?
             .into_file_info()
             .ok_or(CloneFileError::InvalidBackendMeta)?;
 
-        info!("File {path:?} successfully cloned");
+        info!("File {path} successfully cloned");
 
         Ok(ConcreteFileCloneResult::new(src_info, dst_info))
     }
@@ -489,7 +489,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 Ok(updates)
             }
             UpdateKind::DirRemoved => {
-                info!("Removing dir {:?} from {}", path, Backend::TYPE_NAME);
+                info!("Removing dir {} from {}", path, Backend::TYPE_NAME);
 
                 // If the update is a removal of a node that as never been created because of an
                 // error, we can skip it
@@ -541,7 +541,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 })
                 .map(|update| vec![update]),
             UpdateKind::FileRemoved => {
-                info!("Removing file {:?} from {}", path, Backend::TYPE_NAME);
+                info!("Removing file {} from {}", path, Backend::TYPE_NAME);
 
                 // If the update is a removal of a node that as never been created because of an
                 // error, we can skip it
