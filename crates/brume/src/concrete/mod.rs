@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::future::{BoxFuture, join_all, try_join_all};
+use futures::future::{BoxFuture, try_join_all};
 use futures::{Stream, TryStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -366,42 +366,36 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             })
             .collect();
 
-        let futures: Vec<_> = children
-            .into_iter()
-            .map(|(child_path, is_dir)| async move {
-                if is_dir {
-                    let mut rel_path = VirtualPathBuf::root();
-                    rel_path.push(child_path.name());
-                    let child_ref_dir = ref_dir.find_dir(&rel_path).unwrap();
-                    let mut result =
-                        Box::pin(self.clone_dir(ref_concrete, child_ref_dir, &child_path)).await;
+        let mut results = Vec::new();
+        for (child_path, is_dir) in children.into_iter() {
+            if is_dir {
+                let mut rel_path = VirtualPathBuf::root();
+                rel_path.push(child_path.name());
+                let child_ref_dir = ref_dir.find_dir(&rel_path).unwrap();
+                let mut result =
+                    Box::pin(self.clone_dir(ref_concrete, child_ref_dir, &child_path)).await;
 
-                    let success = result
-                        .take_success()
-                        .map(|(src_dir, dst_dir)| (VfsNode::Dir(src_dir), VfsNode::Dir(dst_dir)));
-                    let failures = result.take_failures();
-                    (success, failures)
-                } else {
-                    match self.clone_file(ref_concrete, &child_path).await {
-                        Ok(clone_result) => {
-                            let (src_info, dst_info) = clone_result.into();
-                            let src_node = VfsNode::File(src_info.into_ok());
-                            let dst_node = VfsNode::File(dst_info.into_ok());
-                            (Some((src_node, dst_node)), Vec::new())
-                        }
-                        Err(error) => {
-                            let failure = FailedUpdateApplication::new(
-                                VfsDiff::file_created(child_path),
-                                error,
-                            );
-                            (None, vec![failure])
-                        }
+                let success = result
+                    .take_success()
+                    .map(|(src_dir, dst_dir)| (VfsNode::Dir(src_dir), VfsNode::Dir(dst_dir)));
+                let failures = result.take_failures();
+                results.push((success, failures));
+            } else {
+                match self.clone_file(ref_concrete, &child_path).await {
+                    Ok(clone_result) => {
+                        let (src_info, dst_info) = clone_result.into();
+                        let src_node = VfsNode::File(src_info.into_ok());
+                        let dst_node = VfsNode::File(dst_info.into_ok());
+                        results.push((Some((src_node, dst_node)), Vec::new()));
+                    }
+                    Err(error) => {
+                        let failure =
+                            FailedUpdateApplication::new(VfsDiff::file_created(child_path), error);
+                        results.push((None, vec![failure]));
                     }
                 }
-            })
-            .collect();
-
-        let results = join_all(futures).await;
+            }
+        }
 
         for (success, failures) in results {
             if let Some((src_node, dst_node)) = success {
