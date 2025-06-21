@@ -8,7 +8,7 @@ use futures::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::try_join;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 use crate::{
     Error,
@@ -167,6 +167,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
     ///   filesystems, or are marked as conflicts if the content differs.
     /// - Then find conflicts with a directory and one of its elements. For example, if a file is
     ///   updated on one side and its parent directory is deleted on the other.
+    #[instrument(skip_all)]
     pub async fn reconcile(
         &self,
         local_updates: VfsDiffList,
@@ -213,6 +214,8 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
     ///
     /// [`ApplicableUpdate`]: crate::update::ApplicableUpdate
     /// [`UpdateTarget`]: crate::update::UpdateTarget
+    #[instrument(skip_all)]
+    #[allow(clippy::type_complexity)]
     pub async fn apply_updates_list_concrete(
         &self,
         updates: SortedVec<ReconciledUpdate>,
@@ -304,6 +307,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
     }
 
     /// Applies an update to the concrete FS and update the VFS accordingly
+    #[instrument(skip_all, name = "Synchro::apply_update")]
     pub async fn apply_update(
         &mut self,
         side: SynchroSide,
@@ -349,9 +353,10 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         }
     }
 
-    /// Applies [`FileSystem::diff_vfs`] on both ends of the synchro.
+    /// Calls [`FileSystem::diff_vfs`] on both ends of the synchro.
     ///
     /// Returns the updates on both fs relative to the previously loaded Vfs.
+    #[instrument(skip_all)]
     pub async fn diff_vfs(&mut self) -> Result<(VfsDiffList, VfsDiffList), Error> {
         try_join!(
             self.local
@@ -431,6 +436,7 @@ where
     LocalBackend::SyncInfo: ToBytes + TryFromBytes,
     RemoteBackend::SyncInfo: ToBytes + TryFromBytes,
 {
+    #[instrument(skip_all)]
     fn full_sync(&mut self) -> BoxFuture<'_, Result<FullSyncResult, Error>> {
         Box::pin(async move {
             let (local_diff, remote_diff) = self.diff_vfs().await?;
@@ -464,6 +470,7 @@ where
         })
     }
 
+    #[instrument(skip_all)]
     fn resolve_conflict<'a>(
         &'a mut self,
         path: &'a VirtualPath,

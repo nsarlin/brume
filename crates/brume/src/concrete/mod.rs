@@ -14,7 +14,7 @@ use futures::future::{BoxFuture, join_all, try_join_all};
 use futures::{Stream, TryStream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{Instrument, error, info, info_span, instrument};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::filesystem::FileSystem;
@@ -277,6 +277,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
     }
 
     /// Computes a hash of the content of the file, for cross-FS comparison
+    #[instrument(skip_all)]
     async fn hash_file(&self, path: &VirtualPath) -> Result<u64, FsBackendError> {
         let stream = self.backend.read_file(path).await.map_err(|e| e.into())?;
 
@@ -296,6 +297,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
     ///
     /// In case of error, return the underlying error and the name of the filesystem where this
     /// error occurred.
+    #[instrument(skip_all)]
     pub async fn eq_file<OtherBackend: FSBackend>(
         &self,
         other: &ConcreteFS<OtherBackend>,
@@ -309,13 +311,19 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
     }
 
     /// Clone a directory from `ref_concrete` into the concrete fs of self.
+    #[instrument(skip_all)]
     pub async fn clone_dir<RefBackend: FSBackend>(
         &self,
         ref_concrete: &ConcreteFS<RefBackend>,
         ref_dir: &DirTree<RefBackend::SyncInfo>,
         path: &VirtualPath,
     ) -> ConcreteDirCloneResult<RefBackend::SyncInfo, Backend::SyncInfo> {
-        let src_info = match ref_concrete.backend().get_node_info(path).await {
+        let src_info = match ref_concrete
+            .backend()
+            .get_node_info(path)
+            .instrument(info_span!("get_node_info"))
+            .await
+        {
             Ok(dir_info) => dir_info,
             Err(err) => {
                 error!("Failed to create dir {path}: {err:?}");
@@ -323,7 +331,12 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             }
         };
 
-        let dst_info = match self.backend().mkdir(path).await {
+        let dst_info = match self
+            .backend()
+            .mkdir(path)
+            .instrument(info_span!("mkdir"))
+            .await
+        {
             Ok(dir_info) => dir_info,
             Err(err) => {
                 error!("Failed to create dir {path}: {err:?}");
@@ -403,8 +416,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
     }
 
     /// Clone a file from `ref_concrete` into the concrete fs of self.
-    ///
-    /// Return the syncinfo associated with the created file and the number of bytes written.
+    #[instrument(skip_all)]
     pub async fn clone_file<RefBackend: FSBackend>(
         &self,
         ref_concrete: &ConcreteFS<RefBackend>,
@@ -445,9 +457,11 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
 
     /// Apply an update on the concrete fs.
     ///
-    /// The file contents will transefered from `ref_concrete`
+    /// The file contents will transferred from `ref_concrete`
     // TODO: handle if ref_fs is not sync ?
     // TODO: check for "last minute" changes in target fs
+    #[instrument(skip_all)]
+    #[allow(clippy::type_complexity)]
     pub async fn apply_update<RefBackend: FSBackend>(
         &self,
         ref_fs: &FileSystem<RefBackend>,
@@ -501,6 +515,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
 
                 self.backend()
                     .rmdir(&path)
+                    .instrument(info_span!("rmdir"))
                     .await
                     .map(|_| AppliedUpdate::DirRemoved(path.to_owned()))
                     .or_else(|e| {
@@ -553,6 +568,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
 
                 self.backend()
                     .rm(&path)
+                    .instrument(info_span!("rm"))
                     .await
                     .map(|_| AppliedUpdate::FileRemoved(path))
                     .or_else(|e| {
@@ -602,6 +618,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
 
     /// Removes "Fake" updates from the list, where a conflict has been detected in the [`Vfs`] but
     /// the file are identical on both sides.
+    #[instrument(skip_all)]
     pub(crate) async fn filter_update_conflicts_list<OtherBackend: FSBackend>(
         &self,
         other: &ConcreteFS<OtherBackend>,

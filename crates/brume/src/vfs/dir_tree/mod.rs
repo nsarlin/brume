@@ -10,6 +10,7 @@ pub use dir::*;
 pub use file::*;
 
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 use crate::{
     Error, NameMismatchError,
@@ -217,6 +218,7 @@ impl<Data> DirTree<Data> {
     /// Returns a reference to the node at the given path.
     ///
     /// Returns an error if the path does not point to a valid node.
+    #[instrument(skip_all, fields(path = %path))]
     pub fn find_node(&self, path: &VirtualPath) -> Option<&VfsNode<Data>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
@@ -265,6 +267,7 @@ impl<Data> DirTree<Data> {
     /// Returns a mutable reference to the node at the given path.
     ///
     /// Returns None if the path does not point to a valid node.
+    #[instrument(skip_all, fields(path = %path))]
     fn find_node_mut(&mut self, path: &VirtualPath) -> Option<&mut VfsNode<Data>> {
         if let Some((top_level, remainder)) = path.top_level_split() {
             if remainder.is_root() {
@@ -905,6 +908,7 @@ impl<Data> VfsNode<Data> {
     ///
     /// Structurally compare both FS, and return a `NeedBackendCheck` when two files have the same
     /// name.
+    #[instrument(skip_all)]
     fn reconciliation_diff<OtherData>(
         &self,
         other: &VfsNode<OtherData>,

@@ -52,6 +52,12 @@ impl SynchroId {
     }
 }
 
+impl Display for SynchroId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Metadata associated to a filesystem in the SynchroList handled by the brume daemon.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FileSystemMeta {
