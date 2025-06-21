@@ -1,7 +1,7 @@
 //! File system manipulation
 
 use thiserror::Error;
-use tracing::{debug, error};
+use tracing::{debug, error, instrument};
 
 use crate::{
     concrete::{ConcreteFS, FSBackend, FsBackendError},
@@ -112,6 +112,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
 
     /// Applies a list of updates to the [`Vfs`], by calling [`Self::apply_update_vfs`] on each of
     /// them.
+    #[instrument(skip_all, fields(fs = Backend::TYPE_NAME))]
     pub fn apply_updates_list_vfs(
         &mut self,
         updates: &SortedVec<VfsUpdate<Backend::SyncInfo>>,
@@ -123,6 +124,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     }
 
     /// Applies an update to the [`Vfs`] of this filesystem.
+    #[instrument(skip_all, fields(fs = Backend::TYPE_NAME))]
     pub fn apply_update_vfs(
         &mut self,
         update: &VfsUpdate<Backend::SyncInfo>,
@@ -149,6 +151,7 @@ impl<Backend: FSBackend> FileSystem<Backend> {
     ///
     /// Returns None if the node is not present in the Vfs, or an Error if it failed to access the
     /// concrete FS
+    #[instrument(skip_all, fields(path = %path))]
     pub async fn reload_sync_info(
         &mut self,
         path: &VirtualPath,

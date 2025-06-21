@@ -16,7 +16,7 @@ keywords.workspace = true
 tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 futures = { version = "0.3" }
-tracing = "0.1"
+tracing = { version = "0.1", features = ["attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = { version = "1.0" }
 thiserror = { version = "2.0" }

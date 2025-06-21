@@ -9,7 +9,7 @@ use brume::{
 use futures::{StreamExt, future::join_all, stream};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
 use brume_daemon_proto::{
@@ -543,6 +543,7 @@ impl SynchroList {
     /// Performs a [`full_sync`] on the provided synchro, that should be in the list
     ///
     /// [`full_sync`]: brume::synchro::Synchro::full_sync
+    #[instrument(skip_all, fields(sync_id = %id))]
     async fn sync_one(
         id: SynchroId,
         synchro_lock: &RwLock<RegisteredSynchro>,
@@ -671,6 +672,7 @@ impl ReadWriteSynchroList {
     }
 
     /// Forces a synchro of all the filesystems in the list, and updates the db accordingly
+    #[instrument(skip_all)]
     pub async fn sync_all(&self, db: &Database) -> Vec<Result<(), SyncError>> {
         let maps = self.maps.read().await;
 
@@ -679,6 +681,7 @@ impl ReadWriteSynchroList {
 
     /// Resolves a conflict on a path inside a synchro, by applying the update from `side`.
     /// Updates the db accordingly
+    #[instrument(skip_all)]
     pub async fn resolve_conflict(
         &self,
         id: SynchroId,
