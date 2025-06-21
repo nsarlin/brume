@@ -542,7 +542,7 @@ impl InnerConcreteTestNode {
                             }
                         }
                     }
-                    panic!("{path:?}")
+                    panic!("{path}")
                 }
                 _ => panic!(),
             }
@@ -566,7 +566,7 @@ impl InnerConcreteTestNode {
                             }
                         }
                     }
-                    panic!("{path:?}")
+                    panic!("{path}")
                 }
                 _ => panic!(),
             }
@@ -702,7 +702,7 @@ impl FSBackend for ConcreteTestNode {
                 let stream = stream::iter(owned.into_iter().map(|b| Ok(Bytes::from(vec![b]))));
                 Ok(stream)
             } else {
-                panic!("can't open node {path:?}")
+                panic!("can't open node {path}")
             }
         })
     }
@@ -763,7 +763,7 @@ impl FSBackend for ConcreteTestNode {
                         ShallowTestSyncInfo::new(hash),
                     ))
                 }
-                _ => panic!("{path:?}"),
+                _ => panic!("{path}"),
             }
         })
     }
@@ -790,11 +790,11 @@ impl FSBackend for ConcreteTestNode {
                         .collect();
 
                     if children.len() != init_len - 1 {
-                        panic!("{path:?}")
+                        panic!("{path}")
                     }
                     Ok(())
                 }
-                _ => panic!("{path:?}"),
+                _ => panic!("{path}"),
             }
         })
     }
@@ -835,7 +835,7 @@ impl FSBackend for ConcreteTestNode {
                         ShallowTestSyncInfo::new(hash),
                     ))
                 }
-                _ => panic!("{path:?}"),
+                _ => panic!("{path}"),
             }
         })
     }
@@ -863,11 +863,11 @@ impl FSBackend for ConcreteTestNode {
                         .collect();
 
                     if children.len() != init_len - 1 {
-                        panic!("{path:?} ({} - {})", children.len(), init_len)
+                        panic!("{path} ({} - {})", children.len(), init_len)
                     }
                     Ok(())
                 }
-                _ => panic!("{path:?}"),
+                _ => panic!("{path}"),
             }
         })
     }

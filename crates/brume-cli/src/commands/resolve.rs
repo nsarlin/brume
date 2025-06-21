@@ -73,7 +73,7 @@ pub async fn resolve(
         .unwrap_or_else(prompt_side)?;
 
     println!(
-        "Resolving conflict in synchro: {} ({:x}), path: {base_path:?}, side: {side:?}",
+        "Resolving conflict in synchro: {} ({:x}), path: {base_path}, side: {side:?}",
         sync.name(),
         id.short()
     );

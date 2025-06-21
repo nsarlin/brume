@@ -482,7 +482,7 @@ where
             } else {
                 // If no conflict is found, it probably means that it has been resolved in the
                 // meantime, so we just log it
-                warn!("conflict not found on node {path:?}");
+                warn!("conflict not found on node {path}");
             }
 
             Ok(result)
