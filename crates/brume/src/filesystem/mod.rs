@@ -1,7 +1,7 @@
 //! File system manipulation
 
-use log::{debug, error};
 use thiserror::Error;
+use tracing::{debug, error};
 
 use crate::{
     concrete::{ConcreteFS, FSBackend, FsBackendError},

@@ -21,7 +21,6 @@ use futures::StreamExt;
 use interprocess::local_socket::{
     GenericNamespaced, ListenerOptions, ToNsName, tokio::Listener, traits::tokio::Listener as _,
 };
-use log::{error, info, warn};
 use tarpc::{
     serde_transport,
     server::{BaseChannel, Channel},
@@ -39,6 +38,7 @@ use tokio::{
     task::JoinHandle,
     time,
 };
+use tracing::{error, info, warn};
 
 use brume_daemon_proto::{
     AnySynchroCreationInfo, BRUME_SOCK_NAME, BrumeService, SynchroId, SynchroSide, SynchroState,

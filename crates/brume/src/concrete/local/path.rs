@@ -9,8 +9,8 @@ use std::{
 };
 
 use futures::{Stream, StreamExt, TryStreamExt, stream::BoxStream};
-use log::{debug, warn};
 use tokio::fs::{self, DirEntry, ReadDir};
+use tracing::{debug, warn};
 
 use crate::vfs::{DirTree, FileInfo, VfsNode};
 
