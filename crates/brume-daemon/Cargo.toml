@@ -39,6 +39,7 @@ brume = { version = "0.1.0", path = "../brume" }
 tempfile = "3.14"
 testcontainers = { version = "0.23", features = ["http_wait"] }
 rand = "0.9"
+tracing-flame = "0.2"
 
 [[bin]]
 name = "brumed"

@@ -3,6 +3,7 @@ use std::{process::exit, sync::Arc, time::Duration};
 use brume::{
     concrete::local::LocalDir, filesystem::FileSystem, synchro::SynchroSide, vfs::VirtualPathBuf,
 };
+use tracing_flame::FlameLayer;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use brume_daemon::{
@@ -29,9 +30,13 @@ async fn main() {
     let filter_layer = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info,tarpc=error"))
         .unwrap();
+
+    let (flame_layer, _guard) = FlameLayer::with_file("./conflicts-tracing.folded").unwrap();
+
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt_layer)
+        .with(flame_layer)
         .init();
 
     // Start daemon
@@ -255,7 +260,7 @@ async fn main() {
     .unwrap();
 
     // Wait for a full propagation
-    wait_full_sync(sync_interval, &rpc).await;
+    wait_full_sync(2 * sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
