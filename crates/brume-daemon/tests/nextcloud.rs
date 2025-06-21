@@ -10,6 +10,7 @@ use brume_daemon::{
 };
 use tarpc::context;
 use tracing::info;
+use tracing_flame::FlameLayer;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[path = "utils.rs"]
@@ -26,9 +27,18 @@ async fn main() {
     let filter_layer = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new("info,tarpc=error"))
         .unwrap();
+
+    let (flame_layer, _guard) = FlameLayer::with_file("./nextcloud-tracing.folded").unwrap();
+
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt_layer)
+        .with(
+            flame_layer
+                .with_empty_samples(false)
+                .with_file_and_line(false)
+                .with_module_path(false),
+        )
         .init();
 
     // Start daemon
@@ -170,7 +180,7 @@ async fn main() {
     .unwrap();
 
     // Wait for propagation on both fs
-    wait_full_sync(sync_interval, &rpc).await;
+    wait_full_sync(2 * sync_interval, &rpc).await;
     if !daemon.is_running() {
         stop_nextcloud(container).await;
         exit(1)
@@ -191,6 +201,7 @@ async fn main() {
         exit(1)
     }
 
+    assert!(!dir_b.path().to_path_buf().join("testdir").exists());
     fs_a.diff_vfs().await.unwrap();
     fs_b.diff_vfs().await.unwrap();
     assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
