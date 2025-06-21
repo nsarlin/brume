@@ -1,7 +1,5 @@
 use std::{process::exit, sync::Arc, time::Duration};
 
-use env_logger::Builder;
-
 use brume_daemon_proto::{
     AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroState, SynchroStatus,
 };
@@ -10,8 +8,9 @@ use brume_daemon::{
     daemon::{Daemon, DaemonConfig, ErrorMode},
     db::DatabaseConfig,
 };
-use log::{LevelFilter, info};
 use tarpc::context;
+use tracing::info;
+use tracing_subscriber::FmtSubscriber;
 
 #[path = "utils.rs"]
 mod utils;
@@ -23,11 +22,8 @@ use utils::{
 
 #[tokio::test]
 async fn main() {
-    let mut logs_builder = Builder::new();
-    logs_builder
-        .filter_level(LevelFilter::Info)
-        .filter(Some("tarpc"), LevelFilter::Error)
-        .init();
+    let logs_subscriber = FmtSubscriber::new();
+    tracing::subscriber::set_global_default(logs_subscriber).unwrap();
 
     // Start daemon
     let sock_name = get_random_sock_name();

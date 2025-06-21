@@ -7,9 +7,9 @@ use brume::{
     vfs::{StatefulVfs, VirtualPath},
 };
 use futures::{StreamExt, future::join_all, stream};
-use log::{debug, error, info};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use brume_daemon_proto::{

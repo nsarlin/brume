@@ -12,9 +12,9 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::{BoxFuture, join_all, try_join_all};
 use futures::{Stream, TryStream, TryStreamExt};
-use log::{error, info};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{error, info};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::filesystem::FileSystem;

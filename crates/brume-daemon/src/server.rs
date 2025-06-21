@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use brume::vfs::{StatefulVfs, VirtualPathBuf};
-use log::{info, warn};
 use tarpc::context::Context;
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::{info, warn};
 
 use brume_daemon_proto::{
     AnyFsCreationInfo, AnyFsDescription, AnySynchroCreationInfo, BrumeService, SynchroId,

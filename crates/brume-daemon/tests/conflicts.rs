@@ -3,7 +3,7 @@ use std::{process::exit, sync::Arc, time::Duration};
 use brume::{
     concrete::local::LocalDir, filesystem::FileSystem, synchro::SynchroSide, vfs::VirtualPathBuf,
 };
-use env_logger::Builder;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use brume_daemon::{
     daemon::{Daemon, DaemonConfig, ErrorMode},
@@ -12,8 +12,8 @@ use brume_daemon::{
 use brume_daemon_proto::{
     AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroStatus,
 };
-use log::{LevelFilter, info};
 use tarpc::context;
+use tracing::info;
 
 #[path = "utils.rs"]
 mod utils;
@@ -25,10 +25,13 @@ use utils::{
 
 #[tokio::test]
 async fn main() {
-    let mut logs_builder = Builder::new();
-    logs_builder
-        .filter_level(LevelFilter::Info)
-        .filter(Some("tarpc"), LevelFilter::Error)
+    let fmt_layer = fmt::layer().compact();
+    let filter_layer = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info,tarpc=error"))
+        .unwrap();
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
         .init();
 
     // Start daemon

@@ -6,9 +6,9 @@ use futures::{
     TryFutureExt,
     future::{BoxFuture, try_join_all},
 };
-use log::warn;
 use serde::{Deserialize, Serialize};
 use tokio::try_join;
+use tracing::warn;
 
 use crate::{
     Error,
