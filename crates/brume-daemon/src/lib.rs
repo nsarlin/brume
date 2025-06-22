@@ -3,3 +3,4 @@ pub mod db;
 mod schema;
 pub mod server;
 pub mod synchro_list;
+mod xdg;
