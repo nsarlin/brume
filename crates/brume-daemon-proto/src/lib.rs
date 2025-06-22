@@ -1,5 +1,7 @@
 //! Definition of the protocol needed to communicate with the daemon
 
+pub mod xdg;
+
 use std::{collections::HashMap, fmt::Display};
 
 use brume::concrete::{

@@ -6,7 +6,7 @@
 use std::{
     future::Future,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -42,6 +42,7 @@ use tracing::{error, info, warn};
 
 use brume_daemon_proto::{
     AnySynchroCreationInfo, BRUME_SOCK_NAME, BrumeService, SynchroId, SynchroSide, SynchroState,
+    xdg,
 };
 
 use crate::{
@@ -49,6 +50,33 @@ use crate::{
     server::Server,
     synchro_list::ReadWriteSynchroList,
 };
+
+/// A path used to store applications data. Can be configured by the user or default to the one from
+/// the XDG spec (likely $XDG_DATA_HOME/brume)
+#[derive(Clone, Default)]
+pub struct DataPath(Option<PathBuf>);
+
+impl DataPath {
+    pub fn new<P: AsRef<Path>>(path: Option<P>) -> Self {
+        Self(path.map(|path| path.as_ref().to_path_buf()))
+    }
+
+    pub(crate) fn resolve(&self, filename: &str) -> Option<PathBuf> {
+        if let Some(path) = &self.0 {
+            return Some(path.clone());
+        }
+
+        let data_dir = xdg::DATA_DIR.resolve_or_create_dir()?;
+
+        Some(data_dir.join(filename))
+    }
+}
+
+impl<P: AsRef<Path>> From<P> for DataPath {
+    fn from(value: P) -> Self {
+        Self::new(Some(value))
+    }
+}
 
 /// Configuration of a [`Daemon`]
 #[derive(Clone)]
@@ -69,7 +97,7 @@ impl Default for DaemonConfig {
             sync_interval: Duration::from_secs(10),
             error_mode: ErrorMode::default(),
             sock_name: BRUME_SOCK_NAME.to_string(),
-            db: DatabaseConfig::OnDisk(PathBuf::from("./dev.db")), // TODO: change this
+            db: DatabaseConfig::OnDisk(DataPath::default()),
         }
     }
 }
@@ -207,7 +235,7 @@ Please check if {} is in use by another process and try again.",
         let codec_builder = LengthDelimitedCodec::builder();
         let (commands_to_daemon, commands_from_server) = unbounded_channel();
 
-        info!("Loading db: {}", config.db.as_str().unwrap());
+        info!("Loading db: {}", config.db.to_string_lossy().unwrap());
         let database = Database::new(&config.db).await?;
 
         let synchro_list = ReadWriteSynchroList::from(database.load_all_synchros().await.unwrap());

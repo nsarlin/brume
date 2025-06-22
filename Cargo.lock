@@ -300,6 +300,7 @@ dependencies = [
  "brume",
  "serde",
  "tarpc",
+ "tempfile",
  "uuid",
 ]
 
