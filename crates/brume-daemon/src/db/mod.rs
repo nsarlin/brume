@@ -1,7 +1,7 @@
 //! The sqlite database that is use to persist the state of the daemon
 
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use brume::concrete::InvalidBytesSyncInfo;
 use deadpool_diesel::PoolError;
@@ -20,6 +20,7 @@ use brume_daemon_proto::{
     SynchroState, SynchroStatus,
 };
 
+use crate::daemon::DataPath;
 use crate::synchro_list::NamedSynchroCreationInfo;
 use crate::{
     schema::{filesystems, synchros},
@@ -102,30 +103,31 @@ pub struct Database {
 // Loads migrations from the sql in crates/brume-daemon/migrations
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
+const DB_DEFAULT_FILENAME: &str = "brume.sqlite";
+
 /// The config used for the daemon database
 #[derive(Clone)]
 pub enum DatabaseConfig {
     InMemory,
-    OnDisk(PathBuf),
+    OnDisk(DataPath),
 }
 
 impl DatabaseConfig {
-    pub fn as_str(&self) -> Option<&str> {
+    pub fn to_string_lossy(&self) -> Option<String> {
         match self {
-            DatabaseConfig::InMemory => Some(":memory:"),
-            DatabaseConfig::OnDisk(path_buf) => path_buf.as_os_str().to_str(),
+            DatabaseConfig::InMemory => Some(String::from(":memory:")),
+            DatabaseConfig::OnDisk(path_buf) => Some(
+                path_buf
+                    .resolve(DB_DEFAULT_FILENAME)?
+                    .as_os_str()
+                    .to_string_lossy()
+                    .to_string(),
+            ),
         }
     }
 
-    fn to_string_lossy(&self) -> String {
-        match self {
-            DatabaseConfig::InMemory => String::from(":memory:"),
-            DatabaseConfig::OnDisk(path_buf) => path_buf.as_os_str().to_string_lossy().to_string(),
-        }
-    }
-
-    pub fn new_ondisk<P: AsRef<Path>>(path: P) -> Self {
-        Self::OnDisk(path.as_ref().to_path_buf())
+    pub fn new_ondisk<P: AsRef<Path>>(path: Option<P>) -> Self {
+        Self::OnDisk(DataPath::new(path))
     }
 
     pub fn new_inmemory() -> Self {
@@ -136,7 +138,9 @@ impl DatabaseConfig {
 #[derive(Error, Debug)]
 #[error("Failed to create database")]
 pub enum DatabaseCreationError {
-    #[error("Invalid path: {0}")]
+    #[error(
+        "Invalid path: {0}. Try to configure it to a path that you can write to or set the $XDG_DATA_HOME environment variable"
+    )]
     InvalidDbPath(String),
     #[error("Failed to update db to the latest schema")]
     MigrationError(#[source] Box<dyn Error + Send + Sync>),
@@ -186,9 +190,13 @@ impl From<InvalidBytesSyncInfo> for DatabaseError {
 impl Database {
     /// Creates a new empty database from the config
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseCreationError> {
-        let db_str = config
-            .as_str()
-            .ok_or_else(|| DatabaseCreationError::InvalidDbPath(config.to_string_lossy()))?;
+        let db_str = config.to_string_lossy().ok_or_else(|| {
+            DatabaseCreationError::InvalidDbPath(
+                config
+                    .to_string_lossy()
+                    .unwrap_or(String::from("*undefined*")),
+            )
+        })?;
         let manager = Manager::new(db_str, Runtime::Tokio1);
 
         // Pool size is set to 1 because most operations will be writes, and sqlite is not
@@ -196,10 +204,13 @@ impl Database {
         // Ok to unwrap because this cannot fail if a runtime is provided
         let pool = Pool::builder(manager).max_size(1).build().unwrap();
 
-        let conn = pool
-            .get()
-            .await
-            .map_err(|_| DatabaseCreationError::InvalidDbPath(config.to_string_lossy()))?;
+        let conn = pool.get().await.map_err(|_| {
+            DatabaseCreationError::InvalidDbPath(
+                config
+                    .to_string_lossy()
+                    .unwrap_or(String::from("*undefined*")),
+            )
+        })?;
         conn.interact(|conn| conn.run_pending_migrations(MIGRATIONS).map(|_| ()))
             .await
             .unwrap() // This should never fail unless the inner closure panics

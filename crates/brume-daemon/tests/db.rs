@@ -34,7 +34,9 @@ async fn main() {
     let config = DaemonConfig::default()
         .with_sync_interval(sync_interval)
         .with_error_mode(ErrorMode::Exit)
-        .with_db_config(DatabaseConfig::OnDisk(dir_db.path().join("db.sqlite")))
+        .with_db_config(DatabaseConfig::OnDisk(
+            dir_db.path().join("db.sqlite").into(),
+        ))
         .with_sock_name(&sock_name);
     let daemon = Daemon::new(config.clone()).await.unwrap();
     let daemon = Arc::new(daemon);
