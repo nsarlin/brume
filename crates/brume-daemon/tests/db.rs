@@ -2,10 +2,11 @@ use std::{process::exit, sync::Arc, time::Duration};
 
 use brume_daemon_proto::{
     AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroState, SynchroStatus,
+    config::ErrorMode,
 };
 
 use brume_daemon::{
-    daemon::{Daemon, DaemonConfig, ErrorMode},
+    daemon::{Daemon, DaemonConfig},
     db::DatabaseConfig,
 };
 use tarpc::context;

@@ -4,6 +4,7 @@ use std::error::Error;
 use std::path::Path;
 
 use brume::concrete::InvalidBytesSyncInfo;
+use brume_daemon_proto::config::DatabaseUserConfig;
 use deadpool_diesel::PoolError;
 use deadpool_diesel::{
     Runtime,
@@ -110,6 +111,15 @@ const DB_DEFAULT_FILENAME: &str = "brume.sqlite";
 pub enum DatabaseConfig {
     InMemory,
     OnDisk(DataPath),
+}
+
+impl From<DatabaseUserConfig> for DatabaseConfig {
+    fn from(value: DatabaseUserConfig) -> Self {
+        match value {
+            DatabaseUserConfig::InMemory => Self::InMemory,
+            DatabaseUserConfig::OnDisk(path_buf) => Self::OnDisk(DataPath::new(path_buf)),
+        }
+    }
 }
 
 impl DatabaseConfig {

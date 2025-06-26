@@ -42,18 +42,20 @@ use tracing::{error, info, warn};
 
 use brume_daemon_proto::{
     AnySynchroCreationInfo, BRUME_SOCK_NAME, BrumeService, SynchroId, SynchroSide, SynchroState,
+    config::{DaemonUserConfig, ErrorMode},
+    xdg,
 };
 
 use crate::{
     db::{Database, DatabaseConfig},
     server::Server,
     synchro_list::ReadWriteSynchroList,
-    xdg::resolve_or_create_data_dir,
 };
 
 /// A path used to store applications data. Can be configured by the user or default to the one from
 /// the XDG spec (likely $XDG_DATA_HOME/brume)
 #[derive(Clone, Default)]
+#[repr(transparent)]
 pub struct DataPath(Option<PathBuf>);
 
 impl DataPath {
@@ -66,7 +68,7 @@ impl DataPath {
             return Some(path.clone());
         }
 
-        let data_dir = resolve_or_create_data_dir()?;
+        let data_dir = xdg::DATA_DIR.resolve_or_create_dir()?;
 
         Some(data_dir.join(filename))
     }
@@ -102,6 +104,18 @@ impl Default for DaemonConfig {
     }
 }
 
+impl From<DaemonUserConfig> for DaemonConfig {
+    fn from(value: DaemonUserConfig) -> Self {
+        let default = Self::default();
+        Self {
+            sync_interval: value.sync_interval.unwrap_or(default.sync_interval),
+            error_mode: value.error_mode.unwrap_or(default.error_mode),
+            sock_name: value.sock_name.unwrap_or(default.sock_name),
+            db: value.db.map(|db_conf| db_conf.into()).unwrap_or(default.db),
+        }
+    }
+}
+
 impl DaemonConfig {
     pub fn with_sync_interval(self, sync_interval: Duration) -> Self {
         Self {
@@ -127,14 +141,6 @@ impl DaemonConfig {
             ..self
         }
     }
-}
-
-/// How errors should be handled by the daemon
-#[derive(Default, Copy, Clone, PartialEq, Eq)]
-pub enum ErrorMode {
-    #[default]
-    Log,
-    Exit,
 }
 
 /// The different commands that can be received from user applications

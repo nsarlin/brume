@@ -11,10 +11,33 @@ use tarpc::{
     serde_transport, tokio_serde::formats::Bincode, tokio_util::codec::LengthDelimitedCodec,
 };
 
-use brume_daemon_proto::{BRUME_SOCK_NAME, BrumeServiceClient, SynchroId, SynchroMeta};
+use brume_daemon_proto::{
+    BRUME_SOCK_NAME, BrumeServiceClient, ConfigLoadError, SynchroId, SynchroMeta,
+    brume_config_path, config::BrumeUserConfig, load_brume_config,
+};
 
-pub async fn connect_to_daemon() -> Result<BrumeServiceClient, std::io::Error> {
-    let name = BRUME_SOCK_NAME.to_ns_name::<GenericNamespaced>()?;
+pub fn load_config() -> Result<BrumeUserConfig, ConfigLoadError> {
+    if let Some(config_path) = brume_config_path() {
+        if config_path.exists() {
+            load_brume_config(config_path)
+        } else {
+            Ok(BrumeUserConfig::default())
+        }
+    } else {
+        Ok(BrumeUserConfig::default())
+    }
+}
+
+pub fn daemon_sock_name(config: &BrumeUserConfig) -> &str {
+    config
+        .daemon
+        .sock_name
+        .as_deref()
+        .unwrap_or(BRUME_SOCK_NAME)
+}
+
+pub async fn connect_to_daemon(sock_name: &str) -> Result<BrumeServiceClient, std::io::Error> {
+    let name = sock_name.to_ns_name::<GenericNamespaced>()?;
 
     let conn = Stream::connect(name).await?;
 
