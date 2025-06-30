@@ -128,7 +128,6 @@ impl<SyncInfo: TryFromBytes> TryFrom<NodeState<Vec<u8>>> for NodeState<SyncInfo>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirTree<Data> {
     info: DirInfo<Data>,
-    // TODO: handle having a dir and file with the same name
     children: SortedNodeList<Data>,
 }
 
