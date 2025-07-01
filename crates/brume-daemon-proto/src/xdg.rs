@@ -14,6 +14,13 @@ pub const DATA_DIR: XdgDir = XdgDir {
     additional_dirs_default: "/usr/local/share/:/usr/share/",
 };
 
+pub const CONFIG_DIR: XdgDir = XdgDir {
+    base_dir_var: "XDG_CONFIG_HOME",
+    base_dir_default: ".config",
+    additional_dirs_var: "XDG_CONFIG_DIRS",
+    additional_dirs_default: "/etc/xdg",
+};
+
 const APP_NAME: &str = "brume";
 
 pub struct XdgDir {
