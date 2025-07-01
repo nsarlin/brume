@@ -4,6 +4,8 @@ use anyhow::Result;
 
 use brume_daemon::daemon::{Daemon, DaemonConfig};
 
+use brume_daemon_proto::{brume_config_path, load_brume_config};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
@@ -17,7 +19,25 @@ async fn main() -> Result<()> {
         .with(fmt_layer)
         .init();
 
-    let daemon = Arc::new(Daemon::new(DaemonConfig::default()).await?);
+    let config = if let Some(config_path) = brume_config_path() {
+        if config_path.exists() {
+            let config = load_brume_config(config_path)?;
+            config.daemon.into()
+        } else {
+            info!(
+                "No config found at path {}, using the default one",
+                config_path.display()
+            );
+            DaemonConfig::default()
+        }
+    } else {
+        info!("No config found, using the default one",);
+        DaemonConfig::default()
+    };
+
+    dbg!(&config);
+
+    let daemon = Arc::new(Daemon::new(config).await?);
 
     daemon.run().await
 }

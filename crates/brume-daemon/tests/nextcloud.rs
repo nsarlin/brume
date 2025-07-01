@@ -2,10 +2,12 @@ use std::{process::exit, sync::Arc, time::Duration};
 
 use brume::{concrete::local::LocalDir, filesystem::FileSystem};
 
-use brume_daemon_proto::{AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo};
+use brume_daemon_proto::{
+    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, config::ErrorMode,
+};
 
 use brume_daemon::{
-    daemon::{Daemon, DaemonConfig, ErrorMode},
+    daemon::{Daemon, DaemonConfig},
     db::DatabaseConfig,
 };
 use tarpc::context;

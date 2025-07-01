@@ -7,11 +7,12 @@ use tracing_flame::FlameLayer;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use brume_daemon::{
-    daemon::{Daemon, DaemonConfig, ErrorMode},
+    daemon::{Daemon, DaemonConfig},
     db::DatabaseConfig,
 };
 use brume_daemon_proto::{
     AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroStatus,
+    config::ErrorMode,
 };
 use tarpc::context;
 use tracing::info;

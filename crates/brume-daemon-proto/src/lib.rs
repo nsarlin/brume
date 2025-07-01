@@ -1,8 +1,11 @@
 //! Definition of the protocol needed to communicate with the daemon
 
+pub mod config;
 pub mod xdg;
 
+use std::path::{Path, PathBuf};
 use std::{collections::HashMap, fmt::Display};
+use std::{fs, io};
 
 use brume::concrete::{
     FSBackend, FsInstanceDescription, Named, local::LocalDir, nextcloud::Nextcloud,
@@ -10,7 +13,9 @@ use brume::concrete::{
 
 use brume::synchro::FullSyncStatus;
 use brume::vfs::StatefulVfs;
+use config::BrumeUserConfig;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
 pub use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
@@ -19,6 +24,30 @@ pub use brume::vfs::virtual_path::{VirtualPath, VirtualPathBuf};
 
 /// Name of the socket where the clients should connect
 pub const BRUME_SOCK_NAME: &str = "brume.socket";
+
+pub const BRUME_CONFIG_FILE_NAME: &str = "config.toml";
+
+#[derive(Debug, Error)]
+pub enum ConfigLoadError {
+    #[error("Failed to read TOML file")]
+    IoError(#[from] io::Error),
+    #[error("Failed to parse TOML file")]
+    InvalidConfig(#[from] toml::de::Error),
+}
+
+pub fn brume_config_path() -> Option<PathBuf> {
+    let config_dir = xdg::CONFIG_DIR.resolve_dir()?;
+
+    Some(config_dir.join(BRUME_CONFIG_FILE_NAME))
+}
+
+pub fn load_brume_config<P: AsRef<Path>>(
+    config_path: P,
+) -> Result<BrumeUserConfig, ConfigLoadError> {
+    let content = fs::read_to_string(config_path)?;
+    let config = toml::from_str(&content)?;
+    Ok(config)
+}
 
 /// An id that uniquely identify a pair of synchronized FS
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]

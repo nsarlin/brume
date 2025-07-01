@@ -301,6 +301,8 @@ dependencies = [
  "serde",
  "tarpc",
  "tempfile",
+ "thiserror 2.0.11",
+ "toml",
  "uuid",
 ]
 

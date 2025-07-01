@@ -1,6 +1,6 @@
 use brume_cli::{
     commands::{self, Commands},
-    connect_to_daemon,
+    connect_to_daemon, daemon_sock_name, load_config,
 };
 
 use clap::Parser;
@@ -16,7 +16,10 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let daemon = connect_to_daemon()
+    let config = load_config()?;
+    let brume_sock = daemon_sock_name(&config);
+
+    let daemon = connect_to_daemon(brume_sock)
         .await
         .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?;
 
