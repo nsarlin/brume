@@ -49,13 +49,13 @@ pub enum LocalDirError {
 impl LocalDirError {
     pub fn io<P: Debug>(path: P, source: io::Error) -> Self {
         Self::IoError {
-            path: format!("{:?}", path),
+            path: format!("{path:?}"),
             source,
         }
     }
 
     pub fn invalid_path<P: Debug>(path: &P) -> Self {
-        Self::InvalidPath(format!("{:?}", path))
+        Self::InvalidPath(format!("{path:?}"))
     }
 }
 

@@ -341,7 +341,7 @@ impl Database {
         conn.interact(move |conn| {
             diesel::update(synchros)
                 .filter(uuid.eq(synchro.id().as_bytes()))
-                .set(status.eq(format!("{}", synchro_status)))
+                .set(status.eq(format!("{synchro_status}")))
                 .execute(conn)
         })
         .await
@@ -362,7 +362,7 @@ impl Database {
         conn.interact(move |conn| {
             diesel::update(synchros)
                 .filter(uuid.eq(synchro.id().as_bytes()))
-                .set(state.eq(format!("{}", synchro_state)))
+                .set(state.eq(format!("{synchro_state}")))
                 .execute(conn)
         })
         .await

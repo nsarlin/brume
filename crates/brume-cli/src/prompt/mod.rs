@@ -29,13 +29,10 @@ pub fn prompt_filesystem(side: SynchroSide) -> Result<AnyFsCreationInfo, String>
         SynchroSide::Remote => 1, // Nextcloud
     };
 
-    let ans = Select::new(
-        &format!("Select the \"{}\" filesystem type:", side),
-        options,
-    )
-    .with_starting_cursor(default_idx)
-    .prompt()
-    .map_err(|e| e.to_string())?;
+    let ans = Select::new(&format!("Select the \"{side}\" filesystem type:"), options)
+        .with_starting_cursor(default_idx)
+        .prompt()
+        .map_err(|e| e.to_string())?;
 
     match ans {
         "Local Folder" => prompt_local_folder().map(AnyFsCreationInfo::LocalDir),
@@ -199,12 +196,12 @@ pub fn prompt_conflict_path(
 
     let local_column = local_conflicts
         .into_iter()
-        .map(|conflict| format!("{}", conflict))
+        .map(|conflict| format!("{conflict}"))
         .chain(std::iter::repeat(String::new()))
         .take(max_len);
     let remote_column = remote_conflicts
         .into_iter()
-        .map(|conflict| format!("{}", conflict))
+        .map(|conflict| format!("{conflict}"))
         .chain(std::iter::repeat(String::new()))
         .take(max_len);
 
