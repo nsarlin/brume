@@ -17,7 +17,7 @@ use thiserror::Error;
 use tracing::{Instrument, error, info, info_span, instrument};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::filesystem::FileSystem;
+use crate::filesystem::{FileSystem, SkipUpdateError};
 use crate::sorted_vec::SortedVec;
 use crate::update::{
     AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, FailedUpdateApplication, IsModified,
@@ -120,6 +120,8 @@ pub enum ConcreteUpdateApplicationError {
     InvalidPath(#[from] InvalidPathError),
     #[error("cannot apply an update to the root dir itself")]
     PathIsRoot,
+    #[error("failed to process skipped update, loaded vfs is invalid")]
+    SkipFailed(#[from] SkipUpdateError),
 }
 
 /// Failed to clone a file between filesystems
@@ -585,11 +587,9 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         &self,
         other: &ConcreteFS<OtherBackend>,
         update: VirtualReconciledUpdate,
-    ) -> Result<Option<ReconciledUpdate>, ReconciliationError> {
+    ) -> Result<ReconciledUpdate, ReconciliationError> {
         match update {
-            VirtualReconciledUpdate::Applicable(update) => {
-                Ok(Some(ReconciledUpdate::Applicable(update)))
-            }
+            VirtualReconciledUpdate::Applicable(update) => Ok(ReconciledUpdate::Applicable(update)),
             VirtualReconciledUpdate::NeedBackendCheck(update) => {
                 let path = update.path().to_owned();
                 if self
@@ -597,16 +597,17 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                     .await
                     .map_err(|(e, name)| ReconciliationError::concrete(name, e))?
                 {
-                    Ok(None)
+                    Ok(ReconciledUpdate::Skip(update))
                 } else {
-                    Ok(Some(ReconciledUpdate::Conflict(
-                        UpdateConflict::new_same_path(update),
+                    Ok(ReconciledUpdate::Conflict(UpdateConflict::new_same_path(
+                        update,
                     )))
                 }
             }
-            VirtualReconciledUpdate::Conflict(conflict) => Ok(Some(ReconciledUpdate::Conflict(
+            VirtualReconciledUpdate::Conflict(conflict) => Ok(ReconciledUpdate::Conflict(
                 UpdateConflict::new_same_path(conflict),
-            ))),
+            )),
+            VirtualReconciledUpdate::Skip(update) => Ok(ReconciledUpdate::Skip(update)),
         }
     }
 
@@ -625,7 +626,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         )
         .await?;
 
-        let filtered = filtered.into_iter().flatten().collect();
+        let filtered = filtered.into_iter().collect();
 
         // The order of the elements in the vec will be kept between input and output
         Ok(SortedVec::unchecked_from_vec(filtered))
