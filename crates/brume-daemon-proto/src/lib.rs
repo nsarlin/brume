@@ -153,7 +153,7 @@ pub enum SynchroStatus {
 
 impl Display for SynchroStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -200,7 +200,7 @@ pub enum SynchroState {
 
 impl Display for SynchroState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 

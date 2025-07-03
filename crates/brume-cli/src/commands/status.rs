@@ -37,7 +37,7 @@ pub async fn status(
         ("Remote type", sync.remote().description().type_name()),
         ("Remote", &sync.remote().description().to_string()),
     ] {
-        println!("{:>15}: {}", key, value);
+        println!("{key:>15}: {value}");
     }
 
     //TODO: display more information in case of error/desync

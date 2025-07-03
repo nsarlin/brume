@@ -328,7 +328,7 @@ impl SynchroList {
 
         let mut counter = 1;
         loop {
-            let new_name = format!("{}{}", name, counter);
+            let new_name = format!("{name}{counter}");
             if self.name_is_unique(name).await {
                 return new_name;
             }

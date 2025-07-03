@@ -634,7 +634,7 @@ impl Display for InnerConcreteTestNode {
 
 impl From<InnerConcreteTestNode> for String {
     fn from(value: InnerConcreteTestNode) -> Self {
-        format!("{}", value)
+        format!("{value}")
     }
 }
 

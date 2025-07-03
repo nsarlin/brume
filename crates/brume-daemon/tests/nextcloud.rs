@@ -66,7 +66,7 @@ async fn main() {
 
     // Create a nextcloud server
     let nextcloud_port = get_random_port();
-    let nextcloud_url = format!("http://localhost:{}", nextcloud_port);
+    let nextcloud_url = format!("http://localhost:{nextcloud_port}");
     info!("nextcloud url: {}", &nextcloud_url);
 
     // Start nextcloud container
