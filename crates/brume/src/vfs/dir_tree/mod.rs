@@ -386,18 +386,18 @@ impl<Data> DirTree<Data> {
         &self,
         other: &DirTree<OtherData>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedVec<VirtualReconciledUpdate>, DiffError> {
+    ) -> SortedVec<VirtualReconciledUpdate> {
         let mut dir_path = parent_path.to_owned();
         dir_path.push(self.name());
 
         let diff_list = self.children.iter_zip_map(
             &other.children,
-            |self_child| -> Result<_, DiffError> {
+            |self_child| {
                 let mut res = SortedVec::new();
                 res.insert(VirtualReconciledUpdate::applicable_remote(
                     &self_child.to_created_diff(&dir_path),
                 ));
-                Ok(res)
+                res
             },
             |self_child, other_child| self_child.reconciliation_diff(other_child, &dir_path),
             |other_child| {
@@ -405,15 +405,13 @@ impl<Data> DirTree<Data> {
                 res.insert(VirtualReconciledUpdate::applicable_local(
                     &other_child.to_created_diff(&dir_path),
                 ));
-                Ok(res)
+                res
             },
-        )?;
+        );
 
         // Since the children lists are sorted, we know that the produced updates will be
         // too, so we can directly create the sorted list from the result
-        let diffs = SortedVec::unchecked_flatten(diff_list);
-
-        Ok(diffs)
+        SortedVec::unchecked_flatten(diff_list)
     }
 }
 
@@ -577,20 +575,23 @@ impl<Data: IsModified + Debug> StatefulDirTree<Data> {
                 } else {
                     // The directory has been modified, so we have to walk it recursively to find
                     // the modified nodes
-                    let diff_list = self.children.iter_zip_map(
-                        &other.children,
-                        |self_child| -> Result<_, DiffError> {
-                            let mut res = SortedVec::new();
-                            res.insert(self_child.to_removed_diff(&dir_path));
-                            Ok(res)
-                        },
-                        |self_child, other_child| self_child.diff(other_child, &dir_path),
-                        |other_child| {
-                            let mut res = SortedVec::new();
-                            res.insert(other_child.to_created_diff(&dir_path));
-                            Ok(res)
-                        },
-                    )?;
+                    let diff_list = self
+                        .children
+                        .iter_zip_map(
+                            &other.children,
+                            |self_child| -> Result<_, DiffError> {
+                                let mut res = SortedVec::new();
+                                res.insert(self_child.to_removed_diff(&dir_path));
+                                Ok(res)
+                            },
+                            |self_child, other_child| self_child.diff(other_child, &dir_path),
+                            |other_child| {
+                                let mut res = SortedVec::new();
+                                res.insert(other_child.to_created_diff(&dir_path));
+                                Ok(res)
+                            },
+                        )
+                        .collect::<Result<Vec<_>, _>>()?;
 
                     // Since the children lists are sorted, we know that the produced updates will
                     // be too, so we can directly create the sorted list from
@@ -912,7 +913,7 @@ impl<Data> VfsNode<Data> {
         &self,
         other: &VfsNode<OtherData>,
         parent_path: &VirtualPath,
-    ) -> Result<SortedVec<VirtualReconciledUpdate>, DiffError> {
+    ) -> SortedVec<VirtualReconciledUpdate> {
         match (self, other) {
             (VfsNode::Dir(dself), VfsNode::Dir(dother)) => {
                 dself.reconciliation_diff(dother, parent_path)
@@ -928,7 +929,7 @@ impl<Data> VfsNode<Data> {
                     VirtualReconciledUpdate::conflict_both(&update)
                 };
 
-                Ok(SortedVec::from_vec(vec![update]))
+                SortedVec::from_vec(vec![update])
             }
             (nself, _) => {
                 let mut file_path = parent_path.to_owned();
@@ -937,7 +938,7 @@ impl<Data> VfsNode<Data> {
 
                 let update = VirtualReconciledUpdate::conflict_both(&update);
 
-                Ok(SortedVec::from_vec(vec![update]))
+                SortedVec::from_vec(vec![update])
             }
         }
     }
