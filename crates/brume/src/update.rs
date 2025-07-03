@@ -288,7 +288,7 @@ impl VfsDiff {
                 let reconciled = dir_local.reconciliation_diff(
                     dir_remote,
                     self.path().parent().unwrap_or(VirtualPath::root()),
-                )?;
+                );
                 // Since we iterate on sorted updates, the result will be sorted too
                 Ok(reconciled)
             }
@@ -361,20 +361,22 @@ impl VfsDiffList {
         local_vfs: &Vfs<LocalSyncInfo>,
         remote_vfs: &Vfs<RemoteSyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
-        let res = self.iter_zip_map(
-            &remote_updates,
-            |local_item| {
-                Ok(SortedVec::from_vec(vec![
-                    VirtualReconciledUpdate::applicable_remote(local_item),
-                ]))
-            },
-            |local_item, remote_item| local_item.merge(remote_item, local_vfs, remote_vfs),
-            |remote_item| {
-                Ok(SortedVec::from_vec(vec![
-                    VirtualReconciledUpdate::applicable_local(remote_item),
-                ]))
-            },
-        )?;
+        let res = self
+            .iter_zip_map(
+                &remote_updates,
+                |local_item| {
+                    Ok(SortedVec::from_vec(vec![
+                        VirtualReconciledUpdate::applicable_remote(local_item),
+                    ]))
+                },
+                |local_item, remote_item| local_item.merge(remote_item, local_vfs, remote_vfs),
+                |remote_item| {
+                    Ok(SortedVec::from_vec(vec![
+                        VirtualReconciledUpdate::applicable_local(remote_item),
+                    ]))
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Updates that are only present on one target will be sorted because `iter_zip_map`
         // iterates in order. Updates present on both targets will also be sorted relatively because

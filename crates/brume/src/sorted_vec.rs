@@ -137,59 +137,32 @@ impl<T: Sortable> SortedVec<T> {
     /// - `fboth` is applied to items that present in both vecs
     /// - `fother` is applied to items that are only present in "other"
     ///
-    /// The function calls will be done in order, and the resulting vec will be sorted by the order
-    /// of the input vecs.
-    pub fn iter_zip_map<U, FSelf, FBoth, FOther, Ret, Err>(
-        &self,
-        other: &SortedVec<U>,
-        mut fself: FSelf,
-        mut fboth: FBoth,
-        mut fother: FOther,
-    ) -> Result<Vec<Ret>, Err>
+    /// The function returns an iterator that yields the output of the closures.
+    pub fn iter_zip_map<'a, U, FSelf, FBoth, FOther, Item>(
+        &'a self,
+        other: &'a SortedVec<U>,
+        fself: FSelf,
+        fboth: FBoth,
+        fother: FOther,
+    ) -> ZipMapIter<'a, T, U, FSelf, FBoth, FOther>
     where
         U: Sortable<Key = T::Key>,
-        FSelf: FnMut(&T) -> Result<Ret, Err>,
-        FBoth: FnMut(&T, &U) -> Result<Ret, Err>,
-        FOther: FnMut(&U) -> Result<Ret, Err>,
+        FSelf: FnMut(&T) -> Item,
+        FBoth: FnMut(&T, &U) -> Item,
+        FOther: FnMut(&U) -> Item,
     {
-        let mut ret = Vec::new();
         let mut self_iter = self.iter();
         let mut other_iter = other.iter();
 
-        let mut self_item_opt = self_iter.next();
-        let mut other_item_opt = other_iter.next();
-
-        while let (Some(self_item), Some(other_item)) = (self_item_opt, other_item_opt) {
-            match self_item.key().cmp(other_item.key()) {
-                Ordering::Less => {
-                    ret.push(fself(self_item)?);
-                    self_item_opt = self_iter.next()
-                }
-                Ordering::Equal => {
-                    ret.push(fboth(self_item, other_item)?);
-                    self_item_opt = self_iter.next();
-                    other_item_opt = other_iter.next();
-                }
-                Ordering::Greater => {
-                    ret.push(fother(other_item)?);
-                    other_item_opt = other_iter.next();
-                }
-            }
+        ZipMapIter {
+            self_item: self_iter.next(),
+            other_item: other_iter.next(),
+            self_iter,
+            other_iter,
+            fself,
+            fboth,
+            fother,
         }
-
-        // Handle the remaining elements that are present in an iterator and not the
-        // other one
-        while let Some(self_item) = self_item_opt {
-            ret.push(fself(self_item)?);
-            self_item_opt = self_iter.next();
-        }
-
-        while let Some(other_item) = other_item_opt {
-            ret.push(fother(other_item)?);
-            other_item_opt = other_iter.next();
-        }
-
-        Ok(ret)
     }
 
     /// Remove duplicates in the sorted vec, using another key than the one from the [`Sortable`]
@@ -278,6 +251,62 @@ impl<T> IntoIterator for SortedVec<T> {
     }
 }
 
+/// An iterator that zips two [`SortedVec`], Created by the [`iter_zip_map`] method.
+///
+/// [`iter_zip_map`]: SortedVec::iter_zip_map
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct ZipMapIter<'a, T, U, FSelf, FBoth, FOther> {
+    self_iter: std::slice::Iter<'a, T>,
+    other_iter: std::slice::Iter<'a, U>,
+    fself: FSelf,
+    fboth: FBoth,
+    fother: FOther,
+
+    self_item: Option<&'a T>,
+    other_item: Option<&'a U>,
+}
+
+impl<'a, T, U, FSelf, FBoth, FOther, Item> Iterator for ZipMapIter<'a, T, U, FSelf, FBoth, FOther>
+where
+    T: Sortable,
+    U: Sortable<Key = T::Key>,
+    FSelf: FnMut(&T) -> Item,
+    FBoth: FnMut(&T, &U) -> Item,
+    FOther: FnMut(&U) -> Item,
+{
+    type Item = Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.self_item, self.other_item) {
+            (Some(self_item), Some(other_item)) => match self_item.key().cmp(other_item.key()) {
+                Ordering::Less => {
+                    self.self_item = self.self_iter.next();
+                    Some((self.fself)(self_item))
+                }
+                Ordering::Equal => {
+                    self.self_item = self.self_iter.next();
+                    self.other_item = self.other_iter.next();
+                    Some((self.fboth)(self_item, other_item))
+                }
+                Ordering::Greater => {
+                    self.other_item = self.other_iter.next();
+                    Some((self.fother)(other_item))
+                }
+            },
+
+            // Handle the case where one vec is longer that the other
+            (Some(self_item), None) => {
+                self.self_item = self.self_iter.next();
+                Some((self.fself)(self_item))
+            }
+            (None, Some(other_item)) => {
+                self.other_item = self.other_iter.next();
+                Some((self.fother)(other_item))
+            }
+            (None, None) => None,
+        }
+    }
+}
 impl<T: Sortable> From<Vec<T>> for SortedVec<T> {
     fn from(value: Vec<T>) -> Self {
         Self::from_vec(value)
