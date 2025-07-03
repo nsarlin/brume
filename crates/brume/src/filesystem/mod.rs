@@ -6,7 +6,10 @@ use tracing::{debug, error, instrument};
 use crate::{
     concrete::{ConcreteFS, FSBackend, FsBackendError},
     sorted_vec::SortedVec,
-    update::{DiffError, VfsDiffList, VfsUpdate, VfsUpdateApplicationError},
+    update::{
+        DiffError, UpdateKind, VfsDiff, VfsDiffList, VfsDirCreation, VfsFileUpdate, VfsUpdate,
+        VfsUpdateApplicationError,
+    },
     vfs::{DirTree, InvalidPathError, NodeState, StatefulVfs, Vfs, VirtualPath},
 };
 
@@ -16,6 +19,14 @@ pub enum VfsReloadError {
     FsBackendError(#[from] FsBackendError),
     #[error("failed to diff newer and previous version of filesystem")]
     DiffError(#[from] DiffError),
+}
+
+#[derive(Error, Debug)]
+pub enum SkipUpdateError {
+    #[error("invalid path provided for update")]
+    InvalidPath(#[from] InvalidPathError),
+    #[error("loaded vfs is missing")]
+    MissingLoadedVfs,
 }
 
 /// Main representation of any kind of filesystem, remote or local.
@@ -171,6 +182,51 @@ impl<Backend: FSBackend> FileSystem<Backend> {
             Some(state)
         } else {
             None
+        }
+    }
+
+    /// Skips the update by returning the [`VfsUpdate`] without actually applying it on the concrete
+    /// dir.
+    ///
+    /// The metadata will be taken from the `loaded_vfs`
+    pub fn skip_update(
+        &self,
+        update: VfsDiff,
+    ) -> Result<VfsUpdate<Backend::SyncInfo>, SkipUpdateError> {
+        let loaded = self
+            .loaded_vfs
+            .as_ref()
+            .ok_or(SkipUpdateError::MissingLoadedVfs)?;
+        let path = update.path();
+
+        match update.kind() {
+            UpdateKind::DirCreated => {
+                let loaded_dir = loaded.find_dir(path)?.clone().into_ok();
+                Ok(VfsUpdate::DirCreated(VfsDirCreation::new(
+                    path.parent().unwrap(),
+                    loaded_dir,
+                )))
+            }
+            UpdateKind::DirRemoved => Ok(VfsUpdate::DirRemoved(path.to_owned())),
+            UpdateKind::FileCreated => {
+                let loaded_file = loaded.find_file(path)?.clone();
+                Ok(VfsUpdate::FileCreated(VfsFileUpdate::new(
+                    path,
+                    loaded_file.size(),
+                    loaded_file.last_modified(),
+                    loaded_file.into_metadata(),
+                )))
+            }
+            UpdateKind::FileRemoved => Ok(VfsUpdate::FileRemoved(path.to_owned())),
+            UpdateKind::FileModified => {
+                let loaded_file = loaded.find_file(path)?.clone();
+                Ok(VfsUpdate::FileModified(VfsFileUpdate::new(
+                    path,
+                    loaded_file.size(),
+                    loaded_file.last_modified(),
+                    loaded_file.into_metadata(),
+                )))
+            }
         }
     }
 }

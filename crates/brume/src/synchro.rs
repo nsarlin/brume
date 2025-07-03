@@ -8,7 +8,7 @@ use futures::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::try_join;
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::{
     Error,
@@ -228,6 +228,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
     > {
         let mut applicables = SortedVec::new();
         let mut conflicts = SortedVec::new();
+        let mut skipped = SortedVec::new();
 
         for update in updates {
             match update {
@@ -247,6 +248,10 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
                         conflicts.insert(conflict.clone());
                     }
                 }
+                ReconciledUpdate::Skip(to_skip) => {
+                    info!("skipping {:?}", to_skip.update());
+                    skipped.insert(to_skip);
+                }
             }
         }
         let conflicts =
@@ -254,6 +259,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
 
         let (local_updates, remote_updates) = applicables.split_local_remote();
         let (local_conflicts, remote_conflicts) = conflicts.split_local_remote();
+        let (local_skipped, remote_skipped) = skipped.split_local_remote();
 
         // Apply the updates
         let local_futures = try_join_all(
@@ -292,17 +298,27 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
             }
         }
 
-        local_res.extend(local_conflicts.clone().into_iter().map(VfsUpdate::Conflict));
-        remote_res.extend(
-            remote_conflicts
-                .clone()
+        local_res.extend(local_conflicts.into_iter().map(VfsUpdate::Conflict));
+        local_res.extend(
+            local_skipped
                 .into_iter()
-                .map(VfsUpdate::Conflict),
+                .map(|update| self.local.skip_update(update))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| (e.into(), LocalBackend::TYPE_NAME))?,
+        );
+
+        remote_res.extend(remote_conflicts.into_iter().map(VfsUpdate::Conflict));
+        remote_res.extend(
+            remote_skipped
+                .into_iter()
+                .map(|update| self.remote.skip_update(update))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| (e.into(), RemoteBackend::TYPE_NAME))?,
         );
 
         Ok((
-            SortedVec::from_vec(local_res),
-            SortedVec::from_vec(remote_res),
+            SortedVec::from_vec(local_res).remove_duplicates(),
+            SortedVec::from_vec(remote_res).remove_duplicates(),
         ))
     }
 
@@ -574,11 +590,11 @@ mod test {
             ConcreteTestNode,
             TestNode::{D, FE, FF},
         },
-        update::VfsDiff,
+        update::{ApplicableUpdate, UpdateTarget, VfsDiff},
         vfs::VirtualPathBuf,
     };
 
-    /// Check that duplicate diffs are correctly removed
+    /// Check that duplicate diffs are correctly skipped
     #[tokio::test]
     async fn test_reconciliation_same_diffs() {
         let local_base = D(
@@ -612,9 +628,19 @@ mod test {
 
         let remote_diff = local_diff.clone();
 
-        let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
+        let reconciled = synchro
+            .reconcile(local_diff.clone(), remote_diff)
+            .await
+            .unwrap();
 
-        assert!(reconciled.is_empty());
+        let reconciled_ref = SortedVec::unchecked_from_vec(
+            local_diff
+                .iter()
+                .map(|diff| ReconciledUpdate::Skip(ApplicableUpdate::new(UpdateTarget::Both, diff)))
+                .collect(),
+        );
+
+        assert_eq!(reconciled, reconciled_ref)
     }
 
     /// Check that diffs only present on one side are all kept
@@ -769,21 +795,22 @@ mod test {
         let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
-        synchro.diff_vfs().await.unwrap();
-
-        let local_diff = SortedVec::from([VfsDiff::dir_created(VirtualPathBuf::new("/").unwrap())]);
-
-        let remote_diff = local_diff.clone();
+        let (local_diff, remote_diff) = synchro.diff_vfs().await.unwrap();
 
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
         let reconciled_ref = SortedVec::from([
+            ReconciledUpdate::skip_both(&VfsDiff::dir_created(
+                VirtualPathBuf::new("/Doc").unwrap(),
+            )),
             ReconciledUpdate::conflict_both(&VfsDiff::file_created(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             )),
+            ReconciledUpdate::skip_both(&VfsDiff::dir_created(VirtualPathBuf::new("/a").unwrap())),
             ReconciledUpdate::applicable_local(&VfsDiff::file_created(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
             )),
+            ReconciledUpdate::skip_both(&VfsDiff::dir_created(VirtualPathBuf::new("/e").unwrap())),
             ReconciledUpdate::applicable_remote(&VfsDiff::dir_created(
                 VirtualPathBuf::new("/e/g").unwrap(),
             )),
@@ -1714,5 +1741,47 @@ mod test {
                 .state()
                 .is_conflict()
         );
+    }
+
+    /// Test a full sync where some updates should be skipped because they are present on both FS
+    #[tokio::test]
+    async fn test_full_sync_skip() {
+        let local_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D(
+                    "Doc",
+                    vec![
+                        FF("f1.md", b"hello"),
+                        D(
+                            "Inner",
+                            vec![FF("f3.md", b"hello cruel"), FF("f4.pdf", b"world")],
+                        ),
+                    ],
+                ),
+                FF("file.doc", b"content"),
+                D("a", vec![D("b", vec![FF("c", b"file")])]),
+            ],
+        );
+
+        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(local_fs, remote_fs);
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
+
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
     }
 }

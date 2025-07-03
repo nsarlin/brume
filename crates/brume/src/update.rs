@@ -285,14 +285,26 @@ impl VfsDiff {
                     .find_dir(&remote_update.path)
                     .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
 
-                let reconciled = dir_local.reconciliation_diff(
+                let self_update = VirtualReconciledUpdate::skip_both(self);
+
+                let mut reconciled = SortedVec::new();
+                reconciled.insert(self_update);
+
+                // Since we iterate on sorted updates, the result will be sorted too
+                reconciled.unchecked_extend(dir_local.reconciliation_diff(
                     dir_remote,
                     self.path().parent().unwrap_or(VirtualPath::root()),
-                );
-                // Since we iterate on sorted updates, the result will be sorted too
+                ));
+
                 Ok(reconciled)
             }
-            (UpdateKind::DirRemoved, UpdateKind::DirRemoved) => Ok(reconciled),
+            (UpdateKind::DirRemoved, UpdateKind::DirRemoved)
+            | (UpdateKind::FileRemoved, UpdateKind::FileRemoved) => {
+                let update =
+                    VirtualReconciledUpdate::Skip(ApplicableUpdate::new(UpdateTarget::Both, self));
+                reconciled.insert(update);
+                Ok(reconciled)
+            }
             (UpdateKind::FileModified, UpdateKind::FileModified)
             | (UpdateKind::FileCreated, UpdateKind::FileCreated) => {
                 let file_local = vfs_local
@@ -312,7 +324,6 @@ impl VfsDiff {
 
                 Ok(reconciled)
             }
-            (UpdateKind::FileRemoved, UpdateKind::FileRemoved) => Ok(reconciled),
             (_, _) => {
                 reconciled.insert(VirtualReconciledUpdate::conflict_local(self));
                 reconciled.insert(VirtualReconciledUpdate::conflict_remote(remote_update));
@@ -517,10 +528,12 @@ pub(crate) enum VirtualReconciledUpdate {
     Applicable(ApplicableUpdate),
     /// Updates in this state cannot be directly applied and need to be checked with concrete file
     /// access. The outcome of the check can be:
-    /// - Remove the update if both files are identical
+    /// - Skip the update if both files are identical
     /// - Mark the update as a conflict if they are different
     NeedBackendCheck(ApplicableUpdate),
     Conflict(ApplicableUpdate),
+    /// The update has already been applied externally on both fs and should be skipped
+    Skip(ApplicableUpdate),
 }
 
 impl VirtualReconciledUpdate {
@@ -529,6 +542,7 @@ impl VirtualReconciledUpdate {
             VirtualReconciledUpdate::Applicable(update) => update,
             VirtualReconciledUpdate::NeedBackendCheck(update) => update,
             VirtualReconciledUpdate::Conflict(update) => update,
+            VirtualReconciledUpdate::Skip(update) => update,
         }
     }
 
@@ -560,6 +574,11 @@ impl VirtualReconciledUpdate {
     /// Create a new `NeedBackendCheck` updates with [`UpdateTarget::Both`]
     pub(crate) fn backend_check_both(update: &VfsDiff) -> Self {
         Self::NeedBackendCheck(ApplicableUpdate::new(UpdateTarget::Both, update))
+    }
+
+    /// Create a new `Skip` updates with [`UpdateTarget::Both`]
+    pub(crate) fn skip_both(update: &VfsDiff) -> Self {
+        Self::Skip(ApplicableUpdate::new(UpdateTarget::Both, update))
     }
 }
 
@@ -662,6 +681,9 @@ pub enum ReconciledUpdate {
     Applicable(ApplicableUpdate),
     /// There is a conflict that needs user input for resolution before the update can be applied
     Conflict(UpdateConflict),
+    /// The update should not be applied on the target concrete FS, because they have been detected
+    /// on both FS simultenaously. However they should be applied to the VFS to keep it in sync
+    Skip(ApplicableUpdate),
 }
 
 impl ReconciledUpdate {
@@ -669,6 +691,7 @@ impl ReconciledUpdate {
         match self {
             ReconciledUpdate::Applicable(update) => update.path(),
             ReconciledUpdate::Conflict(conflict) => conflict.path(),
+            ReconciledUpdate::Skip(update) => update.path(),
         }
     }
 
@@ -676,6 +699,7 @@ impl ReconciledUpdate {
         match self {
             ReconciledUpdate::Applicable(update) => update,
             ReconciledUpdate::Conflict(conflict) => conflict.update(),
+            ReconciledUpdate::Skip(update) => update,
         }
     }
 
@@ -712,6 +736,20 @@ impl ReconciledUpdate {
             UpdateTarget::Both,
             update,
         )))
+    }
+
+    /// Create two new `Skip` updates with [`UpdateTarget::Local`] and
+    /// [`UpdateTarget::Remote`]
+    pub fn skip_both(update: &VfsDiff) -> Self {
+        Self::Skip(ApplicableUpdate::new(UpdateTarget::Both, update))
+    }
+
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Conflict(_))
+    }
+
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skip(_))
     }
 }
 
@@ -764,8 +802,25 @@ impl SortedVec<ReconciledUpdate> {
                     resolved.push(parent_update);
                     resolved.extend(updates);
                 }
+                // If we skip a dir, and all its children are also skipped, we remove the children
+                // updates and keep only the parent. However we should keep the updates that are not
+                // skipped (eg: conflicts)
+                ReconciledUpdate::Skip(_) => {
+                    let mut updates = Vec::new();
+
+                    while let Some(next_update) = iter
+                        .next_if(|next_update| next_update.path().is_inside(parent_update.path()))
+                    {
+                        if !next_update.is_skipped() {
+                            updates.push(next_update);
+                        }
+                    }
+
+                    resolved.push(parent_update);
+                    resolved.extend(updates);
+                }
                 _ =>
-                // Skip if the path is already a conflict or not a removal
+                // Filter if the path is already a conflict or not a removal
                 {
                     resolved.push(parent_update);
                     continue;
@@ -1194,7 +1249,7 @@ impl VfsConflict {
 /// An update that can be applied to the [`Vfs`] at the end of the update lifecycle.
 ///
 /// [`Vfs`]: crate::vfs::Vfs
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum VfsUpdate<SyncInfo> {
     DirCreated(VfsDirCreation<SyncInfo>),
     DirRemoved(VirtualPathBuf),
@@ -1241,7 +1296,7 @@ impl<SyncInfo: ToBytes> From<VfsUpdate<SyncInfo>> for VfsUpdate<Vec<u8>> {
             VfsUpdate::FailedApplication(failed_update) => {
                 VfsUpdate::FailedApplication(failed_update)
             }
-            VfsUpdate::Conflict(vfs_diff) => VfsUpdate::Conflict(vfs_diff),
+            VfsUpdate::Conflict(conflict) => VfsUpdate::Conflict(conflict),
         }
     }
 }
@@ -1253,5 +1308,61 @@ impl<SyncInfo> Sortable for VfsUpdate<SyncInfo> {
 
     fn key(&self) -> &Self::Key {
         self.path()
+    }
+}
+
+impl<SyncInfo: Clone> SortedVec<VfsUpdate<SyncInfo>> {
+    /// Removes duplicate updates that might be created between diff and concrete applications
+    ///
+    /// This might happen with "skipped" dir. If the same dir has been created on both filesystems
+    /// but with different content
+    pub fn remove_duplicates(self) -> Self {
+        let mut res = Vec::new();
+        let mut iter = self.into_iter().peekable();
+
+        while let Some(parent_update) = iter.next() {
+            res.push(parent_update.clone());
+            if let VfsUpdate::DirCreated(dir_update) = &parent_update {
+                while let Some(next_update) =
+                    iter.next_if(|next_update| next_update.path().is_inside(parent_update.path()))
+                {
+                    // Node creations here will already be applied when we create the parent
+                    // directory, so we need to transform them to modifications
+                    // to only update the syncinfo
+                    match next_update {
+                        VfsUpdate::DirCreated(update) => {
+                            let relative_path = update
+                                .path()
+                                .chroot(parent_update.path())
+                                .expect("update is inside parent_update");
+
+                            if dir_update.dir.find_dir(relative_path).is_ok() {
+                                // Skip the dir creation to avoid duplicate
+                                // TODO: use DirModified when it is implemented
+                            } else {
+                                res.push(VfsUpdate::DirCreated(update.clone()))
+                            }
+                        }
+                        VfsUpdate::FileCreated(update) => {
+                            let relative_path = update
+                                .path()
+                                .chroot(parent_update.path())
+                                .expect("update is inside parent_update");
+                            if dir_update.dir.find_file(relative_path).is_ok() {
+                                // FileCreated is converted to FileModified to update the syncinfo
+                                // with the latest ones at the time the update was applied
+                                res.push(VfsUpdate::FileModified(update.clone()));
+                            } else {
+                                res.push(VfsUpdate::FileCreated(update.clone()))
+                            }
+                        }
+                        _ => res.push(next_update),
+                    }
+                }
+            }
+        }
+
+        // As long as we don't modify the input order above, the output will be sorted
+        SortedVec::unchecked_from_vec(res)
     }
 }

@@ -164,7 +164,7 @@ impl<Data> DirTree<Data> {
     }
 
     /// Converts a stateless dir into a stateful one in the "Ok" state
-    pub fn as_ok(self) -> StatefulDirTree<Data> {
+    pub fn into_ok(self) -> StatefulDirTree<Data> {
         StatefulDirTree {
             info: self.info.into_ok(),
             // We know that the input is already sorted
@@ -771,7 +771,7 @@ impl<Data> VfsNode<Data> {
 
     pub fn as_ok(self) -> StatefulVfsNode<Data> {
         match self {
-            Self::Dir(dir_tree) => StatefulVfsNode::Dir(dir_tree.as_ok()),
+            Self::Dir(dir_tree) => StatefulVfsNode::Dir(dir_tree.into_ok()),
             Self::File(file_info) => StatefulVfsNode::File(file_info.into_ok()),
         }
     }
@@ -916,7 +916,15 @@ impl<Data> VfsNode<Data> {
     ) -> SortedVec<VirtualReconciledUpdate> {
         match (self, other) {
             (VfsNode::Dir(dself), VfsNode::Dir(dother)) => {
-                dself.reconciliation_diff(dother, parent_path)
+                let self_update =
+                    VirtualReconciledUpdate::skip_both(&self.to_created_diff(parent_path));
+
+                let mut reconciled = SortedVec::new();
+                reconciled.insert(self_update);
+                // Since we iterate on sorted updates, the result will be sorted too
+                reconciled.unchecked_extend(dself.reconciliation_diff(dother, parent_path));
+
+                reconciled
             }
             (VfsNode::File(fself), VfsNode::File(fother)) => {
                 let mut file_path = parent_path.to_owned();
