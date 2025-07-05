@@ -94,6 +94,11 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         self.loaded_vfs.as_ref()
     }
 
+    #[cfg(test)]
+    pub fn loaded_vfs_mut(&mut self) -> &mut Option<Vfs<Backend::SyncInfo>> {
+        &mut self.loaded_vfs
+    }
+
     /// Returns a mutable ref to the virtual representation of this FileSystem
     pub fn vfs_mut(&mut self) -> &mut StatefulVfs<Backend::SyncInfo> {
         &mut self.status_vfs
@@ -132,6 +137,12 @@ impl<Backend: FSBackend> FileSystem<Backend> {
             self.apply_update_vfs(update)?;
         }
         Ok(())
+    }
+
+    /// Resets the [`Vfs`] to the empty state. All metadata will be lost
+    pub fn reset_vfs(&mut self) {
+        self.status_vfs = Vfs::empty();
+        self.loaded_vfs = None;
     }
 
     /// Applies an update to the [`Vfs`] of this filesystem.
