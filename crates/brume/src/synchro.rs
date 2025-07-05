@@ -392,6 +392,8 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
     }
 }
 
+/// Dyn compatible trait that allows to work generically over synchro without knowing the concrete
+/// types of the backends.
 pub trait Synchronized {
     /// Fully synchronizes both filesystems.
     ///
@@ -444,6 +446,16 @@ pub trait Synchronized {
     ///
     /// [`Vfs`]: crate::vfs::Vfs
     fn set_remote_vfs(&mut self, vfs: StatefulVfs<Vec<u8>>) -> Result<(), InvalidBytesSyncInfo>;
+
+    /// Force a full resync of the Synchro.
+    ///
+    /// This will reset both [`Vfs`] and perform an new [`full_sync`] from scratch. This can be used
+    /// to safely recover from a [`Desync`].
+    ///
+    /// [`Vfs`]: crate::vfs::Vfs
+    /// [`full_sync`]: Self::full_sync
+    /// [`Desync`]: FullSyncStatus::Desync
+    fn force_resync(&mut self) -> BoxFuture<'_, Result<FullSyncResult, Error>>;
 }
 
 impl<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static> Synchronized
@@ -530,6 +542,12 @@ where
         let typed_vfs = vfs.try_into()?;
         *self.remote.vfs_mut() = typed_vfs;
         Ok(())
+    }
+
+    fn force_resync(&mut self) -> BoxFuture<'_, Result<FullSyncResult, Error>> {
+        self.local.reset_vfs();
+        self.remote.reset_vfs();
+        self.full_sync()
     }
 }
 
@@ -1783,5 +1801,102 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+    }
+
+    impl<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>
+        Synchro<LocalBackend, RemoteBackend>
+    where
+        LocalBackend::SyncInfo: ToBytes + TryFromBytes,
+        RemoteBackend::SyncInfo: ToBytes + TryFromBytes,
+    {
+        /// Buggy implementation of `full_sync` used to test desync
+        fn buggy_full_sync(&mut self) -> BoxFuture<'_, Result<FullSyncResult, Error>> {
+            Box::pin(async move {
+                let (local_diff, remote_diff) = self.diff_vfs().await?;
+
+                let reconciled = self.reconcile(local_diff, remote_diff).await?;
+
+                let (local_applied, remote_applied) = self
+                    .apply_updates_list_concrete(reconciled)
+                    .await
+                    .map_err(|(e, name)| Error::concrete_application(name, e))?;
+
+                // Remove the loaded vfs on flight to trigger an error on the next step
+                *self.local.loaded_vfs_mut() = None;
+                *self.remote.loaded_vfs_mut() = None;
+
+                self.local
+                    .apply_updates_list_vfs(&local_applied)
+                    .map_err(|e| Error::vfs_update_application::<LocalBackend>(e))?;
+                self.remote
+                    .apply_updates_list_vfs(&remote_applied)
+                    .map_err(|e| Error::vfs_update_application::<RemoteBackend>(e))?;
+
+                let res = FullSyncResult {
+                    local_updates: local_applied
+                        .into_iter()
+                        .map(|update| update.into())
+                        .collect(),
+                    remote_updates: remote_applied
+                        .into_iter()
+                        .map(|update| update.into())
+                        .collect(),
+                    status: self.get_status(),
+                };
+                Ok(res)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_desync() {
+        let local_base = D("", vec![]);
+        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![
+                D("Doc", vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")]),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(local_fs, remote_fs);
+
+        // Simulate a bug in brume that causes a full_sync to return an error
+        let status = FullSyncStatus::from(&synchro.buggy_full_sync().await.unwrap_err());
+        assert_eq!(status, FullSyncStatus::Desync);
+
+        // Repair by re-synchronizing from scratch
+        assert_eq!(
+            synchro.force_resync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
+
+        // Everything should be ok now
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+
+        // Do another full_sync to validate
+        let local_modif = D(
+            "",
+            vec![
+                D(
+                    "Doc",
+                    vec![FF("f1.md", b"hello"), FF("f2.pdf", b"cruel world")],
+                ),
+                FF("file.doc", b"content"),
+            ],
+        );
+
+        synchro
+            .local
+            .set_backend(ConcreteTestNode::from(local_modif));
+
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Ok
+        );
     }
 }
