@@ -490,6 +490,43 @@ impl SynchroList {
         Self::handle_sync_result(id, res, synchro_lock, db).await
     }
 
+    /// Completely resync a Synchro. The filesystems will be scanned again and updates will be
+    /// propagated
+    pub async fn force_resync(&self, id: SynchroId, db: &Database) -> Result<(), SyncError> {
+        let synchro_lock = self
+            .synchros
+            .get(&id)
+            .ok_or_else(|| SyncError::SynchroNotFound(id))?;
+
+        loop {
+            {
+                let mut synchro = synchro_lock.write().await;
+
+                // Here the synchro might be in the "Desync" state
+                if synchro.status() != SynchroStatus::SyncInProgress {
+                    let status = SynchroStatus::SyncInProgress;
+                    synchro.set_status(status);
+                    db.set_synchro_status(id, status).await?;
+                    break;
+                }
+            }
+            sleep(Duration::from_secs(1)); // TODO: make configurable
+        }
+
+        let res = {
+            let synchro = synchro_lock.read().await;
+
+            db.reset_vfs(synchro.meta.local().id()).await?;
+            db.reset_vfs(synchro.meta.remote().id()).await?;
+
+            let mut mutex = synchro.synchro.lock().await;
+
+            mutex.force_resync().await
+        };
+
+        Self::handle_sync_result(id, res, synchro_lock, db).await
+    }
+
     /// Handles the result of a sync, updating the database and the synchro status
     async fn handle_sync_result(
         id: SynchroId,
@@ -679,6 +716,11 @@ impl ReadWriteSynchroList {
         maps.sync_all(db).await
     }
 
+    /// Force resync a Synchro from the list
+    pub async fn force_resync(&self, id: SynchroId, db: &Database) -> Result<(), SyncError> {
+        self.maps.write().await.force_resync(id, db).await
+    }
+
     /// Resolves a conflict on a path inside a synchro, by applying the update from `side`.
     /// Updates the db accordingly
     #[instrument(skip_all)]
@@ -719,8 +761,13 @@ impl ReadWriteSynchroList {
 
 #[cfg(test)]
 mod test {
-    use brume::concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo};
-    use brume_daemon_proto::{AnyFsCreationInfo, AnySynchroCreationInfo};
+    use brume::{
+        concrete::{local::LocalDirCreationInfo, nextcloud::NextcloudFsCreationInfo},
+        update::VfsUpdate,
+    };
+    use brume_daemon_proto::{AnyFsCreationInfo, AnySynchroCreationInfo, VirtualPathBuf};
+
+    use crate::db::DatabaseConfig;
 
     use super::*;
 
@@ -789,5 +836,90 @@ mod test {
             meta_list[&id1].remote().description(),
             AnyFsDescription::LocalDir(_),
         ));
+    }
+
+    /// This test checks manual error recovery with force_resync.
+    /// We simulate a db corruption that triggers and error and then use force_resync to recover
+    /// from it.
+    #[tokio::test]
+    async fn test_force_resync() {
+        let db = Database::new(&DatabaseConfig::InMemory).await.unwrap();
+        let mut list = SynchroList::new();
+
+        // Create 2 folders that will be synchronized
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+
+        let loc_a = LocalDirCreationInfo::new(dir_a.path());
+        let loc_b = LocalDirCreationInfo::new(dir_b.path());
+        let sync = AnySynchroCreationInfo::new(
+            AnyFsCreationInfo::LocalDir(loc_a),
+            AnyFsCreationInfo::LocalDir(loc_b),
+            None,
+        );
+
+        let created = list.insert(sync.clone()).await.unwrap();
+        let id = created.id();
+        db.insert_synchro(created, sync).await.unwrap();
+
+        // Update some files in the folders
+        std::fs::create_dir(dir_a.path().to_path_buf().join("testdir")).unwrap();
+        let content_a = b"Hello, world";
+        std::fs::write(
+            dir_a.path().to_path_buf().join("testdir/testfile"),
+            content_a,
+        )
+        .unwrap();
+
+        std::fs::create_dir(dir_b.path().to_path_buf().join("testdir")).unwrap();
+        std::fs::create_dir(dir_b.path().to_path_buf().join("testdir").join("toasty")).unwrap();
+        let content_b = b"Cruel World";
+        std::fs::write(
+            dir_b.path().to_path_buf().join("testdir/anotherfile"),
+            content_b,
+        )
+        .unwrap();
+
+        // Propagate them
+        let res = list.sync_all(&db).await;
+        dbg!(&res);
+        assert!(res[0].is_ok());
+
+        assert_eq!(list.synchros[&id].read().await.status(), SynchroStatus::Ok);
+
+        // Modify a file again
+        let content_b = b"Sad World";
+        std::fs::write(
+            dir_b.path().to_path_buf().join("testdir/anotherfile"),
+            content_b,
+        )
+        .unwrap();
+
+        // Simulate a db corruption
+        let fs_b = list.synchros[&id].read().await.remote().id();
+        let file_rm = VfsUpdate::FileRemoved(VirtualPathBuf::new("/testdir/anotherfile").unwrap());
+        db.update_vfs(fs_b, &file_rm).await.unwrap();
+
+        let res = list.sync_all(&db).await;
+        assert!(res[0].is_err());
+
+        assert_eq!(
+            list.synchros[&id].read().await.status(),
+            SynchroStatus::Desync
+        );
+
+        list.force_resync(id, &db).await.unwrap();
+        assert_eq!(list.synchros[&id].read().await.status(), SynchroStatus::Ok);
+
+        // Check filesystem content
+        let concrete_a: LocalDir = LocalDirCreationInfo::new(dir_a.path()).try_into().unwrap();
+        let mut fs_a = FileSystem::new(concrete_a);
+
+        let concrete_b: LocalDir = LocalDirCreationInfo::new(dir_b.path()).try_into().unwrap();
+        let mut fs_b = FileSystem::new(concrete_b);
+
+        fs_a.diff_vfs().await.unwrap();
+        fs_b.diff_vfs().await.unwrap();
+        assert!(fs_a.vfs().structural_eq(fs_b.vfs()));
     }
 }

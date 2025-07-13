@@ -14,7 +14,7 @@ use brume_daemon_proto::{
 
 use crate::{
     daemon::{
-        ConflictResolutionRequest, StateChangeRequest, SynchroCreationRequest,
+        ConflictResolutionRequest, ForceResyncRequest, StateChangeRequest, SynchroCreationRequest,
         SynchroDeletionRequest, UserCommand,
     },
     synchro_list::ReadOnlySynchroList,
@@ -108,6 +108,17 @@ impl BrumeService for Server {
         info!("Received synchro resume request: id {id:?}");
         let request = StateChangeRequest::new(id, SynchroState::Running);
         let command = UserCommand::StateChange(request);
+        self.commands_chan.send(command).map_err(|e| e.to_string())
+    }
+
+    async fn force_resync(
+        self,
+        _context: ::tarpc::context::Context,
+        id: SynchroId,
+    ) -> Result<(), String> {
+        info!("Received force resync request: id {id:?}");
+        let request = ForceResyncRequest::new(id);
+        let command = UserCommand::ForceResync(request);
         self.commands_chan.send(command).map_err(|e| e.to_string())
     }
 

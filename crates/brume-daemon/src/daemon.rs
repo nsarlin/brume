@@ -149,6 +149,7 @@ pub enum UserCommand {
     SynchroCreation(SynchroCreationRequest),
     SynchroDeletion(SynchroDeletionRequest),
     StateChange(StateChangeRequest),
+    ForceResync(ForceResyncRequest),
     ConflictResolution(ConflictResolutionRequest),
 }
 
@@ -200,6 +201,18 @@ pub struct ConflictResolutionRequest {
 impl ConflictResolutionRequest {
     pub fn new(id: SynchroId, path: VirtualPathBuf, side: SynchroSide) -> Self {
         Self { id, path, side }
+    }
+}
+
+/// A command to force resync a synchro
+#[derive(Debug)]
+pub struct ForceResyncRequest {
+    id: SynchroId,
+}
+
+impl ForceResyncRequest {
+    pub fn new(id: SynchroId) -> Self {
+        Self { id }
     }
 }
 
@@ -408,6 +421,14 @@ Please check if {} is in use by another process and try again.",
         Ok(())
     }
 
+    pub async fn force_resync(&self, synchro: ForceResyncRequest) -> Result<()> {
+        self.synchro_list
+            .force_resync(synchro.id, &self.database)
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn update_synchro_state(&self, state_request: StateChangeRequest) -> Result<()> {
         self.synchro_list
             .read()
@@ -433,7 +454,6 @@ Please check if {} is in use by another process and try again.",
                     }
                 }
             }
-
             UserCommand::SynchroDeletion(to_delete) => {
                 if let Err(err) = self.delete_synchro(to_delete).await {
                     let wrapped_err = anyhow!(err);
@@ -462,6 +482,15 @@ Please check if {} is in use by another process and try again.",
                 if let Err(err) = res {
                     let wrapped_err = anyhow!(err);
                     error!("Failed resolve conflict: {wrapped_err:?}");
+                    if self.config.error_mode == ErrorMode::Exit {
+                        return Err(wrapped_err);
+                    }
+                }
+            }
+            UserCommand::ForceResync(force_resync_request) => {
+                if let Err(err) = self.force_resync(force_resync_request).await {
+                    let wrapped_err = anyhow!(err);
+                    error!("Failed to force resync synchro: {wrapped_err:?}");
                     if self.config.error_mode == ErrorMode::Exit {
                         return Err(wrapped_err);
                     }

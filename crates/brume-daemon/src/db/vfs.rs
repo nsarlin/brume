@@ -299,6 +299,14 @@ impl Database {
         path: &VirtualPath,
         tree: &StatefulDirTree<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
+        if self.find_node(root, path).await.is_ok() {
+            return Err(DatabaseError::invalid_data(
+                "parent",
+                "node",
+                Some(format!("Trying to insert an already existing dir: {path}").into()),
+            ));
+        }
+
         let parent_node = path
             .parent()
             .map(|parent_path| Either::Left(self.find_node(root, parent_path)))
@@ -350,6 +358,14 @@ impl Database {
         path: &VirtualPath,
         file: &FileState<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
+        if self.find_node(root, path).await.is_ok() {
+            return Err(DatabaseError::invalid_data(
+                "parent",
+                "node",
+                Some(format!("Trying to insert an already existing file: {path}").into()),
+            ));
+        }
+
         let parent_node = path
             .parent()
             .map(|parent_path| Either::Left(self.find_node(root, parent_path)))
@@ -361,10 +377,16 @@ impl Database {
 
     /// Removes a node from DB at the provided path
     async fn delete_node(&self, root: &DbVfsNode, path: &VirtualPath) -> Result<(), DatabaseError> {
-        let node = self.find_node(root, path).await?;
+        let node_to_delete = self.find_node(root, path).await?;
+
+        self.delete_node_from_id(node_to_delete.id).await
+    }
+
+    async fn delete_node_from_id(&self, node_id: i32) -> Result<(), DatabaseError> {
+        use crate::schema::nodes::dsl::*;
 
         let conn = self.pool.get().await?;
-        conn.interact(move |conn| diesel::delete(&node).execute(conn))
+        conn.interact(move |conn| diesel::delete(nodes.filter(id.eq(node_id))).execute(conn))
             .await
             .unwrap() // This should never fail unless the inner closure panics
             .map_err(|e| e.into())
@@ -413,6 +435,24 @@ impl Database {
         .map_err(|e| e.into())
     }
 
+    /// Returns the id of the root node of the FS
+    pub async fn get_vfs_root_id(&self, fs_uuid: Uuid) -> Result<i32, DatabaseError> {
+        let conn = self.pool.get().await?;
+        let node = conn
+            .interact(move |conn| {
+                nodes::table
+                    .inner_join(filesystems::table)
+                    .filter(filesystems::uuid.eq(fs_uuid.as_bytes()))
+                    .select(DbVfsNode::as_select())
+                    .first(conn)
+            })
+            .await
+            // This should never fail unless the inner closure panics
+            .unwrap()?;
+
+        Ok(node.id)
+    }
+
     /// Updates the state of the node at `path` inside the FS with id `fs_uuid`
     pub async fn update_vfs_node_state(
         &self,
@@ -434,6 +474,39 @@ impl Database {
         let vfs_root = self.get_vfs_root(fs_uuid).await?;
 
         self.delete_node(&vfs_root, path).await
+    }
+
+    /// Removes the complete VFS from the DB
+    pub async fn delete_vfs(&self, root_id: i32) -> Result<(), DatabaseError> {
+        self.delete_node_from_id(root_id).await
+    }
+
+    /// Resets the VFS to the empty state
+    pub async fn reset_vfs(&self, fs_uuid: Uuid) -> Result<(), DatabaseError> {
+        use crate::schema::filesystems::dsl::*;
+
+        let old_root = self.get_vfs_root(fs_uuid).await?;
+        let new_root = self.insert_vfs_root().await?;
+
+        {
+            let conn = self.pool.get().await?;
+            conn.interact(move |conn| {
+                diesel::update(filesystems)
+                    .filter(uuid.eq(fs_uuid.as_bytes()))
+                    .set(root_node.eq(new_root))
+                    .execute(conn)
+            })
+            .await
+            .unwrap() // This should never fail unless the inner closure panics
+            .map(|_| ())?;
+        }
+
+        let conn = self.pool.get().await?;
+        conn.interact(move |conn| diesel::delete(&old_root).execute(conn))
+            .await
+            .unwrap() // This should never fail unless the inner closure panics
+            .map(|_| ())
+            .map_err(|e| e.into())
     }
 
     /// Applies a VFS update to the nodes in the DB
@@ -583,6 +656,7 @@ mod test {
         base_root.insert_child(VfsNode::Dir(a.clone()));
         let base_vfs = VfsNode::Dir(base_root);
 
+        let f1_path = VirtualPathBuf::new("/a/f1").unwrap();
         let f2_path = VirtualPathBuf::new("/a/b/f2").unwrap();
 
         let creation_update = VfsUpdate::DirCreated(VfsDirCreation::new(VirtualPath::root(), a));
@@ -661,9 +735,9 @@ mod test {
         assert_eq!(node.kind, NodeKind::File.as_str());
         assert_eq!(node.size, Some(42));
 
-        let creation_update =
+        let modification_update =
             VfsUpdate::FileModified(VfsFileUpdate::new(&f2_path, 54, Utc::now(), ()));
-        db.update_vfs(fs_ref.id(), &creation_update.into())
+        db.update_vfs(fs_ref.id(), &modification_update.into())
             .await
             .unwrap();
 
@@ -674,6 +748,14 @@ mod test {
 
         assert_eq!(node.kind, NodeKind::File.as_str());
         assert_eq!(node.size, Some(54));
+
+        let rm_update = VfsUpdate::<()>::FileRemoved(f1_path.clone());
+        db.update_vfs(fs_ref.id(), &rm_update.into()).await.unwrap();
+
+        let nodes = db.list_all_nodes().await.unwrap();
+        assert_eq!(nodes.len(), 6);
+
+        assert!(db.find_node(&root, &f1_path).await.is_err());
 
         let diff = VfsDiff::file_modified(f2_path.clone());
         let failed_diff = FailedUpdateApplication::new(
@@ -688,7 +770,7 @@ mod test {
         db.update_vfs(fs_ref.id(), &failed_update).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
-        assert_eq!(nodes.len(), 7);
+        assert_eq!(nodes.len(), 6);
 
         let node = db.find_node(&root, &f2_path).await.unwrap();
 
@@ -699,11 +781,56 @@ mod test {
         db.update_vfs(fs_ref.id(), &conflict).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
-        assert_eq!(nodes.len(), 7);
+        assert_eq!(nodes.len(), 6);
 
         let node = db.find_node(&root, &f2_path).await.unwrap();
 
         let vfs_node = VfsNode::try_from(&node).unwrap();
         assert!(vfs_node.state().is_conflict());
+    }
+
+    #[tokio::test]
+    async fn test_reset_vfs() {
+        let db = Database::new(&DatabaseConfig::InMemory).await.unwrap();
+
+        let mut a = DirTree::new_ok("a", Utc::now(), ());
+        let f1 = FileInfo::new_ok("f1", 10, Utc::now(), ());
+        let mut b = DirTree::new_ok("b", Utc::now(), ());
+        let c = DirTree::new_ok("c", Utc::now(), ());
+
+        b.insert_child(VfsNode::Dir(c));
+        a.insert_child(VfsNode::File(f1));
+        a.insert_child(VfsNode::Dir(b));
+
+        let mut base_root = DirTree::new_ok("", Utc::now(), ());
+        base_root.insert_child(VfsNode::Dir(a.clone()));
+
+        let creation_update = VfsUpdate::DirCreated(VfsDirCreation::new(VirtualPath::root(), a));
+
+        let fs_info = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new("/tmp/test"));
+        let fs_ref = FileSystemMeta::from(fs_info.clone());
+
+        db.insert_new_filesystem(fs_ref.id(), &fs_info)
+            .await
+            .unwrap();
+
+        let nodes = db.list_all_nodes().await.unwrap();
+
+        // Only the root is present
+        assert_eq!(nodes.len(), 1);
+
+        db.update_vfs(fs_ref.id(), &creation_update.into())
+            .await
+            .unwrap();
+
+        let nodes = db.list_all_nodes().await.unwrap();
+        assert_eq!(nodes.len(), 5);
+
+        db.reset_vfs(fs_ref.id()).await.unwrap();
+
+        let nodes = db.list_all_nodes().await.unwrap();
+
+        // Only the root is present
+        assert_eq!(nodes.len(), 1);
     }
 }

@@ -406,6 +406,11 @@ pub trait BrumeService {
     /// Resumes a synchronization
     async fn resume_synchro(id: SynchroId) -> Result<(), String>;
 
+    /// Re-synchronize the filesystems by re-scanning completely their filesystems.
+    ///
+    /// This might take a while but can help if they are in the `Desync` state.
+    async fn force_resync(id: SynchroId) -> Result<(), String>;
+
     /// Resolves a conflict
     async fn resolve_conflict(
         id: SynchroId,
