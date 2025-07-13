@@ -1,3 +1,4 @@
+mod force_resync;
 mod list;
 mod new;
 mod pause;
@@ -7,6 +8,7 @@ mod resume;
 mod status;
 
 use clap::Subcommand;
+pub use force_resync::*;
 pub use list::*;
 pub use new::*;
 pub use pause::*;
@@ -62,4 +64,8 @@ pub enum Commands {
 
     /// Resolve a conflict in a synchronization
     Resolve(CommandResolve),
+
+    /// Trigger a force resync. This will completely re-scan the remote and local folder.
+    /// This might take a while but can be used to recover from a `Desync` status.
+    ForceResync(CommandForceResync),
 }
