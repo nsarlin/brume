@@ -6,10 +6,12 @@ use std::path::Path;
 use brume::concrete::InvalidBytesSyncInfo;
 use brume_daemon_proto::config::DatabaseUserConfig;
 use deadpool_diesel::PoolError;
+use deadpool_diesel::sqlite::{Hook, HookError};
 use deadpool_diesel::{
     Runtime,
     sqlite::{Manager, Pool},
 };
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use futures::future::try_join;
@@ -78,7 +80,7 @@ struct DbNewSynchro<'a> {
 /// Metadata retrevied from a loaded filesystem in the db, allows to re-create the concrete FS.
 ///
 /// Does not hold the Vfs
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LoadedFileSystem {
     uuid: Uuid,
     creation_info: AnyFsCreationInfo,
@@ -213,7 +215,21 @@ impl Database {
         // Pool size is set to 1 because most operations will be writes, and sqlite is not
         // well suited for concurrent accesses
         // Ok to unwrap because this cannot fail if a runtime is provided
-        let pool = Pool::builder(manager).max_size(1).build().unwrap();
+        let pool = Pool::builder(manager)
+            .post_create(Hook::async_fn(|conn, _| {
+                Box::pin(async move {
+                    conn.interact(|conn| {
+                        // Enable foreign keys to allow cascading deletion
+                        conn.batch_execute("PRAGMA foreign_keys = ON;")
+                    })
+                    .await
+                    .unwrap() // This should never fail unless the inner closure panics
+                    .map_err(|e| HookError::Backend(e.into()))
+                })
+            }))
+            .max_size(1)
+            .build()
+            .unwrap();
 
         let conn = pool.get().await.map_err(|_| {
             DatabaseCreationError::InvalidDbPath(
@@ -278,8 +294,9 @@ impl Database {
         }?;
 
         Ok(LoadedFileSystem {
-            uuid: Uuid::from_slice(&db_fs.uuid).unwrap(),
-            creation_info: bincode::deserialize(&db_fs.creation_info).unwrap(),
+            uuid: Uuid::from_slice(&db_fs.uuid)
+                .map_err(|e| DatabaseError::invalid_data("filesystems", "uuid", Some(e.into())))?,
+            creation_info: bincode::deserialize(&db_fs.creation_info)?,
         })
     }
 
@@ -315,18 +332,25 @@ impl Database {
 
     /// Deletes a single filesystem from the db
     pub async fn delete_filesystem(&self, fs: &FileSystemMeta) -> Result<(), DatabaseError> {
+        self.delete_filesystem_from_uuid(fs.id()).await
+    }
+
+    async fn delete_filesystem_from_uuid(&self, fs_id: Uuid) -> Result<(), DatabaseError> {
         use crate::schema::filesystems::dsl::*;
 
-        let fs = fs.clone();
+        let vfs_root = self.get_vfs_root_id(fs_id).await?;
 
-        let conn = self.pool.get().await?;
-        conn.interact(move |conn| {
-            diesel::delete(filesystems.filter(uuid.eq(fs.id().as_bytes()))).execute(conn)
-        })
-        .await
-        .unwrap() // This should never fail unless the inner closure panics
-        .map_err(|e| e.into())
-        .map(|_| ())
+        {
+            let conn = self.pool.get().await?;
+            conn.interact(move |conn| {
+                diesel::delete(filesystems.filter(uuid.eq(fs_id.as_bytes()))).execute(conn)
+            })
+            .await
+            // This should never fail unless the inner closure panics
+            .unwrap()?;
+        }
+
+        self.delete_vfs(vfs_root).await
     }
 
     /// Updates the (status)[`SynchroStatus`] of a synchro
@@ -482,24 +506,30 @@ impl Database {
     pub async fn delete_synchro(&self, synchro: SynchroId) -> Result<(), DatabaseError> {
         use crate::schema::synchros::dsl::*;
 
-        let conn = self.pool.get().await?;
-        conn.interact(move |conn| {
-            let db_synchro = &synchros
-                .filter(uuid.eq(synchro.as_bytes()))
-                .select(DbSynchro::as_select())
-                .get_result(conn)?;
+        let db_synchro = {
+            let conn = self.pool.get().await?;
+            conn.interact(move |conn| {
+                let db_synchro = synchros
+                    .filter(uuid.eq(synchro.as_bytes()))
+                    .select(DbSynchro::as_select())
+                    .get_result(conn)?;
 
-            diesel::delete(filesystems::table.filter(filesystems::id.eq(db_synchro.local_fs)))
-                .execute(conn)?;
-            diesel::delete(filesystems::table.filter(filesystems::id.eq(db_synchro.remote_fs)))
-                .execute(conn)?;
+                diesel::delete(synchros.filter(uuid.eq(synchro.as_bytes())))
+                    .execute(conn)
+                    .map(|_| db_synchro)
+            })
+            .await
+            // This should never fail unless the inner closure panics
+            .unwrap()?
+        };
 
-            diesel::delete(synchros.filter(uuid.eq(synchro.as_bytes()))).execute(conn)
-        })
-        .await
-        .unwrap() // This should never fail unless the inner closure panics
-        .map_err(|e| e.into())
-        .map(|_| ())
+        let local = self.load_filesystem_from_id(db_synchro.local_fs).await?;
+        self.delete_filesystem_from_uuid(local.uuid).await?;
+
+        let remote = self.load_filesystem_from_id(db_synchro.remote_fs).await?;
+        self.delete_filesystem_from_uuid(remote.uuid).await?;
+
+        Ok(())
     }
 }
 
@@ -512,7 +542,7 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn test_db_filystem() {
+    async fn test_db_filesystem() {
         let db = Database::new(&DatabaseConfig::InMemory).await.unwrap();
 
         db.load_all_filesystems().await.unwrap();

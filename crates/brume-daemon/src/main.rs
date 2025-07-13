@@ -35,8 +35,6 @@ async fn main() -> Result<()> {
         DaemonConfig::default()
     };
 
-    dbg!(&config);
-
     let daemon = Arc::new(Daemon::new(config).await?);
 
     daemon.run().await
