@@ -31,5 +31,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Resume(args) => commands::resume(daemon, args).await,
         Commands::Status(args) => commands::status(daemon, args).await,
         Commands::Resolve(args) => commands::resolve(daemon, args).await,
+        Commands::ForceResync(args) => commands::force_resync(daemon, args).await,
     }
 }
