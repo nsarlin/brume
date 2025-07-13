@@ -1,6 +1,6 @@
 //! Representation of path objects that are not necessarily linked to the local filesystem.
 
-use std::{borrow::Borrow, fmt::Display, ops::Deref, path::Path};
+use std::{borrow::Borrow, cmp::Ordering, fmt::Display, ops::Deref, path::Path};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,10 +30,23 @@ impl InvalidPathError {
 
 /// A wrapper type that allows doing path operations on strings, without considerations for any
 /// concrete file system. These paths are supposed to be absolute and should start with a '/'.
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct VirtualPath {
     path: str,
+}
+
+// Manual impl to sort lexicographically on path and not on strings
+impl PartialOrd for VirtualPath {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VirtualPath {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
 }
 
 impl Sortable for &VirtualPath {
@@ -283,10 +296,23 @@ impl<'a> Iterator for VirtualPathIterator<'a> {
 
 /// Similar to the distinction with Path and PathBuf, this is a VirtualPath that owns the underlying
 /// data.
-#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Serialize, Deserialize)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct VirtualPathBuf {
     path: String,
+}
+
+// Manual impl to sort lexicographically on path and not on strings
+impl PartialOrd for VirtualPathBuf {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VirtualPathBuf {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
 }
 
 impl Sortable for VirtualPathBuf {
@@ -329,6 +355,8 @@ impl VirtualPathBuf {
 
 #[cfg(test)]
 mod test {
+    use crate::sorted_vec::SortedVec;
+
     use super::*;
 
     #[test]
@@ -530,5 +558,24 @@ mod test {
 
         assert_eq!(elem.len(), 0);
         assert!(elem.is_empty());
+    }
+
+    #[test]
+    fn test_sort() {
+        let path_list: Vec<_> = ["/ab", "/b", "/a", "/a/b", "/a b", "/aa"]
+            .iter()
+            .map(|p| VirtualPathBuf::new(p).unwrap())
+            .collect();
+
+        let sorted = SortedVec::from_vec(path_list);
+
+        let res: Vec<_> = sorted.into();
+
+        let expected: Vec<_> = ["/a", "/a/b", "/a b", "/aa", "/ab", "/b"]
+            .iter()
+            .map(|p| VirtualPathBuf::new(p).unwrap())
+            .collect();
+
+        assert_eq!(res, expected)
     }
 }
