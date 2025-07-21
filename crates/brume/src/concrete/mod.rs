@@ -20,8 +20,8 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::filesystem::{FileSystem, SkipUpdateError};
 use crate::sorted_vec::SortedVec;
 use crate::update::{
-    AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, FailedUpdateApplication, IsModified,
-    ReconciledUpdate, ReconciliationError, UpdateConflict, UpdateKind, VfsDiff,
+    AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DirModification, FailedUpdateApplication,
+    IsModified, ReconciledUpdate, ReconciliationError, UpdateConflict, UpdateKind, VfsDiff,
     VirtualReconciledUpdate,
 };
 use crate::vfs::{
@@ -466,7 +466,8 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         Vec<AppliedUpdate<RefBackend::SyncInfo, Backend::SyncInfo>>,
         ConcreteUpdateApplicationError,
     > {
-        if update.path().is_root() {
+        // Only supported update on root node is to modify its SyncInfo
+        if update.path().is_root() && update.kind() != UpdateKind::DirModified {
             return Err(ConcreteUpdateApplicationError::PathIsRoot);
         }
 
@@ -520,6 +521,18 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                         ))
                     })
                     .map(|update| vec![update])
+            }
+            // There is nothing to do on the backend for a dir modified, this update is just used to
+            // propgate the SyncInfo to the vfs
+            UpdateKind::DirModified => {
+                let loaded_dir = ref_fs.find_loaded_dir(&path)?;
+                let dir_mod = DirModification::new(
+                    &path,
+                    loaded_dir.last_modified(),
+                    loaded_dir.metadata().clone(),
+                );
+
+                Ok(vec![AppliedUpdate::DirModified(dir_mod)])
             }
             UpdateKind::FileCreated => self
                 .clone_file(ref_fs.concrete(), &path)

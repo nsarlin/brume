@@ -133,6 +133,12 @@ pub struct DirTree<Data> {
 
 pub type StatefulDirTree<Data> = DirTree<NodeState<Data>>;
 
+impl<Data> From<DirTree<Data>> for DirInfo<Data> {
+    fn from(value: DirTree<Data>) -> Self {
+        value.info
+    }
+}
+
 impl<Data> DirTree<Data> {
     /// Creates a new directory with no child and the provided name
     pub fn new(name: &str, last_modified: DateTime<Utc>, sync: Data) -> Self {
@@ -491,18 +497,15 @@ impl<Data> StatefulDirTree<Data> {
     }
 
     /// Returns the list of errors for this dir and its children
-    pub fn get_errors(
-        &self,
-        dir_path: &VirtualPath,
-    ) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
+    pub fn get_errors(&self) -> Vec<FailedUpdateApplication> {
         let mut ret = if let NodeState::Error(err) = self.state() {
-            vec![(dir_path.to_owned(), err.to_owned())]
+            vec![err.to_owned()]
         } else {
             Vec::new()
         };
 
         for child in self.children().iter() {
-            ret.extend(child.get_errors_list(dir_path));
+            ret.extend(child.get_errors_list());
         }
 
         ret
@@ -547,17 +550,18 @@ impl<Data: IsModified + Debug> StatefulDirTree<Data> {
             // The SyncInfo tells us that nothing has been modified for this dir, but can't
             // speak about its children. So we need to walk them.
             ModificationState::ShallowUnmodified => {
-                // Since the current dir is unmodified, both self and other should have the same
-                // number of children with the same names.
-                if self.children.len() != other.children.len() {
-                    return Err(DiffError::InvalidSyncInfo(dir_path));
-                }
-                let mut self_dirs = self.children.iter();
-                let mut other_dirs = other.children.iter();
+                let mut self_children = self.children.iter().filter(|node| !node.is_removed());
+                let mut other_children = other.children.iter();
 
-                let diffs = std::iter::zip(self_dirs.by_ref(), other_dirs.by_ref())
+                let diffs = std::iter::zip(self_children.by_ref(), other_children.by_ref())
                     .map(|(self_child, other_child)| self_child.diff(other_child, &dir_path))
                     .collect::<Result<Vec<_>, _>>()?;
+
+                // Since the current dir is unmodified, both self and other should have the same
+                // number of children with the same names.
+                if self_children.next().is_some() || other_children.next().is_some() {
+                    return Err(DiffError::InvalidSyncInfo(dir_path));
+                }
 
                 // Since the children list is sorted, we know that the resulting updates will be
                 // also sorted, so we can call `unchecked_flatten`
@@ -567,31 +571,40 @@ impl<Data: IsModified + Debug> StatefulDirTree<Data> {
             // stop there
             ModificationState::RecursiveUnmodified => Ok(VfsDiffList::new()),
             ModificationState::Modified => {
-                // If the dir is in error state, resync it completely
-                if self.state().is_err() {
-                    let mut res = SortedVec::new();
-                    res.insert(VfsDiff::dir_created(dir_path));
-                    Ok(res)
+                if self.state().is_err() || self.state().is_conflict() {
+                    Ok(SortedVec::new())
                 } else {
+                    let mut diff_list = vec![SortedVec::from_vec(vec![VfsDiff::dir_modified(
+                        dir_path.clone(),
+                    )])];
+
+                    let self_children = SortedVec::unchecked_from_vec(
+                        self.children
+                            .iter()
+                            .filter(|node| !node.is_removed())
+                            .collect(),
+                    );
+
                     // The directory has been modified, so we have to walk it recursively to find
                     // the modified nodes
-                    let diff_list = self
-                        .children
-                        .iter_zip_map(
-                            &other.children,
-                            |self_child| -> Result<_, DiffError> {
-                                let mut res = SortedVec::new();
-                                res.insert(self_child.to_removed_diff(&dir_path));
-                                Ok(res)
-                            },
-                            |self_child, other_child| self_child.diff(other_child, &dir_path),
-                            |other_child| {
-                                let mut res = SortedVec::new();
-                                res.insert(other_child.to_created_diff(&dir_path));
-                                Ok(res)
-                            },
-                        )
-                        .collect::<Result<Vec<_>, _>>()?;
+                    diff_list.extend(
+                        self_children
+                            .iter_zip_map(
+                                &other.children,
+                                |self_child| -> Result<_, DiffError> {
+                                    let mut res = SortedVec::new();
+                                    res.insert(self_child.to_removed_diff(&dir_path));
+                                    Ok(res)
+                                },
+                                |self_child, other_child| self_child.diff(other_child, &dir_path),
+                                |other_child| {
+                                    let mut res = SortedVec::new();
+                                    res.insert(other_child.to_created_diff(&dir_path));
+                                    Ok(res)
+                                },
+                            )
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
 
                     // Since the children lists are sorted, we know that the produced updates will
                     // be too, so we can directly create the sorted list from
@@ -999,17 +1012,12 @@ impl<Data> VfsNode<NodeState<Data>> {
     }
 
     /// Returns the list of errors for this node and its children
-    pub fn get_errors_list(
-        &self,
-        parent_path: &VirtualPath,
-    ) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
-        let path = self.path(parent_path);
-
+    pub fn get_errors_list(&self) -> Vec<FailedUpdateApplication> {
         match self {
-            VfsNode::Dir(dir) => dir.get_errors(&path),
+            VfsNode::Dir(dir) => dir.get_errors(),
             VfsNode::File(file) => {
                 if let NodeState::Error(err) = file.state() {
-                    vec![(path, err.to_owned())]
+                    vec![err.to_owned()]
                 } else {
                     Vec::new()
                 }
@@ -1055,6 +1063,28 @@ impl<Data> VfsNode<NodeState<Data>> {
         }
         false
     }
+
+    /// Returns true if the node is removed on the concrete FS but the update has not been
+    /// propagated because of a conflict or an error.
+    pub fn is_removed(&self) -> bool {
+        self.pending_update()
+            .map(|update| update.is_removal())
+            .unwrap_or(false)
+    }
+
+    /// Returns any pending update stored on the node that has not been propagated because of a
+    /// conflict or an error.
+    pub fn pending_update(&self) -> Option<&VfsDiff> {
+        if let NodeState::Error(failed_update) = self.state() {
+            return Some(failed_update.update());
+        }
+
+        if let NodeState::Conflict(conflict) = self.state() {
+            return Some(conflict.update());
+        }
+
+        None
+    }
 }
 
 impl<Data: IsModified + Debug> StatefulVfsNode<Data> {
@@ -1074,14 +1104,14 @@ impl<Data: IsModified + Debug> StatefulVfsNode<Data> {
             .into());
         }
 
-        // If the node is in error state, we retry the same update
-        if let NodeState::Error(failed_update) = self.state() {
-            return Ok(VfsDiffList::from_vec(vec![failed_update.update().clone()]));
+        // Skip error nodes, they are retried anyways
+        if let NodeState::Error(_) = self.state() {
+            return Ok(VfsDiffList::new());
         }
 
-        // If the node is in conflict, we retry it
-        if let NodeState::Conflict(diff) = self.state() {
-            return Ok(VfsDiffList::from_vec(vec![diff.update().clone()]));
+        // Skip conflicts, there is nothing to do until manual resolution
+        if let NodeState::Conflict(_) = self.state() {
+            return Ok(VfsDiffList::new());
         }
 
         match (self, other) {
@@ -1139,7 +1169,7 @@ impl<SyncInfo: TryFromBytes> TryFrom<StatefulVfsNode<Vec<u8>>> for StatefulVfsNo
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_utils::TestNode::{D, DE, DH, F, FE, FH};
+    use crate::test_utils::TestNode::{D, DH, F, FH};
 
     #[test]
     fn test_find() {
@@ -1396,9 +1426,11 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsDiff::file_modified(
-                VirtualPathBuf::new("/Doc/f1.md").unwrap()
-            )]
+            vec![
+                VfsDiff::dir_modified(VirtualPathBuf::new("/").unwrap()),
+                VfsDiff::dir_modified(VirtualPathBuf::new("/Doc").unwrap()),
+                VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            ]
             .into()
         );
 
@@ -1417,9 +1449,11 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsDiff::file_removed(
-                VirtualPathBuf::new("/Doc/f1.md").unwrap()
-            )]
+            vec![
+                VfsDiff::dir_modified(VirtualPathBuf::new("/").unwrap()),
+                VfsDiff::dir_modified(VirtualPathBuf::new("/Doc").unwrap()),
+                VfsDiff::file_removed(VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            ]
             .into()
         );
 
@@ -1439,6 +1473,8 @@ mod test {
         assert_eq!(
             diff,
             vec![
+                VfsDiff::dir_modified(VirtualPathBuf::new("/").unwrap()),
+                VfsDiff::dir_modified(VirtualPathBuf::new("/Doc").unwrap()),
                 VfsDiff::file_removed(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
                 VfsDiff::file_created(VirtualPathBuf::new("/Doc/f3.pdf").unwrap())
             ]
@@ -1461,6 +1497,8 @@ mod test {
         assert_eq!(
             diff,
             vec![
+                VfsDiff::dir_modified(VirtualPathBuf::new("/").unwrap()),
+                VfsDiff::dir_modified(VirtualPathBuf::new("/a").unwrap()),
                 VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
                 VfsDiff::dir_created(VirtualPathBuf::new("/a/bc").unwrap(),)
             ]
@@ -1516,9 +1554,10 @@ mod test {
 
         assert_eq!(
             diff,
-            vec![VfsDiff::file_removed(
-                VirtualPathBuf::new("/Doc/f1.md").unwrap()
-            )]
+            vec![
+                VfsDiff::dir_modified(VirtualPathBuf::new("/Doc").unwrap()),
+                VfsDiff::file_removed(VirtualPathBuf::new("/Doc/f1.md").unwrap())
+            ]
             .into()
         );
 
@@ -1538,6 +1577,7 @@ mod test {
         assert_eq!(
             diff,
             vec![
+                VfsDiff::dir_modified(VirtualPathBuf::new("/Doc").unwrap()),
                 VfsDiff::file_removed(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
                 VfsDiff::file_created(VirtualPathBuf::new("/Doc/f3.pdf").unwrap())
             ]
@@ -1560,79 +1600,11 @@ mod test {
         assert_eq!(
             diff,
             vec![
+                VfsDiff::dir_modified(VirtualPathBuf::new("/a").unwrap()),
                 VfsDiff::dir_removed(VirtualPathBuf::new("/a/b").unwrap()),
                 VfsDiff::dir_created(VirtualPathBuf::new("/a/bc").unwrap(),)
             ]
             .into()
-        );
-    }
-
-    /// Test a Vfs diff where some nodes are in error state
-    #[test]
-    fn test_diff_error() {
-        let reference = DH(
-            "",
-            0,
-            vec![
-                DH("Doc", 1, vec![FE("f1.md", ""), FH("f2.pdf", 3)]),
-                DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
-            ],
-        )
-        .into_node();
-
-        let modified = DH(
-            "",
-            0,
-            vec![
-                DH("Doc", 1, vec![FH("f1.md", 2), FH("f2.pdf", 3)]),
-                DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
-            ],
-        )
-        .into_node()
-        .unwrap();
-
-        let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
-
-        assert_eq!(
-            diff,
-            vec![VfsDiff::file_created(
-                VirtualPathBuf::new("/Doc/f1.md").unwrap()
-            )]
-            .into()
-        );
-
-        let reference = DH(
-            "",
-            0,
-            vec![
-                DE("Doc", ""),
-                DH("a", 4, vec![DH("b", 5, vec![DH("c", 6, vec![])])]),
-            ],
-        )
-        .into_node();
-
-        let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
-
-        assert_eq!(
-            diff,
-            vec![VfsDiff::dir_created(VirtualPathBuf::new("/Doc").unwrap())].into()
-        );
-
-        let reference = DH(
-            "",
-            0,
-            vec![
-                DH("Doc", 1, vec![FH("f1.md", 2), FH("f2.pdf", 3)]),
-                DH("a", 4, vec![DE("b", "")]),
-            ],
-        )
-        .into_node();
-
-        let diff = reference.diff(&modified, VirtualPath::root()).unwrap();
-
-        assert_eq!(
-            diff,
-            vec![VfsDiff::dir_created(VirtualPathBuf::new("/a/b").unwrap())].into()
         );
     }
 }

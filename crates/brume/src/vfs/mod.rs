@@ -137,8 +137,8 @@ impl<Data> StatefulVfs<Data> {
     }
 
     /// Returns the list of nodes with error from the concrete FS
-    pub fn get_errors(&self) -> Vec<(VirtualPathBuf, FailedUpdateApplication)> {
-        self.root().get_errors_list(VirtualPath::root())
+    pub fn get_errors(&self) -> Vec<FailedUpdateApplication> {
+        self.root().get_errors_list()
     }
 
     /// Returns the list of nodes with a conflict that should be manually resolved
@@ -157,19 +157,27 @@ impl<Data: Clone> StatefulVfs<Data> {
         loaded_vfs: &Vfs<Data>,
     ) -> Result<(), VfsUpdateApplicationError> {
         let path = update.path().to_owned();
+        let parent_path = path.parent();
 
-        let parent = self
-            .root_mut()
-            .find_dir_mut(path.parent().ok_or(VfsUpdateApplicationError::PathIsRoot)?)?;
+        // Only supported update on root node is to modify its SyncInfo
+        if parent_path.is_none() && !matches!(update, VfsUpdate::DirModified(_)) {
+            return Err(VfsUpdateApplicationError::PathIsRoot);
+        }
 
-        // Invalidate parent sync info because its content has been changed
-        parent.force_resync();
+        let mut parent = parent_path
+            .map(|path| self.root_mut().find_dir_mut(path))
+            .transpose()?;
 
-        // Remove the child if in error. It will be restored as Ok or as an Error based on the
-        // result of the last concrete application attempt
-        parent.remove_child_if(update.path().name(), |child| {
-            child.state().is_err() && update.is_creation()
-        });
+        if let Some(parent) = parent.as_mut() {
+            // Invalidate parent sync info because its content has been changed
+            // parent.force_resync();
+
+            // Remove the child if in error. It will be restored as Ok or as an Error based on the
+            // result of the last concrete application attempt
+            parent.remove_child_if(update.path().name(), |child| {
+                child.state().is_err() && update.is_creation()
+            });
+        }
 
         match update {
             VfsUpdate::DirCreated(update) => {
@@ -182,10 +190,16 @@ impl<Data: Clone> StatefulVfs<Data> {
                     }
                     .into());
                 }
-                parent.insert_child(child);
+                parent.unwrap().insert_child(child);
                 Ok(())
             }
             VfsUpdate::DirRemoved(path) => self.delete_dir(path).map_err(|e| e.into()),
+            VfsUpdate::DirModified(update) => {
+                let dir = self.root_mut().find_dir_mut(update.path())?;
+                let state = dir.state_mut();
+                *state = update.state().clone().into_metadata();
+                Ok(())
+            }
             VfsUpdate::FileCreated(update) => {
                 let child = VfsNode::File(FileInfo::new(
                     path.name(),
@@ -193,7 +207,7 @@ impl<Data: Clone> StatefulVfs<Data> {
                     update.last_modified(),
                     NodeState::Ok(update.sync_info().clone()),
                 ));
-                parent.insert_child(child);
+                parent.unwrap().insert_child(child);
                 Ok(())
             }
             VfsUpdate::FileModified(update) => {
@@ -368,8 +382,11 @@ mod test {
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
-
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        // In real life the update will come with an update of its parent path
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::new("/e/g").unwrap())].into()
+        );
 
         // Test dir removal
         let mut vfs = Vfs::new(base.clone());
@@ -389,8 +406,11 @@ mod test {
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
-
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        // In real life the update will come with an update of its parent path
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::new("/e").unwrap())].into()
+        );
 
         // Test file creation
         let mut vfs = Vfs::new(base.clone());
@@ -416,8 +436,11 @@ mod test {
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
-
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        // In real life the update will come with an update of its parent path
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::new("/e/g").unwrap())].into()
+        );
 
         // Test file modification
         let mut vfs = Vfs::new(base.clone());
@@ -464,8 +487,11 @@ mod test {
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
-
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        // In real life the update will come with an update of its parent path
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::new("/Doc").unwrap())].into()
+        );
     }
 
     // Specific tests for when the update is applied to the root since it is sometimes handled
@@ -506,7 +532,10 @@ mod test {
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
 
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::root())].into()
+        );
 
         // Test dir removal
         let mut vfs = Vfs::new(base.clone());
@@ -526,7 +555,10 @@ mod test {
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
 
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::root())].into()
+        );
 
         // Test file creation
         let mut vfs = Vfs::new(base.clone());
@@ -554,7 +586,10 @@ mod test {
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
 
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::root())].into()
+        );
 
         // Test file modification
         let mut vfs = Vfs::new(base.clone());
@@ -570,7 +605,7 @@ mod test {
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
 
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        assert!(vfs.diff(&ref_vfs).unwrap().is_empty(),);
 
         // Test file removal
         let mut vfs = Vfs::new(base);
@@ -591,7 +626,10 @@ mod test {
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
 
-        assert!(vfs.diff(&ref_vfs).unwrap().is_empty());
+        assert_eq!(
+            vfs.diff(&ref_vfs).unwrap(),
+            vec![VfsDiff::dir_modified(VirtualPathBuf::root())].into()
+        );
     }
 
     #[test]

@@ -7,8 +7,8 @@ use crate::{
     concrete::{ConcreteFS, FSBackend, FsBackendError},
     sorted_vec::SortedVec,
     update::{
-        DiffError, UpdateKind, VfsDiff, VfsDiffList, VfsDirCreation, VfsFileUpdate, VfsUpdate,
-        VfsUpdateApplicationError,
+        DiffError, DirModification, UpdateKind, VfsDiff, VfsDiffList, VfsDirCreation,
+        VfsFileUpdate, VfsUpdate, VfsUpdateApplicationError,
     },
     vfs::{DirTree, InvalidPathError, NodeState, StatefulVfs, Vfs, VirtualPath},
 };
@@ -72,11 +72,24 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         debug!("Updating VFS from {}", Backend::TYPE_NAME);
         let new_vfs = self.backend().load_virtual().await.map_err(|e| e.into())?;
 
+        // We retry any node in error, if they are still present in the vfs
+        let errors = SortedVec::from_vec(
+            self.status_vfs
+                .get_errors()
+                .iter()
+                .filter(|failed_update| {
+                    failed_update.update().is_removal()
+                        || new_vfs.find_node(failed_update.path()).is_some()
+                })
+                .map(|failed_update| failed_update.update().clone())
+                .collect(),
+        );
+
         let updates = self.status_vfs.diff(&new_vfs)?;
         self.loaded_vfs = Some(new_vfs);
 
         debug!("VFS from {} updated", Backend::TYPE_NAME);
-        Ok(updates)
+        Ok(updates.merge(errors))
     }
 
     /// Returns the virtual view of this FileSystem.
@@ -236,6 +249,14 @@ impl<Backend: FSBackend> FileSystem<Backend> {
                     loaded_file.size(),
                     loaded_file.last_modified(),
                     loaded_file.into_metadata(),
+                )))
+            }
+            UpdateKind::DirModified => {
+                let loaded_dir = loaded.find_dir(path)?;
+                Ok(VfsUpdate::DirModified(DirModification::new(
+                    path,
+                    loaded_dir.last_modified(),
+                    loaded_dir.metadata().clone(),
                 )))
             }
         }

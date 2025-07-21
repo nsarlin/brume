@@ -14,6 +14,14 @@ pub trait Sortable {
     fn key(&self) -> &Self::Key;
 }
 
+impl<T: Sortable> Sortable for &T {
+    type Key = T::Key;
+
+    fn key(&self) -> &Self::Key {
+        (*self).key()
+    }
+}
+
 /// A vec of elements, sorted and without duplicates. This struct is a wrapper over a `Vec<T>`
 /// that keeps the sorting invariant.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -32,6 +40,56 @@ impl<T: Sortable> SortedVec<T> {
         vec.dedup_by(|a, b| a.key() == b.key());
 
         Self(vec)
+    }
+
+    /// Merge 2 vecs and return a third one that is already sorted
+    pub fn merge(self, other: Self) -> Self {
+        let mut self_iter = self.0.into_iter();
+        let mut other_iter = other.0.into_iter();
+        let mut res = Vec::new();
+
+        let mut self_next = self_iter.next();
+        let mut other_next = other_iter.next();
+
+        loop {
+            match (self_next, other_next) {
+                (Some(self_item), Some(other_item)) => {
+                    match self_item.key().cmp(other_item.key()) {
+                        Ordering::Less => {
+                            res.push(self_item);
+                            self_next = self_iter.next();
+                            other_next = Some(other_item);
+                        }
+                        Ordering::Equal => {
+                            res.push(self_item);
+                            res.push(other_item);
+                            self_next = self_iter.next();
+                            other_next = other_iter.next();
+                        }
+                        Ordering::Greater => {
+                            res.push(other_item);
+                            self_next = Some(self_item);
+                            other_next = other_iter.next();
+                        }
+                    }
+                }
+                (Some(self_item), None) => {
+                    res.push(self_item);
+                    self_next = self_iter.next();
+                    other_next = other_iter.next();
+                }
+                (None, Some(other_item)) => {
+                    res.push(other_item);
+                    other_next = other_iter.next();
+                    self_next = self_iter.next();
+                }
+                (None, None) => {
+                    break;
+                }
+            }
+        }
+
+        Self::unchecked_from_vec(res)
     }
 
     /// Inserts a new element inside an existing vec, without overwriting existing ones.
@@ -225,7 +283,7 @@ impl<T: Sortable> SortedVec<T> {
     /// Extends a vec with the elements of another one, the vecs are both relatively sorted.
     ///
     /// This means that the last element of self is smaller that the first element of other.
-    pub fn unchecked_extend(&mut self, other: Self) {
+    pub fn unchecked_extend<I: IntoIterator<Item = T>>(&mut self, other: I) {
         self.0.extend(other);
     }
 
@@ -519,5 +577,35 @@ mod test {
         assert_eq!(vec.pop().unwrap().name(), "b");
         assert_eq!(vec.pop().unwrap().name(), "a");
         assert!(vec.pop().is_none());
+    }
+
+    #[test]
+    fn test_merge() {
+        let nodes1 = vec![F("ab"), F("ad"), F("be"), F("bf")]
+            .into_iter()
+            .map(|val| val.into_node())
+            .collect();
+        let vec1 = SortedVec::from_vec(nodes1);
+
+        let nodes2 = vec![F("ac"), F("ae")]
+            .into_iter()
+            .map(|val| val.into_node())
+            .collect();
+        let vec2 = SortedVec::from_vec(nodes2);
+
+        let reference: Vec<_> = vec![F("ab"), F("ac"), F("ad"), F("ae"), F("be"), F("bf")]
+            .into_iter()
+            .map(|val| val.into_node())
+            .collect();
+
+        let vec = vec1.merge(vec2);
+
+        assert_eq!(vec.len(), reference.len());
+        assert!(
+            vec.0
+                .iter()
+                .zip(reference.iter())
+                .all(|(a, b)| a.structural_eq(b))
+        )
     }
 }

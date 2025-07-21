@@ -32,8 +32,8 @@ use crate::{
     concrete::{ConcreteFileCloneResult, FsBackendError, Named, ToBytes},
     sorted_vec::{Sortable, SortedVec},
     vfs::{
-        DeleteNodeError, FileInfo, InvalidPathError, StatefulDirTree, Vfs, VirtualPath,
-        VirtualPathBuf,
+        DeleteNodeError, DirState, FileInfo, InvalidPathError, NodeState, StatefulDirTree, Vfs,
+        VirtualPath, VirtualPathBuf,
     },
 };
 
@@ -142,7 +142,7 @@ pub enum UpdateKind {
     FileCreated,
     FileRemoved,
     FileModified,
-    //TODO: add DirModified to update the syncinfo of a dir
+    DirModified,
     //TODO: detect moves
 }
 
@@ -154,6 +154,7 @@ impl Display for UpdateKind {
             UpdateKind::FileCreated => write!(f, "File created"),
             UpdateKind::FileRemoved => write!(f, "File removed"),
             UpdateKind::FileModified => write!(f, "File modified"),
+            UpdateKind::DirModified => write!(f, "Dir modified"),
         }
     }
 }
@@ -177,6 +178,7 @@ impl UpdateKind {
             UpdateKind::FileCreated => UpdateKind::FileRemoved,
             UpdateKind::FileModified => UpdateKind::FileModified,
             UpdateKind::FileRemoved => UpdateKind::FileCreated,
+            UpdateKind::DirModified => UpdateKind::DirModified,
         }
     }
 }
@@ -220,6 +222,13 @@ impl VfsDiff {
         Self {
             path,
             kind: UpdateKind::DirRemoved,
+        }
+    }
+
+    pub fn dir_modified(path: VirtualPathBuf) -> Self {
+        Self {
+            path,
+            kind: UpdateKind::DirModified,
         }
     }
 
@@ -299,7 +308,8 @@ impl VfsDiff {
                 Ok(reconciled)
             }
             (UpdateKind::DirRemoved, UpdateKind::DirRemoved)
-            | (UpdateKind::FileRemoved, UpdateKind::FileRemoved) => {
+            | (UpdateKind::FileRemoved, UpdateKind::FileRemoved)
+            | (UpdateKind::DirModified, UpdateKind::DirModified) => {
                 let update =
                     VirtualReconciledUpdate::Skip(ApplicableUpdate::new(UpdateTarget::Both, self));
                 reconciled.insert(update);
@@ -321,6 +331,25 @@ impl VfsDiff {
                 };
 
                 reconciled.insert(update);
+
+                Ok(reconciled)
+            }
+            // (DirModified, DirModified) is handled (skip) above. If we are here it means that
+            // we have (DirModified, DirCreated | DirRemoved). In that case we simply propagate the
+            // updates to the opposite fs. It will likely trigger a conflict in the next steps.
+            (UpdateKind::DirModified, _) => {
+                let from_remote = VirtualReconciledUpdate::applicable_local(remote_update);
+                reconciled.insert(from_remote);
+                let from_local = VirtualReconciledUpdate::applicable_remote(self);
+                reconciled.insert(from_local);
+
+                Ok(reconciled)
+            }
+            (_, UpdateKind::DirModified) => {
+                let from_local = VirtualReconciledUpdate::applicable_remote(self);
+                reconciled.insert(from_local);
+                let from_remote = VirtualReconciledUpdate::applicable_local(remote_update);
+                reconciled.insert(from_remote);
 
                 Ok(reconciled)
             }
@@ -366,7 +395,7 @@ pub type VfsDiffList = SortedVec<VfsDiff>;
 impl VfsDiffList {
     /// Merge two update lists by calling [`VfsDiff::merge`] on their elements one by
     /// one
-    pub(crate) fn merge<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
+    pub(crate) fn merge_updates<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
         &self,
         remote_updates: VfsDiffList,
         local_vfs: &Vfs<LocalSyncInfo>,
@@ -426,6 +455,10 @@ impl ApplicableUpdate {
 
     pub fn is_removal(&self) -> bool {
         self.update.is_removal()
+    }
+
+    pub fn is_creation(&self) -> bool {
+        self.update.is_creation()
     }
 
     /// Return a new update with inverted [`UpdateTarget`]
@@ -773,6 +806,7 @@ impl SortedVec<ReconciledUpdate> {
         while let Some(mut parent_update) = iter.next() {
             match &parent_update {
                 // If the update is a dir removal, check if one of its children is modified too
+                // and raise a conflict if that's the case.
                 ReconciledUpdate::Applicable(update) if update.is_removal() => {
                     let mut conflict = false;
                     let mut updates = Vec::new();
@@ -802,10 +836,11 @@ impl SortedVec<ReconciledUpdate> {
                     resolved.push(parent_update);
                     resolved.extend(updates);
                 }
-                // If we skip a dir, and all its children are also skipped, we remove the children
-                // updates and keep only the parent. However we should keep the updates that are not
-                // skipped (eg: conflicts)
-                ReconciledUpdate::Skip(_) => {
+                // If we skip a dir creation, and all its children are also skipped, we remove the
+                // children updates and keep only the parent because creating it in the vfs will
+                // also create the children. However we should keep the updates that
+                // are not skipped (eg: conflicts)
+                ReconciledUpdate::Skip(update) if update.is_creation() => {
                     let mut updates = Vec::new();
 
                     while let Some(next_update) = iter
@@ -819,9 +854,7 @@ impl SortedVec<ReconciledUpdate> {
                     resolved.push(parent_update);
                     resolved.extend(updates);
                 }
-                _ =>
-                // Filter if the path is already a conflict or not a removal
-                {
+                _ => {
                     resolved.push(parent_update);
                     continue;
                 }
@@ -955,6 +988,7 @@ impl<SrcSyncInfo, DstSyncInfo> From<AppliedFileUpdate<SrcSyncInfo, DstSyncInfo>>
 pub enum AppliedUpdate<SrcSyncInfo, DstSyncInfo> {
     DirCreated(AppliedDirCreation<SrcSyncInfo, DstSyncInfo>),
     DirRemoved(VirtualPathBuf),
+    DirModified(DirModification<SrcSyncInfo>),
     /// A dir was to be removed, but the application has been skipped because it did not exist on
     /// dest
     DirRemovedSkipped(VirtualPathBuf),
@@ -963,6 +997,7 @@ pub enum AppliedUpdate<SrcSyncInfo, DstSyncInfo> {
     FileRemoved(VirtualPathBuf),
     /// A file was to be removed, but the application has been skipped because it did not exist on
     /// dest
+    // TODO: see if it can use ReconciledUpdate::Skip instead
     FileRemovedSkipped(VirtualPathBuf),
     FailedApplication(FailedUpdateApplication),
     //TODO: detect moves
@@ -984,7 +1019,8 @@ impl<SrcSyncInfo, DstSyncInfo> From<AppliedUpdate<SrcSyncInfo, DstSyncInfo>>
                 VfsUpdate::DirRemoved(path.clone()),
                 Some(VfsUpdate::DirRemoved(path)),
             ),
-            AppliedUpdate::DirRemovedSkipped(path) => (VfsUpdate::DirRemoved(path.clone()), None),
+            AppliedUpdate::DirModified(path) => (VfsUpdate::DirModified(path), None),
+            AppliedUpdate::DirRemovedSkipped(path) => (VfsUpdate::DirRemoved(path), None),
             AppliedUpdate::FileCreated(file_update) => {
                 let (src_update, dst_update) = file_update.into();
                 (
@@ -1018,6 +1054,7 @@ impl<SrcSyncInfo, DstSyncInfo> AppliedUpdate<SrcSyncInfo, DstSyncInfo> {
         match self {
             AppliedUpdate::DirCreated(dir_creation) => &dir_creation.path,
             AppliedUpdate::DirRemoved(path) => path,
+            AppliedUpdate::DirModified(update) => update.path(),
             AppliedUpdate::DirRemovedSkipped(path) => path,
             AppliedUpdate::FileCreated(file_update) => &file_update.path,
             AppliedUpdate::FileModified(file_update) => &file_update.path,
@@ -1091,6 +1128,15 @@ impl<SyncInfo> VfsDirCreation<SyncInfo> {
     }
 }
 
+impl<SyncInfo> From<VfsDirCreation<SyncInfo>> for DirModification<SyncInfo> {
+    fn from(value: VfsDirCreation<SyncInfo>) -> Self {
+        Self {
+            path: value.path,
+            state: value.dir.into(),
+        }
+    }
+}
+
 impl<SyncInfo> From<VfsDirCreation<SyncInfo>> for StatefulDirTree<SyncInfo> {
     fn from(value: VfsDirCreation<SyncInfo>) -> Self {
         value.dir
@@ -1102,6 +1148,46 @@ impl<SyncInfo: ToBytes> From<VfsDirCreation<SyncInfo>> for VfsDirCreation<Vec<u8
         Self {
             path: value.path,
             dir: (&value.dir).into(),
+        }
+    }
+}
+
+/// Represents a DirModification update that has been successfully applied on the [`FSBackend`] and
+/// can be applied to the Vfs.
+///
+/// [`FSBackend`]: crate::concrete::FSBackend
+#[derive(Clone, Debug)]
+pub struct DirModification<SyncInfo> {
+    path: VirtualPathBuf,
+    state: DirState<SyncInfo>,
+}
+
+impl<SyncInfo> DirModification<SyncInfo> {
+    pub fn new(path: &VirtualPath, last_modified: DateTime<Utc>, dir_info: SyncInfo) -> Self {
+        Self {
+            path: path.to_owned(),
+            state: DirState::new(path.name(), last_modified, NodeState::Ok(dir_info)),
+        }
+    }
+
+    pub fn path(&self) -> &VirtualPath {
+        &self.path
+    }
+
+    pub fn state(&self) -> &DirState<SyncInfo> {
+        &self.state
+    }
+
+    pub fn last_modified(&self) -> DateTime<Utc> {
+        self.state.last_modified()
+    }
+}
+
+impl<SyncInfo: ToBytes> From<DirModification<SyncInfo>> for DirModification<Vec<u8>> {
+    fn from(value: DirModification<SyncInfo>) -> Self {
+        Self {
+            path: value.path,
+            state: (&value.state).into(),
         }
     }
 }
@@ -1253,6 +1339,7 @@ impl VfsConflict {
 pub enum VfsUpdate<SyncInfo> {
     DirCreated(VfsDirCreation<SyncInfo>),
     DirRemoved(VirtualPathBuf),
+    DirModified(DirModification<SyncInfo>),
     FileCreated(VfsFileUpdate<SyncInfo>),
     FileModified(VfsFileUpdate<SyncInfo>),
     FileRemoved(VirtualPathBuf),
@@ -1266,6 +1353,7 @@ impl<SyncInfo> VfsUpdate<SyncInfo> {
         match self {
             Self::DirCreated(update) => update.path(),
             Self::FileCreated(update) | Self::FileModified(update) => update.path(),
+            Self::DirModified(update) => update.path(),
             Self::DirRemoved(path) | Self::FileRemoved(path) => path,
             Self::FailedApplication(failed_update) => failed_update.path(),
             Self::Conflict(update) => update.path(),
@@ -1290,6 +1378,7 @@ impl<SyncInfo: ToBytes> From<VfsUpdate<SyncInfo>> for VfsUpdate<Vec<u8>> {
         match value {
             VfsUpdate::DirCreated(update) => VfsUpdate::DirCreated(update.into()),
             VfsUpdate::DirRemoved(path) => VfsUpdate::DirRemoved(path),
+            VfsUpdate::DirModified(update) => VfsUpdate::DirModified(update.into()),
             VfsUpdate::FileCreated(update) => VfsUpdate::FileCreated(update.into()),
             VfsUpdate::FileModified(update) => VfsUpdate::FileModified(update.into()),
             VfsUpdate::FileRemoved(path) => VfsUpdate::FileRemoved(path),
@@ -1337,8 +1426,9 @@ impl<SyncInfo: Clone> SortedVec<VfsUpdate<SyncInfo>> {
                                 .expect("update is inside parent_update");
 
                             if dir_update.dir.find_dir(relative_path).is_ok() {
-                                // Skip the dir creation to avoid duplicate
-                                // TODO: use DirModified when it is implemented
+                                // DirCreated is converted to DirModified to update the syncinfo
+                                // with the latest ones at the time the update was applied
+                                res.push(VfsUpdate::DirModified(update.into()));
                             } else {
                                 res.push(VfsUpdate::DirCreated(update.clone()))
                             }
