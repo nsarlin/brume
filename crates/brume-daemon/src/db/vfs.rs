@@ -9,7 +9,7 @@ use uuid::Uuid;
 use brume::{
     update::{UpdateKind, VfsUpdate},
     vfs::{
-        DirTree, FileInfo, FileState, NodeKind, NodeState, StatefulDirTree, StatefulVfs,
+        DirState, DirTree, FileInfo, FileState, NodeKind, NodeState, StatefulDirTree, StatefulVfs,
         StatefulVfsNode, Vfs, VfsNode,
     },
 };
@@ -351,6 +351,40 @@ impl Database {
         .map(|_| ())
     }
 
+    /// Updates the metadata of the dir node at the provided path
+    async fn update_dir(
+        &self,
+        root: &DbVfsNode,
+        path: &VirtualPath,
+        dir: &DirState<Vec<u8>>,
+    ) -> Result<(), DatabaseError> {
+        use crate::schema::nodes::dsl::*;
+
+        let dir_state = bincode::serialize(dir.state())?;
+
+        let node = self.find_node(root, path).await?;
+
+        let dir_last_modified = dir.last_modified().naive_utc();
+        let conn = self.pool.get().await?;
+
+        conn.interact(move |conn| {
+            let update = DbUpdatedVfsNode {
+                size: None,
+                state: Some(&dir_state),
+                last_modified: dir_last_modified,
+            };
+
+            diesel::update(nodes)
+                .filter(id.eq(node.id))
+                .set(update)
+                .execute(conn)
+        })
+        .await
+        .unwrap() // This should never fail unless the inner closure panics
+        .map_err(|e| e.into())
+        .map(|_| ())
+    }
+
     /// Inserts a file node at the provided path
     async fn insert_file(
         &self,
@@ -523,6 +557,12 @@ impl Database {
                     .await
             }
             VfsUpdate::DirRemoved(path) => self.delete_node(&vfs_root, path).await,
+            VfsUpdate::DirModified(dir_modification) => {
+                let path = dir_modification.path().to_owned();
+                let dir = dir_modification.state();
+
+                self.update_dir(&vfs_root, &path, dir).await
+            }
             VfsUpdate::FileCreated(file_creation) => {
                 let name = file_creation.path().name().to_owned();
                 let path = file_creation.path().to_owned();
@@ -570,7 +610,10 @@ impl Database {
                         );
                         self.insert_file(&vfs_root, &path, &file).await
                     }
-                    UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
+                    UpdateKind::DirRemoved
+                    | UpdateKind::FileRemoved
+                    | UpdateKind::FileModified
+                    | UpdateKind::DirModified => {
                         let state = NodeState::Error(failed_update.clone());
                         self.set_node_state(&vfs_root, &path, &state).await
                     }
@@ -592,7 +635,10 @@ impl Database {
                         let file = FileInfo::new(path.name(), 0, DateTime::<Utc>::MIN_UTC, state);
                         self.insert_file(&vfs_root, &path, &file).await
                     }
-                    UpdateKind::DirRemoved | UpdateKind::FileRemoved | UpdateKind::FileModified => {
+                    UpdateKind::DirRemoved
+                    | UpdateKind::FileRemoved
+                    | UpdateKind::FileModified
+                    | UpdateKind::DirModified => {
                         self.set_node_state(&vfs_root, &path, &state).await
                     }
                 }

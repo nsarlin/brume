@@ -194,7 +194,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         };
 
         // Merge updates only looking at their content relative to the Vfs
-        let merged = local_updates.merge(remote_updates, local_vfs, remote_vfs)?;
+        let merged = local_updates.merge_updates(remote_updates, local_vfs, remote_vfs)?;
 
         // Check with concrete backend if the file differ, if duplicates are to be removed or if
         // they are conflicts
@@ -237,16 +237,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
                 }
                 ReconciledUpdate::Conflict(conflict) => {
                     warn!("conflict on {:?}", conflict.update());
-                    if conflict.is_removal() {
-                        // Don't push removal updates since the node will not exist anymore in the
-                        // source Vfs. Instead, store a "reverse" update in the destination
-                        // directory. For example, if the update was a removed dir in src, instead
-                        // we store a created dir in dest.
-                        conflicts.insert(conflict.clone().invert());
-                        conflicts.insert(conflict);
-                    } else {
-                        conflicts.insert(conflict.clone());
-                    }
+                    conflicts.insert(conflict.clone());
                 }
                 ReconciledUpdate::Skip(to_skip) => {
                     info!("skipping {:?}", to_skip.update());
@@ -818,6 +809,7 @@ mod test {
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
         let reconciled_ref = SortedVec::from([
+            ReconciledUpdate::skip_both(&VfsDiff::dir_modified(VirtualPathBuf::root())),
             ReconciledUpdate::skip_both(&VfsDiff::dir_created(
                 VirtualPathBuf::new("/Doc").unwrap(),
             )),

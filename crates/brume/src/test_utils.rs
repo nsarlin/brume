@@ -43,6 +43,8 @@ pub(crate) enum TestNode<'a> {
     /// A file node with a name and and error status
     FE(&'a str, &'a str),
     /// A dir node with a name and and error status
+    // TODO: add a test with a dir error
+    #[allow(unused)]
     DE(&'a str, &'a str),
 }
 
@@ -527,49 +529,57 @@ impl InnerConcreteTestNode {
 
     fn get_node(&self, path: &VirtualPath) -> &Self {
         if path.is_root() {
-            self
-        } else {
-            let (top_level, remainder) = path.top_level_split().unwrap();
+            return self;
+        }
 
-            match self {
-                Self::D(_, children) | Self::DH(_, _, children) => {
-                    for child in children {
-                        if child.name() == top_level {
-                            if remainder.is_root() {
-                                return child;
-                            } else {
-                                return child.get_node(remainder);
-                            }
+        let (top_level, remainder) = path.top_level_split().unwrap();
+
+        if remainder.is_root() && self.name() == top_level {
+            return self;
+        }
+
+        match self {
+            Self::D(_, children) | Self::DH(_, _, children) => {
+                for child in children {
+                    if child.name() == top_level {
+                        if remainder.is_root() {
+                            return child;
+                        } else {
+                            return child.get_node(remainder);
                         }
                     }
-                    panic!("{path}")
                 }
-                _ => panic!(),
+                panic!("{path}")
             }
+            _ => panic!(),
         }
     }
 
     fn get_node_mut(&mut self, path: &VirtualPath) -> &mut Self {
         if path.is_root() {
-            self
-        } else {
-            let (top_level, remainder) = path.top_level_split().unwrap();
+            return self;
+        }
 
-            match self {
-                Self::D(_, children) | Self::DH(_, _, children) => {
-                    for child in children {
-                        if child.name() == top_level {
-                            if remainder.is_root() {
-                                return child;
-                            } else {
-                                return child.get_node_mut(remainder);
-                            }
+        let (top_level, remainder) = path.top_level_split().unwrap();
+
+        if remainder.is_root() && self.name() == top_level {
+            return self;
+        }
+
+        match self {
+            Self::D(_, children) | Self::DH(_, _, children) => {
+                for child in children {
+                    if child.name() == top_level {
+                        if remainder.is_root() {
+                            return child;
+                        } else {
+                            return child.get_node_mut(remainder);
                         }
                     }
-                    panic!("{path}")
                 }
-                _ => panic!(),
+                panic!("{path}")
             }
+            _ => panic!(),
         }
     }
 }

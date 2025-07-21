@@ -882,7 +882,6 @@ mod test {
 
         // Propagate them
         let res = list.sync_all(&db).await;
-        dbg!(&res);
         assert!(res[0].is_ok());
 
         assert_eq!(list.synchros[&id].read().await.status(), SynchroStatus::Ok);
