@@ -14,7 +14,7 @@ pub struct CommandForceResync {
 pub async fn force_resync(
     daemon: BrumeServiceClient,
     args: CommandForceResync,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     let CommandForceResync { synchro } = args;
     let list = daemon.list_synchros(context::current()).await?;
 
@@ -25,7 +25,7 @@ pub async fn force_resync(
 
     let (id, sync) = synchro
         .map(|sync| {
-            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+            get_synchro(&list, &sync).ok_or_else(|| anyhow::anyhow!("Invalid synchro descriptor"))
         })
         .unwrap_or_else(|| prompt_synchro(&list))?;
 
@@ -47,7 +47,10 @@ pub async fn force_resync(
         return Ok(());
     }
 
-    daemon.force_resync(context::current(), id).await??;
+    daemon
+        .force_resync(context::current(), id)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))?;
     println!("Done");
     Ok(())
 }

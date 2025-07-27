@@ -3,7 +3,7 @@ use tarpc::context;
 
 use brume_daemon_proto::BrumeServiceClient;
 
-pub async fn list(daemon: BrumeServiceClient) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn list(daemon: BrumeServiceClient) -> anyhow::Result<()> {
     let synchros = daemon.list_synchros(context::current()).await?;
     let mut table = Table::new();
     table.set_header(vec!["ID", "Status", "State", "Local", "Remote", "Name"]);

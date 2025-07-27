@@ -13,15 +13,15 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let config = load_config()?;
     let brume_sock = daemon_sock_name(&config);
 
-    let daemon = connect_to_daemon(brume_sock)
-        .await
-        .map_err(|_| "Failed to connect to brume daemon. Are your sure it's running ?")?;
+    let daemon = connect_to_daemon(brume_sock).await.map_err(|_| {
+        anyhow::anyhow!("Failed to connect to brume daemon. Are your sure it's running ?")
+    })?;
 
     match cli.command {
         Commands::New(args) => commands::new(daemon, args).await,

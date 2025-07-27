@@ -20,7 +20,7 @@ use crate::get_synchro;
 use autocomplete::LocalFilePathCompleter;
 
 /// A prompt for filesystem creation information
-pub fn prompt_filesystem(side: SynchroSide) -> Result<AnyFsCreationInfo, String> {
+pub fn prompt_filesystem(side: SynchroSide) -> anyhow::Result<AnyFsCreationInfo> {
     let options = vec!["Local Folder", "Nextcloud"];
 
     // Start the selection at the most likely index for the synchro side
@@ -31,40 +31,33 @@ pub fn prompt_filesystem(side: SynchroSide) -> Result<AnyFsCreationInfo, String>
 
     let ans = Select::new(&format!("Select the \"{side}\" filesystem type:"), options)
         .with_starting_cursor(default_idx)
-        .prompt()
-        .map_err(|e| e.to_string())?;
+        .prompt()?;
 
     match ans {
         "Local Folder" => prompt_local_folder().map(AnyFsCreationInfo::LocalDir),
         "Nextcloud" => prompt_nextcloud().map(AnyFsCreationInfo::Nextcloud),
-        _ => Err(String::from("Invalid option")),
+        _ => Err(anyhow::anyhow!("Invalid option")),
     }
 }
 
 /// A prompt for a local folder to synchronize
-pub fn prompt_local_folder() -> Result<LocalDirCreationInfo, String> {
+pub fn prompt_local_folder() -> anyhow::Result<LocalDirCreationInfo> {
     let path = Text::new("Path to the folder to sync:")
         .with_autocomplete(LocalFilePathCompleter::default())
-        .prompt()
-        .map_err(|e| e.to_string())?;
+        .prompt()?;
 
     Ok(LocalDirCreationInfo::new(path))
 }
 
 /// A prompt for nextcloud server connection information
-pub fn prompt_nextcloud() -> Result<NextcloudFsCreationInfo, String> {
-    let url = Text::new("Url of the Nextcloud server:")
-        .prompt()
-        .map_err(|e| e.to_string())?;
+pub fn prompt_nextcloud() -> anyhow::Result<NextcloudFsCreationInfo> {
+    let url = Text::new("Url of the Nextcloud server:").prompt()?;
 
-    let username = Text::new("Nextcloud username:")
-        .prompt()
-        .map_err(|e| e.to_string())?;
+    let username = Text::new("Nextcloud username:").prompt()?;
 
     let password = Password::new("Nextcloud password:")
         .without_confirmation()
-        .prompt()
-        .map_err(|e| e.to_string())?;
+        .prompt()?;
 
     Ok(NextcloudFsCreationInfo::new(&url, &username, &password))
 }
@@ -79,28 +72,24 @@ pub fn filter_synchro_list(
 /// Prompt for a synchro from the list
 pub fn prompt_synchro(
     synchro_list: &HashMap<SynchroId, SynchroMeta>,
-) -> Result<(SynchroId, SynchroMeta), String> {
+) -> anyhow::Result<(SynchroId, SynchroMeta)> {
     let options = synchro_list.values().map(|sync| sync.name()).collect();
 
-    let ans = Select::new("Which synchro?", options)
-        .prompt()
-        .map_err(|e| e.to_string())?;
+    let ans = Select::new("Which synchro?", options).prompt()?;
 
     Ok(get_synchro(synchro_list, ans).expect("Chosen synchro must be in the list"))
 }
 
 /// Prompt for a synchro side, remote or local
-pub fn prompt_side() -> Result<SynchroSide, String> {
+pub fn prompt_side() -> anyhow::Result<SynchroSide> {
     let options = vec!["Local", "Remote"];
 
-    let ans = Select::new("Use content from which side?", options)
-        .prompt()
-        .map_err(|e| e.to_string())?;
+    let ans = Select::new("Use content from which side?", options).prompt()?;
 
     match ans {
         "Local" => Ok(SynchroSide::Local),
         "Remote" => Ok(SynchroSide::Remote),
-        _ => Err(String::from("Invalid option")),
+        _ => Err(anyhow::anyhow!("Invalid option")),
     }
 }
 
@@ -176,18 +165,17 @@ impl Display for PromptedConflict<'_> {
 pub fn prompt_conflict_path(
     local_vfs: &StatefulVfs<()>,
     remote_vfs: &StatefulVfs<()>,
-) -> Result<VirtualPathBuf, String> {
+) -> anyhow::Result<VirtualPathBuf> {
     let mut conflicts = local_vfs.get_conflicts();
     conflicts.extend(remote_vfs.get_conflicts());
 
     let conflicts = SortedVec::from_vec(conflicts);
 
-    let selected = Select::new("Conflict path:", conflicts.into())
-        .prompt()
-        .map_err(|e| e.to_string())?;
+    let selected = Select::new("Conflict path:", conflicts.into()).prompt()?;
 
     let (local_conflicts, remote_conflicts) =
-        PromptedConflict::find(&selected, local_vfs, remote_vfs).ok_or("Invalid conflict path")?;
+        PromptedConflict::find(&selected, local_vfs, remote_vfs)
+            .ok_or(anyhow::anyhow!("Invalid conflict path"))?;
 
     let max_len = local_conflicts.len().max(remote_conflicts.len());
 

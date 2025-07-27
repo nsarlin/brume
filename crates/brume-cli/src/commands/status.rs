@@ -10,10 +10,7 @@ pub struct CommandStatus {
     synchro: Option<String>,
 }
 
-pub async fn status(
-    daemon: BrumeServiceClient,
-    args: CommandStatus,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn status(daemon: BrumeServiceClient, args: CommandStatus) -> anyhow::Result<()> {
     let CommandStatus { synchro } = args;
     let list = daemon.list_synchros(context::current()).await?;
 
@@ -24,7 +21,7 @@ pub async fn status(
 
     let (id, sync) = synchro
         .map(|sync| {
-            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+            get_synchro(&list, &sync).ok_or_else(|| anyhow::anyhow!("Invalid synchro descriptor"))
         })
         .unwrap_or_else(|| prompt_synchro(&list))?;
 
