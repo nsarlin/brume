@@ -1,7 +1,12 @@
 //! Various prompts that can be used for user interactions
 mod autocomplete;
 
-use std::{collections::HashMap, fmt::Display};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    fs::{self, create_dir_all},
+    path::PathBuf,
+};
 
 use brume::{
     sorted_vec::SortedVec,
@@ -14,7 +19,7 @@ use brume_daemon_proto::{
 };
 use chrono::{DateTime, Utc};
 use comfy_table::Table;
-use inquire::{Password, Select, Text};
+use inquire::{Confirm, Password, Select, Text};
 
 use crate::get_synchro;
 use autocomplete::LocalFilePathCompleter;
@@ -46,7 +51,33 @@ pub fn prompt_local_folder() -> anyhow::Result<LocalDirCreationInfo> {
         .with_autocomplete(LocalFilePathCompleter::default())
         .prompt()?;
 
+    let path = check_or_prompt_folder_creation(&path)?;
     Ok(LocalDirCreationInfo::new(path))
+}
+
+/// Checks if the user provided folder exists, or ask the user to create it.
+///
+/// Returns the path in a canonical form
+/// Returns an error if the path does not exist and the user does not want to create it, or if the
+/// path exists but is not a directory.
+pub fn check_or_prompt_folder_creation(path: &str) -> anyhow::Result<PathBuf> {
+    let canon = fs::canonicalize(path).or_else(|_| {
+        if !Confirm::new(&format!("{path} does not exist locally, create it?"))
+            .with_default(false)
+            .prompt()?
+        {
+            Err(anyhow::anyhow!("{path} is not a valid path"))
+        } else {
+            create_dir_all(path)?;
+            Ok(fs::canonicalize(path)?)
+        }
+    })?;
+
+    if canon.is_dir() {
+        Ok(canon)
+    } else {
+        Err(anyhow::anyhow!("{path} exists but is not a directory"))
+    }
 }
 
 /// A prompt for nextcloud server connection information
