@@ -13,10 +13,7 @@ pub struct CommandResume {
     synchro: Option<String>,
 }
 
-pub async fn resume(
-    daemon: BrumeServiceClient,
-    args: CommandResume,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn resume(daemon: BrumeServiceClient, args: CommandResume) -> anyhow::Result<()> {
     let CommandResume { synchro } = args;
     let list = daemon.list_synchros(context::current()).await?;
     let list = filter_synchro_list(list, |sync| sync.state() == SynchroState::Paused);
@@ -28,7 +25,7 @@ pub async fn resume(
 
     let (id, sync) = synchro
         .map(|sync| {
-            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+            get_synchro(&list, &sync).ok_or_else(|| anyhow::anyhow!("Invalid synchro descriptor"))
         })
         .unwrap_or_else(|| prompt_synchro(&list))?;
 
@@ -39,7 +36,10 @@ pub async fn resume(
         return Ok(());
     }
 
-    daemon.resume_synchro(context::current(), id).await??;
+    daemon
+        .resume_synchro(context::current(), id)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))?;
     println!("Done");
     Ok(())
 }

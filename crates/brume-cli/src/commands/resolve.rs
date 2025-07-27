@@ -23,10 +23,7 @@ pub struct CommandResolve {
     side: Option<SynchroSide>,
 }
 
-pub async fn resolve(
-    daemon: BrumeServiceClient,
-    args: CommandResolve,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn resolve(daemon: BrumeServiceClient, args: CommandResolve) -> anyhow::Result<()> {
     let CommandResolve {
         synchro,
         path,
@@ -42,7 +39,7 @@ pub async fn resolve(
 
     let (id, sync) = synchro
         .map(|sync| {
-            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+            get_synchro(&list, &sync).ok_or_else(|| anyhow::anyhow!("Invalid synchro descriptor"))
         })
         .unwrap_or_else(|| prompt_synchro(&list))?;
 
@@ -55,14 +52,16 @@ pub async fn resolve(
                 id,
                 brume_daemon_proto::SynchroSide::Local,
             )
-            .await??;
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
         let remote_vfs = daemon
             .get_vfs(
                 context::current(),
                 id,
                 brume_daemon_proto::SynchroSide::Remote,
             )
-            .await??;
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         prompt_conflict_path(&local_vfs, &remote_vfs)?
     };
@@ -80,7 +79,8 @@ pub async fn resolve(
 
     daemon
         .resolve_conflict(context::current(), id, base_path, side)
-        .await??;
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))?;
     println!("Done");
 
     Ok(())

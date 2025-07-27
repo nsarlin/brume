@@ -10,10 +10,7 @@ pub struct CommandRemove {
     synchro: Option<String>,
 }
 
-pub async fn remove(
-    daemon: BrumeServiceClient,
-    args: CommandRemove,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn remove(daemon: BrumeServiceClient, args: CommandRemove) -> anyhow::Result<()> {
     let CommandRemove { synchro } = args;
     let list = daemon.list_synchros(context::current()).await?;
 
@@ -24,13 +21,16 @@ pub async fn remove(
 
     let (id, sync) = synchro
         .map(|sync| {
-            get_synchro(&list, &sync).ok_or_else(|| String::from("Invalid synchro descriptor"))
+            get_synchro(&list, &sync).ok_or_else(|| anyhow::anyhow!("Invalid synchro descriptor"))
         })
         .unwrap_or_else(|| prompt_synchro(&list))?;
 
     println!("Removing synchro: {} ({:x})", sync.name(), id.short());
 
-    daemon.delete_synchro(context::current(), id).await??;
+    daemon
+        .delete_synchro(context::current(), id)
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))?;
     println!("Done");
     Ok(())
 }

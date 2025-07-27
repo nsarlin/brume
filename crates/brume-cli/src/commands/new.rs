@@ -26,7 +26,7 @@ pub struct CommandNew {
     name: Option<String>,
 }
 
-fn parse_fs_argument(arg: &str) -> Result<AnyFsCreationInfo, String> {
+fn parse_fs_argument(arg: &str) -> anyhow::Result<AnyFsCreationInfo> {
     if let Ok(url) = Url::parse(arg) {
         let port_fmt = if let Some(port) = url.port() {
             format!(":{port}")
@@ -36,7 +36,7 @@ fn parse_fs_argument(arg: &str) -> Result<AnyFsCreationInfo, String> {
         let address = format!(
             "{}://{}{}{}",
             url.scheme(),
-            url.host_str().ok_or("Invalid url".to_string())?,
+            url.host_str().ok_or(anyhow::anyhow!("Invalid url"))?,
             port_fmt,
             url.path().trim_end_matches('/')
         );
@@ -50,14 +50,13 @@ fn parse_fs_argument(arg: &str) -> Result<AnyFsCreationInfo, String> {
             &path,
         )))
     } else {
-        Err("<FILESYSTEM> should be a valid path on your filesystem or an url".to_string())
+        Err(anyhow::anyhow!(
+            "<FILESYSTEM> should be a valid path on your filesystem or an url"
+        ))
     }
 }
 
-pub async fn new(
-    daemon: BrumeServiceClient,
-    args: CommandNew,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn new(daemon: BrumeServiceClient, args: CommandNew) -> anyhow::Result<()> {
     let CommandNew {
         local,
         remote,
@@ -83,7 +82,8 @@ pub async fn new(
 
     daemon
         .new_synchro(context::current(), local, remote, name)
-        .await??;
+        .await?
+        .map_err(|e| anyhow::anyhow!(e))?;
     println!("Done");
 
     Ok(())
