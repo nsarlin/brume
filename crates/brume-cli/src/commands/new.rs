@@ -1,5 +1,3 @@
-use std::fs;
-
 use brume_daemon_proto::{
     AnyFsCreationInfo, AnyFsDescription, BrumeServiceClient, LocalDirCreationInfo,
     NextcloudFsCreationInfo, SynchroSide,
@@ -9,7 +7,7 @@ use inquire::Confirm;
 use tarpc::context;
 use url::Url;
 
-use crate::prompt::prompt_filesystem;
+use crate::prompt::{check_or_prompt_folder_creation, prompt_filesystem};
 
 #[derive(Args)]
 pub struct CommandNew {
@@ -45,14 +43,13 @@ fn parse_fs_argument(arg: &str) -> anyhow::Result<AnyFsCreationInfo> {
         Ok(AnyFsCreationInfo::Nextcloud(NextcloudFsCreationInfo::new(
             &address, &login, &password,
         )))
-    } else if let Ok(path) = fs::canonicalize(arg) {
-        Ok(AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new(
-            &path,
-        )))
     } else {
-        Err(anyhow::anyhow!(
-            "<FILESYSTEM> should be a valid path on your filesystem or an url"
-        ))
+        let path = check_or_prompt_folder_creation(arg).map_err(|_| {
+            anyhow::anyhow!(
+                "<FILESYSTEM> should be a valid path on your filesystem or an url".to_string()
+            )
+        })?;
+        Ok(AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new(path)))
     }
 }
 
