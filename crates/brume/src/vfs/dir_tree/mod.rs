@@ -482,7 +482,7 @@ impl<Data> StatefulDirTree<Data> {
     }
 
     /// Extract the Ok state of the node, or panic
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn unwrap(self) -> DirTree<Data> {
         DirTree {
             info: self.info.unwrap(),
@@ -1003,7 +1003,7 @@ impl<Data> VfsNode<NodeState<Data>> {
     }
 
     /// Extract the Ok state of the node, or panic
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn unwrap(self) -> VfsNode<Data> {
         match self {
             VfsNode::Dir(dir_tree) => VfsNode::Dir(dir_tree.unwrap()),

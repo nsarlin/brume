@@ -13,8 +13,8 @@ pub mod synchro;
 pub mod update;
 pub mod vfs;
 
-#[cfg(test)]
-mod test_utils;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 
 #[derive(Error, Debug)]
 pub enum Error {
