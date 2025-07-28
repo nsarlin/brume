@@ -91,7 +91,7 @@ impl<SyncInfo> DirState<SyncInfo> {
     }
 
     /// Extract the Ok state of the node, or panic
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn unwrap(self) -> DirInfo<SyncInfo> {
         match self.data {
             NodeState::Ok(info) => DirInfo {

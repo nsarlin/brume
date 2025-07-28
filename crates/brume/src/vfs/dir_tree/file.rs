@@ -91,7 +91,7 @@ impl<SyncInfo> FileState<SyncInfo> {
     }
 
     /// Extract the Ok state of the node, or panic
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn unwrap(self) -> FileInfo<SyncInfo> {
         match self.data {
             NodeState::Ok(info) => FileInfo {

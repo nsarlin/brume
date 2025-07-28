@@ -27,7 +27,7 @@ use crate::{
 
 /// Can be used to easily create Vfs for tests
 #[derive(Clone, Debug)]
-pub(crate) enum TestNode<'a> {
+pub enum TestNode<'a> {
     /// A file node with a name
     F(&'a str),
     /// A dir node with a name and children
@@ -49,7 +49,7 @@ pub(crate) enum TestNode<'a> {
 }
 
 impl TestNode<'_> {
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match self {
             Self::F(name)
             | Self::D(name, _)
@@ -62,11 +62,11 @@ impl TestNode<'_> {
         }
     }
 
-    pub(crate) fn into_node_recursive_diff(self) -> StatefulVfsNode<RecursiveTestSyncInfo> {
+    pub fn into_node_recursive_diff(self) -> StatefulVfsNode<RecursiveTestSyncInfo> {
         self.into_node_recursive_diff_rec(VirtualPath::root())
     }
 
-    pub(crate) fn into_node_recursive_diff_rec(
+    pub fn into_node_recursive_diff_rec(
         self,
         parent: &VirtualPath,
     ) -> StatefulVfsNode<RecursiveTestSyncInfo> {
@@ -170,15 +170,15 @@ impl TestNode<'_> {
         }
     }
 
-    pub(crate) fn into_node(self) -> StatefulVfsNode<ShallowTestSyncInfo> {
+    pub fn into_node(self) -> StatefulVfsNode<ShallowTestSyncInfo> {
         self.into_node_shallow_diff()
     }
 
-    pub(crate) fn into_node_shallow_diff(self) -> StatefulVfsNode<ShallowTestSyncInfo> {
+    pub fn into_node_shallow_diff(self) -> StatefulVfsNode<ShallowTestSyncInfo> {
         self.into_node_shallow_diff_rec(VirtualPath::root())
     }
 
-    pub(crate) fn into_node_shallow_diff_rec(
+    pub fn into_node_shallow_diff_rec(
         self,
         parent: &VirtualPath,
     ) -> StatefulVfsNode<ShallowTestSyncInfo> {
@@ -272,11 +272,11 @@ impl TestNode<'_> {
         }
     }
 
-    pub(crate) fn into_dir(self) -> StatefulDirTree<ShallowTestSyncInfo> {
+    pub fn into_dir(self) -> StatefulDirTree<ShallowTestSyncInfo> {
         self.into_dir_shallow_diff()
     }
 
-    pub(crate) fn into_dir_shallow_diff(self) -> StatefulDirTree<ShallowTestSyncInfo> {
+    pub fn into_dir_shallow_diff(self) -> StatefulDirTree<ShallowTestSyncInfo> {
         match self {
             Self::F(_) => {
                 panic!()
@@ -442,7 +442,7 @@ impl LocalPath for TestNode<'_> {
 ///
 /// Can be used to define a test concrete fs
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) enum InnerConcreteTestNode {
+pub enum InnerConcreteTestNode {
     D(String, Vec<InnerConcreteTestNode>),
     DH(String, u64, Vec<InnerConcreteTestNode>),
     FF(String, Vec<u8>),
@@ -586,7 +586,7 @@ impl InnerConcreteTestNode {
 
 /// Mock FS that can be used to test concrete operations.
 #[derive(Clone, Debug)]
-pub(crate) struct ConcreteTestNode {
+pub struct ConcreteTestNode {
     inner: Arc<RwLock<InnerConcreteTestNode>>,
     propagate_err_to_vfs: bool,
 }
@@ -598,12 +598,12 @@ impl PartialEq for ConcreteTestNode {
 }
 
 impl ConcreteTestNode {
-    pub(crate) fn _propagate_err_to_vfs(&mut self) {
+    pub fn _propagate_err_to_vfs(&mut self) {
         self.propagate_err_to_vfs = true
     }
 }
 
-pub(crate) type TestFileSystem = FileSystem<ConcreteTestNode>;
+pub type TestFileSystem = FileSystem<ConcreteTestNode>;
 
 impl From<TestNode<'_>> for ConcreteTestNode {
     fn from(value: TestNode) -> Self {
@@ -892,12 +892,12 @@ impl FsInstanceDescription for String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecursiveTestSyncInfo {
+pub struct RecursiveTestSyncInfo {
     hash: u64,
 }
 
 impl RecursiveTestSyncInfo {
-    pub(crate) fn new(hash: u64) -> Self {
+    pub fn new(hash: u64) -> Self {
         Self { hash }
     }
 }
@@ -938,12 +938,12 @@ impl<'a> From<&'a RecursiveTestSyncInfo> for () {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ShallowTestSyncInfo {
+pub struct ShallowTestSyncInfo {
     hash: u64,
 }
 
 impl ShallowTestSyncInfo {
-    pub(crate) fn new(hash: u64) -> Self {
+    pub fn new(hash: u64) -> Self {
         Self { hash }
     }
 }
