@@ -596,7 +596,7 @@ mod test {
     use super::*;
     use crate::{
         test_utils::{
-            ConcreteTestNode,
+            TestFsBackend,
             TestNode::{D, FE, FF},
         },
         update::{ApplicableUpdate, UpdateTarget, VfsDiff},
@@ -614,7 +614,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -624,7 +624,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
         synchro.diff_vfs().await.unwrap();
@@ -663,7 +663,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -674,7 +674,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
         synchro.diff_vfs().await.unwrap();
@@ -716,8 +716,8 @@ mod test {
             ],
         );
 
-        let local_fs = FileSystem::new(ConcreteTestNode::from(base.clone()));
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
         synchro.full_sync().await.unwrap();
@@ -730,7 +730,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        synchro.local.set_backend(ConcreteTestNode::from(local_mod));
+        synchro.local.set_backend(TestFsBackend::from(local_mod));
 
         let remote_mod = D(
             "",
@@ -743,9 +743,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        synchro
-            .remote
-            .set_backend(ConcreteTestNode::from(remote_mod));
+        synchro.remote.set_backend(TestFsBackend::from(remote_mod));
 
         let local_diff = SortedVec::from([
             VfsDiff::file_modified(VirtualPathBuf::new("/Doc/f1.md").unwrap()),
@@ -788,7 +786,7 @@ mod test {
                 D("e", vec![D("g", vec![FF("tmp.txt", b"content")])]),
             ],
         );
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -801,7 +799,7 @@ mod test {
                 D("e", vec![]),
             ],
         );
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
         let (local_diff, remote_diff) = synchro.diff_vfs().await.unwrap();
@@ -832,7 +830,7 @@ mod test {
     #[tokio::test]
     async fn test_full_sync() {
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -842,7 +840,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -859,7 +857,7 @@ mod test {
     async fn test_full_sync_conflict() {
         // First synchronize the folders cleanly
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -869,7 +867,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -890,9 +888,7 @@ mod test {
             ],
         );
 
-        synchro
-            .local
-            .set_backend(ConcreteTestNode::from(local_modif));
+        synchro.local.set_backend(TestFsBackend::from(local_modif));
 
         let remote_modif = D(
             "",
@@ -907,7 +903,7 @@ mod test {
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_modif));
+            .set_backend(TestFsBackend::from(remote_modif));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -958,7 +954,7 @@ mod test {
     async fn test_full_sync_conflict_removed_confirmed() {
         // First synchronize the folders cleanly
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -968,7 +964,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -989,9 +985,7 @@ mod test {
             ],
         );
 
-        synchro
-            .local
-            .set_backend(ConcreteTestNode::from(local_modif));
+        synchro.local.set_backend(TestFsBackend::from(local_modif));
 
         let remote_modif = D(
             "",
@@ -1003,7 +997,7 @@ mod test {
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_modif));
+            .set_backend(TestFsBackend::from(remote_modif));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1054,7 +1048,7 @@ mod test {
     async fn test_full_sync_conflict_removed_cancelled() {
         // First synchronize the folders cleanly
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1064,7 +1058,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -1085,9 +1079,7 @@ mod test {
             ],
         );
 
-        synchro
-            .local
-            .set_backend(ConcreteTestNode::from(local_modif));
+        synchro.local.set_backend(TestFsBackend::from(local_modif));
 
         let remote_modif = D(
             "",
@@ -1099,7 +1091,7 @@ mod test {
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_modif));
+            .set_backend(TestFsBackend::from(remote_modif));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1150,7 +1142,7 @@ mod test {
     async fn test_full_sync_conflict_removed_parent_confirmed() {
         // First synchronize the folders cleanly
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1160,7 +1152,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -1181,15 +1173,13 @@ mod test {
             ],
         );
 
-        synchro
-            .local
-            .set_backend(ConcreteTestNode::from(local_modif));
+        synchro.local.set_backend(TestFsBackend::from(local_modif));
 
         let remote_modif = D("", vec![FF("file.doc", b"content")]);
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_modif));
+            .set_backend(TestFsBackend::from(remote_modif));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1240,7 +1230,7 @@ mod test {
     async fn test_full_sync_conflict_removed_parent_cancelled() {
         // First synchronize the folders cleanly
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1250,7 +1240,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -1271,15 +1261,13 @@ mod test {
             ],
         );
 
-        synchro
-            .local
-            .set_backend(ConcreteTestNode::from(local_modif));
+        synchro.local.set_backend(TestFsBackend::from(local_modif));
 
         let remote_modif = D("", vec![FF("file.doc", b"content")]);
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_modif));
+            .set_backend(TestFsBackend::from(remote_modif));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1328,7 +1316,7 @@ mod test {
     #[tokio::test]
     async fn test_full_sync_errors() {
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1338,7 +1326,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -1383,7 +1371,7 @@ mod test {
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(TestFsBackend::from(remote_fixed.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1398,7 +1386,7 @@ mod test {
     #[tokio::test]
     async fn test_full_sync_errors_file_modified() {
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1408,7 +1396,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
         // First do a normal sync
@@ -1429,7 +1417,7 @@ mod test {
         );
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_error.clone()));
+            .set_backend(TestFsBackend::from(remote_error.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1470,7 +1458,7 @@ mod test {
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(TestFsBackend::from(remote_fixed.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1485,7 +1473,7 @@ mod test {
     async fn test_full_sync_errors_then_removed() {
         // Test with an error during file creation
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1495,7 +1483,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -1537,7 +1525,7 @@ mod test {
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(TestFsBackend::from(remote_fixed.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1552,7 +1540,7 @@ mod test {
     #[tokio::test]
     async fn test_full_sync_errors_modified_then_removed() {
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1562,7 +1550,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
         // First do a normal sync
@@ -1583,7 +1571,7 @@ mod test {
         );
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_error.clone()));
+            .set_backend(TestFsBackend::from(remote_error.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1621,7 +1609,7 @@ mod test {
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(TestFsBackend::from(remote_fixed.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1636,7 +1624,7 @@ mod test {
     #[tokio::test]
     async fn test_full_sync_errors_modified_then_modified_on_local() {
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1646,7 +1634,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
         // First do a normal sync
@@ -1667,7 +1655,7 @@ mod test {
         );
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_error.clone()));
+            .set_backend(TestFsBackend::from(remote_error.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1720,11 +1708,11 @@ mod test {
 
         synchro
             .local
-            .set_backend(ConcreteTestNode::from(modified_local.clone()));
+            .set_backend(TestFsBackend::from(modified_local.clone()));
 
         synchro
             .remote
-            .set_backend(ConcreteTestNode::from(remote_fixed.clone()));
+            .set_backend(TestFsBackend::from(remote_fixed.clone()));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),
@@ -1763,7 +1751,7 @@ mod test {
                 FF("file.doc", b"content"),
             ],
         );
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1783,7 +1771,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -1843,7 +1831,7 @@ mod test {
     #[tokio::test]
     async fn test_desync() {
         let local_base = D("", vec![]);
-        let local_fs = FileSystem::new(ConcreteTestNode::from(local_base.clone()));
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
 
         let remote_base = D(
             "",
@@ -1853,7 +1841,7 @@ mod test {
             ],
         );
 
-        let remote_fs = FileSystem::new(ConcreteTestNode::from(remote_base.clone()));
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
 
         let mut synchro = Synchro::new(local_fs, remote_fs);
 
@@ -1882,9 +1870,7 @@ mod test {
             ],
         );
 
-        synchro
-            .local
-            .set_backend(ConcreteTestNode::from(local_modif));
+        synchro.local.set_backend(TestFsBackend::from(local_modif));
 
         assert_eq!(
             synchro.full_sync().await.unwrap().status(),

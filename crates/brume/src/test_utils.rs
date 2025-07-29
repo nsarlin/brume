@@ -1,4 +1,11 @@
-use std::{ffi::OsStr, fmt::Display, ops::Deref, sync::Arc, sync::RwLock, time::SystemTime};
+use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    fmt::Display,
+    ops::Deref,
+    sync::{Arc, LazyLock, Mutex, MutexGuard, RwLock},
+    time::SystemTime,
+};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -438,19 +445,26 @@ impl LocalPath for TestNode<'_> {
     }
 }
 
+/// Returns the global list of known test backends
+fn get_testbackends_list() -> MutexGuard<'static, HashMap<u64, Arc<RwLock<ConcreteTestNode>>>> {
+    static BACKENDS_LIST: LazyLock<Mutex<HashMap<u64, Arc<RwLock<ConcreteTestNode>>>>> =
+        LazyLock::new(Default::default);
+    BACKENDS_LIST.lock().unwrap()
+}
+
 /// Like a TestNode, but own its content, which allows modifications.
 ///
 /// Can be used to define a test concrete fs
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum InnerConcreteTestNode {
-    D(String, Vec<InnerConcreteTestNode>),
-    DH(String, u64, Vec<InnerConcreteTestNode>),
+pub enum ConcreteTestNode {
+    D(String, Vec<ConcreteTestNode>),
+    DH(String, u64, Vec<ConcreteTestNode>),
     FF(String, Vec<u8>),
     FE(String, String),
     DE(String, String),
 }
 
-impl<'a> From<TestNode<'a>> for InnerConcreteTestNode {
+impl<'a> From<TestNode<'a>> for ConcreteTestNode {
     fn from(value: TestNode<'a>) -> Self {
         match value {
             TestNode::F(_) | TestNode::FH(_, _) => panic!(),
@@ -477,25 +491,25 @@ impl<'a> From<TestNode<'a>> for InnerConcreteTestNode {
     }
 }
 
-impl<'a> From<&'a InnerConcreteTestNode> for TestNode<'a> {
-    fn from(value: &'a InnerConcreteTestNode) -> Self {
+impl<'a> From<&'a ConcreteTestNode> for TestNode<'a> {
+    fn from(value: &'a ConcreteTestNode) -> Self {
         match value {
-            InnerConcreteTestNode::D(name, children) => {
+            ConcreteTestNode::D(name, children) => {
                 Self::D(name, children.iter().map(|child| child.into()).collect())
             }
-            InnerConcreteTestNode::DH(name, hash, children) => Self::DH(
+            ConcreteTestNode::DH(name, hash, children) => Self::DH(
                 name,
                 *hash,
                 children.iter().map(|child| child.into()).collect(),
             ),
-            InnerConcreteTestNode::FF(name, content) => Self::FF(name, content),
-            InnerConcreteTestNode::FE(name, _) => Self::F(name),
-            InnerConcreteTestNode::DE(name, _) => Self::D(name, Vec::new()),
+            ConcreteTestNode::FF(name, content) => Self::FF(name, content),
+            ConcreteTestNode::FE(name, _) => Self::F(name),
+            ConcreteTestNode::DE(name, _) => Self::D(name, Vec::new()),
         }
     }
 }
 
-impl InnerConcreteTestNode {
+impl ConcreteTestNode {
     fn name(&self) -> &str {
         match self {
             Self::D(name, _)
@@ -584,28 +598,69 @@ impl InnerConcreteTestNode {
     }
 }
 
-/// Mock FS that can be used to test concrete operations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConcreteTestFsCreationInfo {
+    inner: ConcreteTestNode,
+    id: u64,
+}
+
+impl From<ConcreteTestNode> for ConcreteTestFsCreationInfo {
+    fn from(value: ConcreteTestNode) -> Self {
+        Self {
+            inner: value,
+            id: rand::random(),
+        }
+    }
+}
+
+impl Display for ConcreteTestFsCreationInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner.name())
+    }
+}
+
+impl From<ConcreteTestFsCreationInfo> for String {
+    fn from(value: ConcreteTestFsCreationInfo) -> Self {
+        format!("{value}")
+    }
+}
+
+impl ConcreteTestFsCreationInfo {
+    /// Creates new creation info for a ConcreteTestFs.
+    ///
+    /// When instantiating multiple test FS, reusing the `id` means that they will share their
+    /// nodes. This means that modifications done on one of them will be visible on the other.
+    /// This can be used to simulate a single remote server that is synchronized with 2 different
+    /// devices.
+    pub fn new(inner: ConcreteTestNode, id: u64) -> Self {
+        Self { inner, id }
+    }
+}
+
+/// Mock FS that can be used to test backend operations.
+///
+/// It is an in-memory filesystem
 #[derive(Clone, Debug)]
-pub struct ConcreteTestNode {
-    inner: Arc<RwLock<InnerConcreteTestNode>>,
+pub struct TestFsBackend {
+    inner: Arc<RwLock<ConcreteTestNode>>,
     propagate_err_to_vfs: bool,
 }
 
-impl PartialEq for ConcreteTestNode {
+impl PartialEq for TestFsBackend {
     fn eq(&self, other: &Self) -> bool {
         *self.inner.read().unwrap() == *other.inner.read().unwrap()
     }
 }
 
-impl ConcreteTestNode {
+impl TestFsBackend {
     pub fn _propagate_err_to_vfs(&mut self) {
         self.propagate_err_to_vfs = true
     }
 }
 
-pub type TestFileSystem = FileSystem<ConcreteTestNode>;
+pub type TestFileSystem = FileSystem<TestFsBackend>;
 
-impl From<TestNode<'_>> for ConcreteTestNode {
+impl From<TestNode<'_>> for TestFsBackend {
     fn from(value: TestNode) -> Self {
         Self {
             inner: Arc::new(RwLock::new(value.into())),
@@ -614,19 +669,26 @@ impl From<TestNode<'_>> for ConcreteTestNode {
     }
 }
 
-impl TryFrom<InnerConcreteTestNode> for ConcreteTestNode {
-    type Error = <ConcreteTestNode as FSBackend>::IoError;
+impl TryFrom<ConcreteTestFsCreationInfo> for TestFsBackend {
+    type Error = <TestFsBackend as FSBackend>::IoError;
 
-    fn try_from(value: InnerConcreteTestNode) -> Result<Self, Self::Error> {
+    fn try_from(value: ConcreteTestFsCreationInfo) -> Result<Self, Self::Error> {
+        let inner = {
+            let mut map = get_testbackends_list();
+            let inner = map
+                .entry(value.id)
+                .or_insert(Arc::new(RwLock::new(value.inner)));
+            inner.clone()
+        };
         Ok(Self {
-            inner: Arc::new(RwLock::new(value)),
+            inner,
             propagate_err_to_vfs: false,
         })
     }
 }
 
-impl<'a> From<&'a ConcreteTestNode> for VfsNode<ShallowTestSyncInfo> {
-    fn from(value: &'a ConcreteTestNode) -> Self {
+impl<'a> From<&'a TestFsBackend> for VfsNode<ShallowTestSyncInfo> {
+    fn from(value: &'a TestFsBackend) -> Self {
         let inner = value.inner.read().unwrap();
         if !value.propagate_err_to_vfs {
             TestNode::from(inner.deref()).into_node().unwrap()
@@ -636,24 +698,12 @@ impl<'a> From<&'a ConcreteTestNode> for VfsNode<ShallowTestSyncInfo> {
     }
 }
 
-impl Display for InnerConcreteTestNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
-    }
-}
-
-impl From<InnerConcreteTestNode> for String {
-    fn from(value: InnerConcreteTestNode) -> Self {
-        format!("{value}")
-    }
-}
-
-impl FSBackend for ConcreteTestNode {
+impl FSBackend for TestFsBackend {
     type SyncInfo = ShallowTestSyncInfo;
 
     type IoError = TestError;
 
-    type CreationInfo = InnerConcreteTestNode;
+    type CreationInfo = ConcreteTestFsCreationInfo;
 
     type Description = String;
 
@@ -700,7 +750,7 @@ impl FSBackend for ConcreteTestNode {
 
             let node = inner.get_node(path);
 
-            if let InnerConcreteTestNode::FE(_, err) = node {
+            if let ConcreteTestNode::FE(_, err) = node {
                 return Err(FsBackendError::from(io::Error::new(
                     io::ErrorKind::NotFound,
                     err.as_str(),
@@ -735,7 +785,7 @@ impl FSBackend for ConcreteTestNode {
 
             // Write into the node
             let mut inner = self.inner.write().unwrap();
-            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            if let ConcreteTestNode::FE(_, err) = inner.deref() {
                 return Err(FsBackendError::from(io::Error::new(
                     io::ErrorKind::ReadOnlyFilesystem,
                     err.as_str(),
@@ -745,14 +795,13 @@ impl FSBackend for ConcreteTestNode {
             let parent = inner.get_node_mut(path.parent().unwrap());
 
             match parent {
-                InnerConcreteTestNode::D(_, children)
-                | InnerConcreteTestNode::DH(_, _, children) => {
+                ConcreteTestNode::D(_, children) | ConcreteTestNode::DH(_, _, children) => {
                     // Overwrite file
                     for child in children.iter_mut() {
                         if child.name() == path.name() {
                             let hash = xxh3_64(&content);
                             let size = content.len() as u64;
-                            *child = InnerConcreteTestNode::FF(path.name().to_owned(), content);
+                            *child = ConcreteTestNode::FF(path.name().to_owned(), content);
                             return Ok(FileInfo::new(
                                 path.name(),
                                 size,
@@ -765,7 +814,7 @@ impl FSBackend for ConcreteTestNode {
                     // Create file
                     let hash = xxh3_64(&content);
                     let size = content.len() as u64;
-                    children.push(InnerConcreteTestNode::FF(path.name().to_owned(), content));
+                    children.push(ConcreteTestNode::FF(path.name().to_owned(), content));
                     Ok(FileInfo::new(
                         path.name(),
                         size,
@@ -781,7 +830,7 @@ impl FSBackend for ConcreteTestNode {
     fn rm<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
         Box::pin(async move {
             let mut inner = self.inner.write().unwrap();
-            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            if let ConcreteTestNode::FE(_, err) = inner.deref() {
                 return Err(FsBackendError::from(io::Error::new(
                     io::ErrorKind::ReadOnlyFilesystem,
                     err.as_str(),
@@ -790,8 +839,7 @@ impl FSBackend for ConcreteTestNode {
             let parent = inner.get_node_mut(path.parent().unwrap());
 
             match parent {
-                InnerConcreteTestNode::D(_, children)
-                | InnerConcreteTestNode::DH(_, _, children) => {
+                ConcreteTestNode::D(_, children) | ConcreteTestNode::DH(_, _, children) => {
                     let init_len = children.len();
                     *children = children
                         .iter()
@@ -815,7 +863,7 @@ impl FSBackend for ConcreteTestNode {
     ) -> BoxFuture<'a, Result<DirInfo<Self::SyncInfo>, Self::IoError>> {
         Box::pin(async move {
             let mut inner = self.inner.write().unwrap();
-            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            if let ConcreteTestNode::FE(_, err) = inner.deref() {
                 return Err(FsBackendError::from(io::Error::new(
                     io::ErrorKind::ReadOnlyFilesystem,
                     err.as_str(),
@@ -825,12 +873,8 @@ impl FSBackend for ConcreteTestNode {
             let parent = inner.get_node_mut(path.parent().unwrap());
 
             match parent {
-                InnerConcreteTestNode::D(_, children)
-                | InnerConcreteTestNode::DH(_, _, children) => {
-                    children.push(InnerConcreteTestNode::D(
-                        path.name().to_string(),
-                        Vec::new(),
-                    ));
+                ConcreteTestNode::D(_, children) | ConcreteTestNode::DH(_, _, children) => {
+                    children.push(ConcreteTestNode::D(path.name().to_string(), Vec::new()));
 
                     let hash = xxh3_64(
                         &children
@@ -853,7 +897,7 @@ impl FSBackend for ConcreteTestNode {
     fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
         Box::pin(async move {
             let mut inner = self.inner.write().unwrap();
-            if let InnerConcreteTestNode::FE(_, err) = inner.deref() {
+            if let ConcreteTestNode::FE(_, err) = inner.deref() {
                 return Err(FsBackendError::from(io::Error::new(
                     io::ErrorKind::ReadOnlyFilesystem,
                     err.as_str(),
@@ -863,8 +907,7 @@ impl FSBackend for ConcreteTestNode {
             let parent = inner.get_node_mut(path.parent().unwrap());
 
             match parent {
-                InnerConcreteTestNode::D(_, children)
-                | InnerConcreteTestNode::DH(_, _, children) => {
+                ConcreteTestNode::D(_, children) | ConcreteTestNode::DH(_, _, children) => {
                     let init_len = children.len();
                     *children = children
                         .iter()
