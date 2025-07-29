@@ -12,6 +12,8 @@ use brume::concrete::{
 };
 
 use brume::synchro::FullSyncStatus;
+#[cfg(feature = "test-utils")]
+use brume::test_utils::TestFsBackend;
 use brume::vfs::StatefulVfs;
 use config::BrumeUserConfig;
 use serde::{Deserialize, Serialize};
@@ -292,6 +294,8 @@ impl SynchroMeta {
 pub enum AnyFsCreationInfo {
     LocalDir(<LocalDir as FSBackend>::CreationInfo),
     Nextcloud(<Nextcloud as FSBackend>::CreationInfo),
+    #[cfg(feature = "test-utils")]
+    TestFs(<TestFsBackend as FSBackend>::CreationInfo),
 }
 
 impl AnyFsCreationInfo {
@@ -308,6 +312,8 @@ impl AnyFsCreationInfo {
                 };
                 format!("Failed to connect to Nextcloud server: {msg}")
             }),
+            #[cfg(feature = "test-utils")]
+            AnyFsCreationInfo::TestFs(_) => Ok(()),
         }
     }
 }
@@ -349,6 +355,8 @@ impl AnySynchroCreationInfo {
 pub enum AnyFsDescription {
     LocalDir(<LocalDir as FSBackend>::Description),
     Nextcloud(<Nextcloud as FSBackend>::Description),
+    #[cfg(feature = "test-utils")]
+    TestFs(<TestFsBackend as FSBackend>::Description),
 }
 
 impl AnyFsDescription {
@@ -356,6 +364,8 @@ impl AnyFsDescription {
         match self {
             AnyFsDescription::LocalDir(desc) => desc.name(),
             AnyFsDescription::Nextcloud(desc) => desc.name(),
+            #[cfg(feature = "test-utils")]
+            AnyFsDescription::TestFs(desc) => desc,
         }
     }
 
@@ -363,6 +373,8 @@ impl AnyFsDescription {
         match self {
             AnyFsDescription::LocalDir(_) => LocalDir::TYPE_NAME,
             AnyFsDescription::Nextcloud(_) => Nextcloud::TYPE_NAME,
+            #[cfg(feature = "test-utils")]
+            AnyFsDescription::TestFs(_) => TestFsBackend::TYPE_NAME,
         }
     }
 }
@@ -372,6 +384,8 @@ impl Display for AnyFsDescription {
         match self {
             AnyFsDescription::LocalDir(local) => local.fmt(f),
             AnyFsDescription::Nextcloud(nextcloud) => nextcloud.fmt(f),
+            #[cfg(feature = "test-utils")]
+            AnyFsDescription::TestFs(test) => test.fmt(f),
         }
     }
 }
@@ -381,6 +395,8 @@ impl From<AnyFsCreationInfo> for AnyFsDescription {
         match value {
             AnyFsCreationInfo::LocalDir(dir) => Self::LocalDir(dir.into()),
             AnyFsCreationInfo::Nextcloud(nextcloud) => Self::Nextcloud(nextcloud.into()),
+            #[cfg(feature = "test-utils")]
+            AnyFsCreationInfo::TestFs(test) => Self::TestFs(test.into()),
         }
     }
 }

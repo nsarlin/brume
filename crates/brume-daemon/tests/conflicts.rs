@@ -1,7 +1,8 @@
 use std::{process::exit, sync::Arc, time::Duration};
 
 use brume::{
-    concrete::local::LocalDir, filesystem::FileSystem, synchro::SynchroSide, vfs::VirtualPathBuf,
+    concrete::local::LocalDir, filesystem::FileSystem, synchro::SynchroSide,
+    test_utils::ConcreteTestFsCreationInfo, vfs::VirtualPathBuf,
 };
 use tracing_flame::FlameLayer;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -11,8 +12,7 @@ use brume_daemon::{
     db::DatabaseConfig,
 };
 use brume_daemon_proto::{
-    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, SynchroStatus,
-    config::ErrorMode,
+    AnyFsCreationInfo, LocalDirCreationInfo, SynchroStatus, config::ErrorMode,
 };
 use tarpc::context;
 use tracing::info;
@@ -20,10 +20,7 @@ use tracing::info;
 #[path = "utils.rs"]
 mod utils;
 
-use utils::{
-    connect_to_daemon, get_random_port, get_random_sock_name, start_nextcloud, stop_nextcloud,
-    wait_full_sync,
-};
+use utils::{NEXTCLOUD_AS_TEST_FS, connect_to_daemon, get_random_sock_name, wait_full_sync};
 
 #[tokio::test]
 async fn main() {
@@ -43,7 +40,7 @@ async fn main() {
     // Start daemon
     let sock_name = get_random_sock_name();
     info!("using sock name {sock_name}");
-    let sync_interval = Duration::from_secs(2);
+    let sync_interval = Duration::from_millis(200);
     let config = DaemonConfig::default()
         .with_sync_interval(sync_interval)
         .with_error_mode(ErrorMode::Exit)
@@ -61,22 +58,12 @@ async fn main() {
     info!("dir_a: {:?}", dir_a.path());
     info!("dir_b: {:?}", dir_b.path());
 
-    // Create a nextcloud server
-    let nextcloud_port = get_random_port();
-    let nextcloud_url = format!("http://localhost:{nextcloud_port}");
-    info!("nextcloud url: {}", &nextcloud_url);
-
-    // Start nextcloud container
-    let container = start_nextcloud(nextcloud_port, &nextcloud_url).await;
-    info!("container started: {}", container.id());
+    let remote_fs = &NEXTCLOUD_AS_TEST_FS;
+    let remote_info = (*remote_fs).clone().into();
 
     // Initiate the first synchro
     let local_a = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new(dir_a.path()));
-    let remote = AnyFsCreationInfo::Nextcloud(NextcloudFsCreationInfo::new(
-        &nextcloud_url,
-        "admin",
-        "admin",
-    ));
+    let remote = AnyFsCreationInfo::TestFs(ConcreteTestFsCreationInfo::new(remote_info, 0));
 
     let rpc = connect_to_daemon(&sock_name).await.unwrap();
 
@@ -88,7 +75,6 @@ async fn main() {
     // Wait a full sync
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 
@@ -108,7 +94,6 @@ async fn main() {
     // Wait a full sync
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 
@@ -152,7 +137,6 @@ async fn main() {
     // Wait for propagation on the first fs
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 
@@ -165,7 +149,6 @@ async fn main() {
     // Wait for another propagation
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 
@@ -188,7 +171,6 @@ async fn main() {
     // Wait for a full propagation
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 
@@ -227,7 +209,6 @@ async fn main() {
     // Wait for propagation on the first fs
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 
@@ -240,7 +221,6 @@ async fn main() {
     // Wait for another propagation
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 
@@ -263,7 +243,6 @@ async fn main() {
     // Wait for a full propagation
     wait_full_sync(2 * sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
         exit(1)
     }
 

@@ -275,6 +275,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "brume",
+ "brume-daemon",
  "brume-daemon-proto",
  "chrono",
  "deadpool-diesel",
