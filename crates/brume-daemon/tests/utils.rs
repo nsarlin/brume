@@ -1,5 +1,8 @@
+#![cfg_attr(test, allow(dead_code))]
+
 use std::{net::TcpListener, time::Duration};
 
+use brume::test_utils::TestNode;
 use interprocess::local_socket::{
     GenericNamespaced, ToNsName,
     tokio::{Stream, prelude::*},
@@ -18,6 +21,9 @@ use testcontainers::{
 
 use brume_daemon_proto::{BrumeServiceClient, SynchroStatus};
 use tokio::time::sleep;
+
+#[cfg(feature = "test-utils")]
+use brume::test_utils::TestNode::{D, FF};
 
 pub fn get_random_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to address");
@@ -84,3 +90,55 @@ pub async fn wait_full_sync(sync_interval: Duration, rpc: &BrumeServiceClient) {
         }
     }
 }
+
+/// A similar fs than the one present by default in the nextcloud container, as a `TestNode`, for
+/// faster tests
+// Note that it might be worthwhile to keep some tests with the true nextcloud container to detect
+// races caused by slower synchro
+#[cfg(feature = "test-utils")]
+pub static NEXTCLOUD_AS_TEST_FS: std::sync::LazyLock<TestNode> = std::sync::LazyLock::new(|| {
+    D(
+        "",
+        vec![
+            D(
+                "Documents",
+                vec![
+                    FF("Example.md", b"Example content"),
+                    FF("Nextcloud flyer.pdf", b"A pdf file"),
+                    FF("Readme.md", b"A readme for my docs"),
+                    FF("Welcome to Nextcloud Hub.docx", b"Finally a true doc"),
+                ],
+            ),
+            D(
+                "Photos",
+                vec![
+                    FF("Birdie.jpg", b"a cute bird"),
+                    FF("Frog.jpg", b"Frog and Toad are friends"),
+                    FF("Nextcloud community.jpg", b"Hello, community!"),
+                    FF("Readme.md", b"Some nice pictures"),
+                    FF("Library.jpg", b"Guardian of Knowledge"),
+                ],
+            ),
+            D(
+                "Templates",
+                vec![
+                    FF("Business model canvas.odg", b"The Business Model Canvas"),
+                    FF("Diagram & Table.ods", b"A list of tables"),
+                    FF("Readme.md", b"Some templates to play with"),
+                    FF("Mother’s day.odt", b"Happy Mother\xE2\x80\x99s Day!"),
+                ],
+            ),
+            FF("Nextcloud intro.mp4", b"An interesting movie"),
+            FF(
+                "Nextcloud manual.pdf",
+                b"Welcome to Nextcloud: A safe home for all your data.",
+            ),
+            FF("Readme.md", b"Welcome to Nextcloud!"),
+            FF(
+                "Reasons to use Nextcloud.pdf",
+                b"Easy to use, safe and open source",
+            ),
+            FF("Templates credits", b"A big thank you to the open source community for all the great templates! We hope they are useful to make your work easier.")
+        ],
+)
+});

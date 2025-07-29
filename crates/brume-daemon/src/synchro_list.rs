@@ -19,6 +19,9 @@ use brume_daemon_proto::{
 
 use crate::db::{Database, DatabaseError};
 
+#[cfg(feature = "test-utils")]
+use brume::test_utils::TestFsBackend;
+
 #[derive(Error, Debug)]
 pub enum SyncError {
     #[error("Error during sync process")]
@@ -171,6 +174,12 @@ macro_rules! generate_synchro_constructor {
                     generate_synchro_constructor!(@inner local, $remote_info, $remote_ty)
                 }
             )*
+            #[cfg(feature = "test-utils")]
+            AnyFsCreationInfo::TestFs(info) => {
+                let concrete: TestFsBackend = info.try_into()?;
+                let local = FileSystem::new(concrete);
+                generate_synchro_constructor!(@inner local, $remote_info, $remote_ty)
+            }
         }
     };
 
@@ -184,6 +193,12 @@ macro_rules! generate_synchro_constructor {
                     Ok(Box::new(Synchro::new($local_fs, remote)))
                 },
             )*
+            #[cfg(feature = "test-utils")]
+            AnyFsCreationInfo::TestFs(info) => {
+                let concrete: TestFsBackend = info.try_into()?;
+                let remote = FileSystem::new(concrete);
+                Ok(Box::new(Synchro::new($local_fs, remote)))
+            }
         }
     }
 }

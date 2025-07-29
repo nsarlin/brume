@@ -23,3 +23,6 @@ brume = { version = "0.1.0", path = "../brume" }
 
 [dev-dependencies]
 tempfile = "3.14"
+
+[features]
+test-utils = ["brume/test-utils"]

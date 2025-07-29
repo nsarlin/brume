@@ -40,6 +40,10 @@ tempfile = "3.14"
 testcontainers = { version = "0.23", features = ["http_wait"] }
 rand = "0.9"
 tracing-flame = "0.2"
+brume-daemon = { path = ".", features = ["test-utils"] }
+
+[features]
+test-utils = ["brume/test-utils", "brume-daemon-proto/test-utils"]
 
 [[bin]]
 name = "brumed"
