@@ -26,3 +26,6 @@ chrono = "0.4"
 
 brume-daemon-proto = { version = "0.1.0", path = "../brume-daemon-proto" }
 brume = { version = "0.1.0", path = "../brume" }
+
+[dev-dependencies]
+brume = { version = "0.1.0", path = "../brume", features = ["test-utils"] }

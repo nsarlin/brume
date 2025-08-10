@@ -158,7 +158,7 @@ impl<'a> PromptedConflict<'a> {
                 .otherside_conflict_paths()
                 .iter()
                 .flat_map(|path| {
-                    let node = local_vfs.find_node(path)?;
+                    let node = remote_vfs.find_node(path)?;
                     PromptedConflict::new(path, node)
                 })
                 .collect();
@@ -231,4 +231,106 @@ pub fn prompt_conflict_path(
     println!("{table}");
 
     Ok(selected)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use brume::{
+        filesystem::FileSystem,
+        synchro::{FullSyncStatus, Synchro, Synchronized},
+        test_utils::{
+            TestFsBackend,
+            TestNode::{D, FF},
+        },
+    };
+
+    #[tokio::test]
+    async fn test_find_conflict() {
+        // Synchronize both fs
+        let local_base = D("", vec![]);
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![D(
+                "Doc",
+                vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")],
+            )],
+        );
+
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(local_fs, remote_fs);
+
+        synchro.full_sync().await.unwrap().status();
+
+        // create a conflict: modify the remote and remove the local dir
+        synchro
+            .local_mut()
+            .set_backend(TestFsBackend::from(local_base));
+
+        let remote_mod = D(
+            "",
+            vec![D(
+                "Doc",
+                vec![
+                    FF("f1.md", b"hallo"),
+                    FF("f2.pdf", b"cruel"),
+                    FF("f3.doc", b"world"),
+                ],
+            )],
+        );
+        synchro
+            .remote_mut()
+            .set_backend(TestFsBackend::from(remote_mod));
+        synchro.full_sync().await.unwrap();
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        let path = VirtualPathBuf::new("/Doc").unwrap();
+        let local_vfs = synchro.local_vfs();
+        let remote_vfs = synchro.remote_vfs();
+        let prompted = PromptedConflict::find(&path, &local_vfs, &remote_vfs).unwrap();
+
+        let local_ref = vec![(VirtualPathBuf::new("/Doc").unwrap(), UpdateKind::DirRemoved)];
+
+        let remote_ref = vec![
+            (
+                VirtualPathBuf::new("/Doc").unwrap(),
+                UpdateKind::DirModified,
+            ),
+            (
+                VirtualPathBuf::new("/Doc/f1.md").unwrap(),
+                UpdateKind::FileModified,
+            ),
+            (
+                VirtualPathBuf::new("/Doc/f2.pdf").unwrap(),
+                UpdateKind::FileModified,
+            ),
+            (
+                VirtualPathBuf::new("/Doc/f3.doc").unwrap(),
+                UpdateKind::FileCreated,
+            ),
+        ];
+
+        assert_eq!(
+            local_ref,
+            prompted
+                .0
+                .iter()
+                .map(|prompt| (prompt.path.to_owned(), prompt.update_kind))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            remote_ref,
+            prompted
+                .1
+                .iter()
+                .map(|prompt| (prompt.path.to_owned(), prompt.update_kind))
+                .collect::<Vec<_>>()
+        )
+    }
 }
