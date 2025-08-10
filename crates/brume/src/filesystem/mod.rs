@@ -7,10 +7,10 @@ use crate::{
     concrete::{ConcreteFS, FSBackend, FsBackendError},
     sorted_vec::SortedVec,
     update::{
-        DiffError, DirModification, UpdateKind, VfsDiff, VfsDiffList, VfsDirCreation,
+        DiffError, UpdateKind, VfsDiff, VfsDiffList, VfsDirCreation, VfsDirModification,
         VfsFileUpdate, VfsUpdate, VfsUpdateApplicationError,
     },
-    vfs::{DirTree, InvalidPathError, NodeState, StatefulVfs, Vfs, VirtualPath},
+    vfs::{DirTree, InvalidPathError, NodeState, StatefulVfs, Vfs, VirtualPath, VirtualPathBuf},
 };
 
 #[derive(Error, Debug)]
@@ -27,6 +27,8 @@ pub enum SkipUpdateError {
     InvalidPath(#[from] InvalidPathError),
     #[error("loaded vfs is missing")]
     MissingLoadedVfs,
+    #[error("Tried to skip dir modification at {0}")]
+    DirModificationSkipped(VirtualPathBuf),
 }
 
 /// Main representation of any kind of filesystem, remote or local.
@@ -61,8 +63,8 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_backend(&mut self, backend: Backend) {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_backend(&mut self, backend: Backend) {
         self.concrete = ConcreteFS::new(backend)
     }
 
@@ -226,38 +228,44 @@ impl<Backend: FSBackend> FileSystem<Backend> {
         match update.kind() {
             UpdateKind::DirCreated => {
                 let loaded_dir = loaded.find_dir(path)?.clone().into_ok();
-                Ok(VfsUpdate::DirCreated(VfsDirCreation::new(
-                    path.parent().unwrap(),
-                    loaded_dir,
-                )))
+                Ok(VfsUpdate::dir_created(
+                    path,
+                    VfsDirCreation::new(loaded_dir),
+                ))
             }
-            UpdateKind::DirRemoved => Ok(VfsUpdate::DirRemoved(path.to_owned())),
+            UpdateKind::DirRemoved => Ok(VfsUpdate::dir_removed(path)),
             UpdateKind::FileCreated => {
                 let loaded_file = loaded.find_file(path)?.clone();
-                Ok(VfsUpdate::FileCreated(VfsFileUpdate::new(
+                Ok(VfsUpdate::file_created(
                     path,
-                    loaded_file.size(),
-                    loaded_file.last_modified(),
-                    loaded_file.into_metadata(),
-                )))
+                    VfsFileUpdate::new(
+                        loaded_file.size(),
+                        loaded_file.last_modified(),
+                        loaded_file.into_metadata(),
+                    ),
+                ))
             }
-            UpdateKind::FileRemoved => Ok(VfsUpdate::FileRemoved(path.to_owned())),
+            UpdateKind::FileRemoved => Ok(VfsUpdate::file_removed(path)),
             UpdateKind::FileModified => {
                 let loaded_file = loaded.find_file(path)?.clone();
-                Ok(VfsUpdate::FileModified(VfsFileUpdate::new(
+                Ok(VfsUpdate::file_modified(
                     path,
-                    loaded_file.size(),
-                    loaded_file.last_modified(),
-                    loaded_file.into_metadata(),
-                )))
+                    VfsFileUpdate::new(
+                        loaded_file.size(),
+                        loaded_file.last_modified(),
+                        loaded_file.into_metadata(),
+                    ),
+                ))
             }
             UpdateKind::DirModified => {
                 let loaded_dir = loaded.find_dir(path)?;
-                Ok(VfsUpdate::DirModified(DirModification::new(
+                Ok(VfsUpdate::dir_modified(
                     path,
-                    loaded_dir.last_modified(),
-                    loaded_dir.metadata().clone(),
-                )))
+                    VfsDirModification::new(
+                        loaded_dir.last_modified(),
+                        loaded_dir.metadata().clone(),
+                    ),
+                ))
             }
         }
     }

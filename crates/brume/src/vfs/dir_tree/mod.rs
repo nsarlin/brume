@@ -139,6 +139,12 @@ impl<Data> From<DirTree<Data>> for DirInfo<Data> {
     }
 }
 
+impl<Data: Clone> From<&DirTree<Data>> for DirInfo<Data> {
+    fn from(value: &DirTree<Data>) -> Self {
+        value.info.clone()
+    }
+}
+
 impl<Data> DirTree<Data> {
     /// Creates a new directory with no child and the provided name
     pub fn new(name: &str, last_modified: DateTime<Utc>, sync: Data) -> Self {
@@ -695,6 +701,7 @@ pub enum VfsNode<Data> {
 }
 
 /// Metadata of a node
+#[derive(Debug, Clone)]
 pub enum NodeInfo<Data> {
     Dir(DirInfo<Data>),
     File(FileInfo<Data>),

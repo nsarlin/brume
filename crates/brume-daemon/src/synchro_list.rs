@@ -911,7 +911,8 @@ mod test {
 
         // Simulate a db corruption
         let fs_b = list.synchros[&id].read().await.remote().id();
-        let file_rm = VfsUpdate::FileRemoved(VirtualPathBuf::new("/testdir/anotherfile").unwrap());
+        let file_rm =
+            VfsUpdate::file_removed(&VirtualPathBuf::new("/testdir/anotherfile").unwrap());
         db.update_vfs(fs_b, &file_rm).await.unwrap();
 
         let res = list.sync_all(&db).await;

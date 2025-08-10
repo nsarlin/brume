@@ -7,7 +7,7 @@ use futures::future::Either;
 use uuid::Uuid;
 
 use brume::{
-    update::{UpdateKind, VfsUpdate},
+    update::{UpdateKind, VfsUpdate, VfsUpdateKind},
     vfs::{
         DirState, DirTree, FileInfo, FileState, NodeKind, NodeState, StatefulDirTree, StatefulVfs,
         StatefulVfsNode, Vfs, VfsNode,
@@ -550,22 +550,26 @@ impl Database {
         update: &VfsUpdate<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         let vfs_root = self.get_vfs_root(fs_uuid).await?;
+        let path = update.path();
 
-        match update {
-            VfsUpdate::DirCreated(dir_creation) => {
-                self.insert_dir(&vfs_root, dir_creation.path(), dir_creation.dir())
-                    .await
+        match update.kind() {
+            VfsUpdateKind::DirCreated(dir_creation) => {
+                self.insert_dir(&vfs_root, path, dir_creation.dir()).await
             }
-            VfsUpdate::DirRemoved(path) => self.delete_node(&vfs_root, path).await,
-            VfsUpdate::DirModified(dir_modification) => {
-                let path = dir_modification.path().to_owned();
-                let dir = dir_modification.state();
+            VfsUpdateKind::DirRemoved => self.delete_node(&vfs_root, path).await,
+            VfsUpdateKind::DirModified(dir_modification) => {
+                let path = path.to_owned();
+                let dir = DirState::new_ok(
+                    path.name(),
+                    dir_modification.last_modified(),
+                    dir_modification.sync_info().clone(),
+                );
 
-                self.update_dir(&vfs_root, &path, dir).await
+                self.update_dir(&vfs_root, &path, &dir).await
             }
-            VfsUpdate::FileCreated(file_creation) => {
-                let name = file_creation.path().name().to_owned();
-                let path = file_creation.path().to_owned();
+            VfsUpdateKind::FileCreated(file_creation) => {
+                let name = path.name().to_owned();
+                let path = path.to_owned();
                 let file = FileInfo::new_ok(
                     &name,
                     file_creation.file_size(),
@@ -574,9 +578,9 @@ impl Database {
                 );
                 self.insert_file(&vfs_root, &path, &file).await
             }
-            VfsUpdate::FileModified(file_modification) => {
-                let name = file_modification.path().name().to_owned();
-                let path = file_modification.path().to_owned();
+            VfsUpdateKind::FileModified(file_modification) => {
+                let name = path.name().to_owned();
+                let path = path.to_owned();
                 let file = FileInfo::new_ok(
                     &name,
                     file_modification.file_size(),
@@ -586,8 +590,8 @@ impl Database {
 
                 self.update_file(&vfs_root, &path, &file).await
             }
-            VfsUpdate::FileRemoved(path) => self.delete_node(&vfs_root, path).await,
-            VfsUpdate::FailedApplication(failed_update) => {
+            VfsUpdateKind::FileRemoved => self.delete_node(&vfs_root, path).await,
+            VfsUpdateKind::FailedApplication(failed_update) => {
                 let path = failed_update.path().to_owned();
 
                 // If this is a failed creation, we need to create the node in the db to store the
@@ -619,7 +623,7 @@ impl Database {
                     }
                 }
             }
-            VfsUpdate::Conflict(conflict) => {
+            VfsUpdateKind::Conflict(conflict) => {
                 let vfs_diff = conflict.update();
                 let path = vfs_diff.path().to_owned();
                 let state = NodeState::Conflict(conflict.clone());
@@ -705,7 +709,8 @@ mod test {
         let f1_path = VirtualPathBuf::new("/a/f1").unwrap();
         let f2_path = VirtualPathBuf::new("/a/b/f2").unwrap();
 
-        let creation_update = VfsUpdate::DirCreated(VfsDirCreation::new(VirtualPath::root(), a));
+        let creation_update =
+            VfsUpdate::dir_created(&VirtualPathBuf::new("/a").unwrap(), VfsDirCreation::new(a));
 
         let fs_info = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new("/tmp/test"));
         let fs_ref = FileSystemMeta::from(fs_info.clone());
@@ -751,8 +756,10 @@ mod test {
         let vfs_root = db.load_nodes_rec(&root).await.unwrap();
         assert!(vfs_root.structural_eq(&base_vfs));
 
-        let creation_update =
-            VfsUpdate::DirCreated(VfsDirCreation::new(&VirtualPathBuf::new("/a").unwrap(), d));
+        let creation_update = VfsUpdate::dir_created(
+            &VirtualPathBuf::new("/a/d").unwrap(),
+            VfsDirCreation::new(d),
+        );
         db.update_vfs(fs_ref.id(), &creation_update.into())
             .await
             .unwrap();
@@ -768,7 +775,7 @@ mod test {
         assert_eq!(node.kind, NodeKind::Dir.as_str());
 
         let creation_update =
-            VfsUpdate::FileCreated(VfsFileUpdate::new(&f2_path, 42, Utc::now(), ()));
+            VfsUpdate::file_created(&f2_path, VfsFileUpdate::new(42, Utc::now(), ()));
         db.update_vfs(fs_ref.id(), &creation_update.into())
             .await
             .unwrap();
@@ -782,7 +789,7 @@ mod test {
         assert_eq!(node.size, Some(42));
 
         let modification_update =
-            VfsUpdate::FileModified(VfsFileUpdate::new(&f2_path, 54, Utc::now(), ()));
+            VfsUpdate::file_modified(&f2_path, VfsFileUpdate::new(54, Utc::now(), ()));
         db.update_vfs(fs_ref.id(), &modification_update.into())
             .await
             .unwrap();
@@ -795,7 +802,7 @@ mod test {
         assert_eq!(node.kind, NodeKind::File.as_str());
         assert_eq!(node.size, Some(54));
 
-        let rm_update = VfsUpdate::<()>::FileRemoved(f1_path.clone());
+        let rm_update = VfsUpdate::<()>::file_removed(&f1_path);
         db.update_vfs(fs_ref.id(), &rm_update.into()).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
@@ -812,7 +819,7 @@ mod test {
             ),
         );
 
-        let failed_update = VfsUpdate::FailedApplication(failed_diff);
+        let failed_update = VfsUpdate::failed_application(failed_diff);
         db.update_vfs(fs_ref.id(), &failed_update).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
@@ -823,7 +830,7 @@ mod test {
         let vfs_node = VfsNode::try_from(&node).unwrap();
         assert!(vfs_node.state().is_err());
 
-        let conflict = VfsUpdate::Conflict(VfsConflict::new(diff, &[f2_path.clone()]));
+        let conflict = VfsUpdate::conflict(VfsConflict::new(diff, &[f2_path.clone()]));
         db.update_vfs(fs_ref.id(), &conflict).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();
@@ -851,7 +858,8 @@ mod test {
         let mut base_root = DirTree::new_ok("", Utc::now(), ());
         base_root.insert_child(VfsNode::Dir(a.clone()));
 
-        let creation_update = VfsUpdate::DirCreated(VfsDirCreation::new(VirtualPath::root(), a));
+        let creation_update =
+            VfsUpdate::dir_created(&VirtualPathBuf::new("/a").unwrap(), VfsDirCreation::new(a));
 
         let fs_info = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new("/tmp/test"));
         let fs_ref = FileSystemMeta::from(fs_info.clone());

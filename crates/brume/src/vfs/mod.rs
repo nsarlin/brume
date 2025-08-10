@@ -19,7 +19,7 @@ use crate::{
     concrete::{InvalidBytesSyncInfo, ToBytes, TryFromBytes},
     update::{
         DiffError, FailedUpdateApplication, IsModified, VfsConflict, VfsDiff, VfsDiffList,
-        VfsUpdate, VfsUpdateApplicationError,
+        VfsUpdate, VfsUpdateApplicationError, VfsUpdateKind,
     },
 };
 
@@ -160,7 +160,7 @@ impl<Data: Clone> StatefulVfs<Data> {
         let parent_path = path.parent();
 
         // Only supported update on root node is to modify its SyncInfo
-        if parent_path.is_none() && !matches!(update, VfsUpdate::DirModified(_)) {
+        if parent_path.is_none() && !matches!(update.kind(), VfsUpdateKind::DirModified(_)) {
             return Err(VfsUpdateApplicationError::PathIsRoot);
         }
 
@@ -169,9 +169,6 @@ impl<Data: Clone> StatefulVfs<Data> {
             .transpose()?;
 
         if let Some(parent) = parent.as_mut() {
-            // Invalidate parent sync info because its content has been changed
-            // parent.force_resync();
-
             // Remove the child if in error. It will be restored as Ok or as an Error based on the
             // result of the last concrete application attempt
             parent.remove_child_if(update.path().name(), |child| {
@@ -179,8 +176,9 @@ impl<Data: Clone> StatefulVfs<Data> {
             });
         }
 
-        match update {
-            VfsUpdate::DirCreated(update) => {
+        let path = update.path();
+        match update.kind() {
+            VfsUpdateKind::DirCreated(update) => {
                 let child = VfsNode::Dir(update.clone().into());
 
                 if path.name() != child.name() {
@@ -193,14 +191,14 @@ impl<Data: Clone> StatefulVfs<Data> {
                 parent.unwrap().insert_child(child);
                 Ok(())
             }
-            VfsUpdate::DirRemoved(path) => self.delete_dir(path).map_err(|e| e.into()),
-            VfsUpdate::DirModified(update) => {
-                let dir = self.root_mut().find_dir_mut(update.path())?;
+            VfsUpdateKind::DirRemoved => self.delete_dir(path).map_err(|e| e.into()),
+            VfsUpdateKind::DirModified(update) => {
+                let dir = self.root_mut().find_dir_mut(path)?;
                 let state = dir.state_mut();
-                *state = update.state().clone().into_metadata();
+                *state = NodeState::Ok(update.sync_info().clone());
                 Ok(())
             }
-            VfsUpdate::FileCreated(update) => {
+            VfsUpdateKind::FileCreated(update) => {
                 let child = VfsNode::File(FileInfo::new(
                     path.name(),
                     update.file_size(),
@@ -210,15 +208,15 @@ impl<Data: Clone> StatefulVfs<Data> {
                 parent.unwrap().insert_child(child);
                 Ok(())
             }
-            VfsUpdate::FileModified(update) => {
-                let file = self.root_mut().find_file_mut(update.path())?;
+            VfsUpdateKind::FileModified(update) => {
+                let file = self.root_mut().find_file_mut(path)?;
                 file.set_size(update.file_size());
                 let state = file.state_mut();
                 *state = NodeState::Ok(update.sync_info().clone());
                 Ok(())
             }
-            VfsUpdate::FileRemoved(path) => self.delete_file(path).map_err(|e| e.into()),
-            VfsUpdate::FailedApplication(failure) => {
+            VfsUpdateKind::FileRemoved => self.delete_file(path).map_err(|e| e.into()),
+            VfsUpdateKind::FailedApplication(failure) => {
                 let mut node = loaded_vfs
                     .find_node(failure.path())
                     .map(|node| node.clone().as_ok())
@@ -243,7 +241,7 @@ impl<Data: Clone> StatefulVfs<Data> {
 
                 Ok(())
             }
-            VfsUpdate::Conflict(conflict) => {
+            VfsUpdateKind::Conflict(conflict) => {
                 let mut node = loaded_vfs
                     .find_node(conflict.path())
                     .map(|node| node.clone().as_ok())
@@ -375,10 +373,10 @@ mod test {
         .unwrap();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
-        let update = VfsUpdate::DirCreated(VfsDirCreation::new(
-            &VirtualPathBuf::new("/e/g").unwrap(),
-            new_dir,
-        ));
+        let update = VfsUpdate::dir_created(
+            &VirtualPathBuf::new("/e/g/h").unwrap(),
+            VfsDirCreation::new(new_dir),
+        );
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -402,7 +400,7 @@ mod test {
         .into_node()
         .unwrap();
 
-        let update = VfsUpdate::DirRemoved(VirtualPathBuf::new("/e/g").unwrap());
+        let update = VfsUpdate::dir_removed(&VirtualPathBuf::new("/e/g").unwrap());
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -427,12 +425,10 @@ mod test {
         .unwrap();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
+        let update = VfsUpdate::file_created(
             &VirtualPathBuf::new("/e/g/file.bin").unwrap(),
-            0,
-            Utc::now(),
-            new_file_info,
-        ));
+            VfsFileUpdate::new(0, Utc::now(), new_file_info),
+        );
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -457,12 +453,10 @@ mod test {
         .unwrap();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = VfsUpdate::FileModified(VfsFileUpdate::new(
+        let update = VfsUpdate::file_modified(
             &VirtualPathBuf::new("/Doc/f1.md").unwrap(),
-            0,
-            Utc::now(),
-            new_file_info,
-        ));
+            VfsFileUpdate::new(0, Utc::now(), new_file_info),
+        );
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -483,7 +477,7 @@ mod test {
         .into_node()
         .unwrap();
 
-        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f2.pdf").unwrap());
+        let update = VfsUpdate::file_removed(&VirtualPathBuf::new("/Doc/f2.pdf").unwrap());
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -524,10 +518,10 @@ mod test {
         .unwrap();
 
         let new_dir = D("h", vec![F("file.bin"), D("i", vec![])]).into_dir();
-        let update = VfsUpdate::DirCreated(VfsDirCreation::new(
-            &VirtualPathBuf::new("/").unwrap(),
-            new_dir,
-        ));
+        let update = VfsUpdate::dir_created(
+            &VirtualPathBuf::new("/h").unwrap(),
+            VfsDirCreation::new(new_dir),
+        );
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -550,7 +544,7 @@ mod test {
         .into_node()
         .unwrap();
 
-        let update = VfsUpdate::DirRemoved(VirtualPathBuf::new("/e").unwrap());
+        let update = VfsUpdate::dir_removed(&VirtualPathBuf::new("/e").unwrap());
         let ref_vfs = Vfs::new(updated);
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -576,12 +570,10 @@ mod test {
         let updated = base.clone().unwrap();
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = VfsUpdate::FileCreated(VfsFileUpdate::new(
+        let update = VfsUpdate::file_created(
             &VirtualPathBuf::new("/file.bin").unwrap(),
-            0,
-            Utc::now(),
-            new_file_info,
-        ));
+            VfsFileUpdate::new(0, Utc::now(), new_file_info),
+        );
         let ref_vfs = Vfs::new(updated.clone());
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -595,12 +587,10 @@ mod test {
         let mut vfs = Vfs::new(base.clone());
 
         let new_file_info = ShallowTestSyncInfo::new(0);
-        let update = VfsUpdate::FileModified(VfsFileUpdate::new(
+        let update = VfsUpdate::file_modified(
             &VirtualPathBuf::new("/file.bin").unwrap(),
-            0,
-            Utc::now(),
-            new_file_info,
-        ));
+            VfsFileUpdate::new(0, Utc::now(), new_file_info),
+        );
         let ref_vfs = Vfs::new(updated.clone());
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
@@ -622,7 +612,7 @@ mod test {
 
         let ref_vfs = Vfs::new(updated);
 
-        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/file.bin").unwrap());
+        let update = VfsUpdate::file_removed(&VirtualPathBuf::new("/file.bin").unwrap());
 
         vfs.apply_update(&update, &ref_vfs).unwrap();
 
@@ -648,14 +638,14 @@ mod test {
         let mut vfs = Vfs::new(base.clone());
         let ref_vfs = Vfs::new(base.clone().unwrap());
 
-        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/e/f/h").unwrap());
+        let update = VfsUpdate::file_removed(&VirtualPathBuf::new("/e/f/h").unwrap());
 
         assert!(vfs.apply_update(&update, &ref_vfs).is_err());
 
         // Test double remove
         let mut vfs = Vfs::new(base.clone());
 
-        let update = VfsUpdate::FileRemoved(VirtualPathBuf::new("/Doc/f3.doc").unwrap());
+        let update = VfsUpdate::file_removed(&VirtualPathBuf::new("/Doc/f3.doc").unwrap());
 
         assert!(vfs.apply_update(&update, &ref_vfs).is_err());
     }

@@ -184,6 +184,11 @@ impl<T: Sortable> SortedVec<T> {
         self.0.iter()
     }
 
+    /// Returns an iterator over T, by mutable reference.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<T> {
+        self.0.iter_mut()
+    }
+
     /// Removes the last element in the vec and returns it
     pub fn pop(&mut self) -> Option<T> {
         self.0.pop()
