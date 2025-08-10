@@ -11,7 +11,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::{BoxFuture, try_join_all};
-use futures::{Stream, TryStream, TryStreamExt};
+use futures::{Stream, TryStream, TryStreamExt, try_join};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{Instrument, error, info, info_span, instrument};
@@ -20,9 +20,9 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::filesystem::{FileSystem, SkipUpdateError};
 use crate::sorted_vec::SortedVec;
 use crate::update::{
-    AppliedDirCreation, AppliedFileUpdate, AppliedUpdate, DirModification, FailedUpdateApplication,
-    IsModified, ReconciledUpdate, ReconciliationError, UpdateConflict, UpdateKind, VfsDiff,
-    VirtualReconciledUpdate,
+    AppliedDirCreation, AppliedDirModification, AppliedFileUpdate, AppliedUpdate,
+    FailedUpdateApplication, IsModified, ReconciledUpdate, ReconciliationError, UpdateConflict,
+    UpdateKind, VfsDiff, VirtualReconciledUpdate,
 };
 use crate::vfs::{
     DirInfo, DirTree, FileInfo, InvalidPathError, NodeInfo, StatefulDirTree, Vfs, VfsNode,
@@ -75,12 +75,12 @@ pub struct ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> {
 
 impl<SrcSyncInfo, DstSyncInfo> ConcreteDirCloneResult<SrcSyncInfo, DstSyncInfo> {
     /// Create a new Clone result for a mkdir that failed
-    fn new_mkdir_failed<E: Into<FsBackendError>>(path: &VirtualPath, error: E) -> Self {
+    fn new_mkdir_failed(path: &VirtualPath, error: String) -> Self {
         Self {
             success: None,
             failures: vec![FailedUpdateApplication::new(
                 VfsDiff::dir_created(path.to_owned()),
-                error.into(),
+                error,
             )],
         }
     }
@@ -312,6 +312,24 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             == remote_hash.map_err(|e| (e, OtherBackend::TYPE_NAME))?)
     }
 
+    /// Gets the NodeInfo at the provided path as a DirInfo.
+    ///
+    /// Errors can be raised from the backend or if the node is not a dir
+    pub async fn get_dir_info(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<DirInfo<Backend::SyncInfo>, String> {
+        self.backend()
+            .get_node_info(path)
+            .instrument(info_span!("get_node_info"))
+            .await
+            .map_err(|e| format!("{e}"))
+            .and_then(|info| {
+                info.into_dir_info()
+                    .ok_or(format!("Node is not a dir: {path}"))
+            })
+    }
+
     /// Clone a directory from `ref_concrete` into the concrete fs of self.
     #[instrument(skip_all)]
     pub async fn clone_dir<RefBackend: FSBackend>(
@@ -320,12 +338,7 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
         ref_dir: &DirTree<RefBackend::SyncInfo>,
         path: &VirtualPath,
     ) -> ConcreteDirCloneResult<RefBackend::SyncInfo, Backend::SyncInfo> {
-        let src_info = match ref_concrete
-            .backend()
-            .get_node_info(path)
-            .instrument(info_span!("get_node_info"))
-            .await
-        {
+        let src_info = match ref_concrete.get_dir_info(path).await {
             Ok(dir_info) => dir_info,
             Err(err) => {
                 error!("Failed to create dir {path}: {err:?}");
@@ -333,24 +346,16 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
             }
         };
 
-        let dst_info = match self
+        if let Err(err) = self
             .backend()
             .mkdir(path)
             .instrument(info_span!("mkdir"))
             .await
         {
-            Ok(dir_info) => dir_info,
-            Err(err) => {
-                error!("Failed to create dir {path}: {err:?}");
-                return ConcreteDirCloneResult::new_mkdir_failed(path, err);
-            }
+            error!("Failed to create dir {path}: {err:?}");
+            return ConcreteDirCloneResult::new_mkdir_failed(path, err.to_string());
         };
 
-        let mut dst_dir = DirTree::new_ok(
-            path.name(),
-            dst_info.last_modified(),
-            dst_info.into_metadata(),
-        );
         let mut src_dir = DirTree::new_ok(
             path.name(),
             src_info.last_modified(),
@@ -398,6 +403,21 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                 }
             }
         }
+
+        // load dst syncinfo after the content of the dir has been updated
+        let dst_info = match self.get_dir_info(path).await {
+            Ok(dir_info) => dir_info,
+            Err(err) => {
+                error!("Failed to create dir {path}: {err:?}");
+                return ConcreteDirCloneResult::new_mkdir_failed(path, err);
+            }
+        };
+
+        let mut dst_dir = DirTree::new_ok(
+            path.name(),
+            dst_info.last_modified(),
+            dst_info.into_metadata(),
+        );
 
         for (success, failures) in results {
             if let Some((src_node, dst_node)) = success {
@@ -523,17 +543,22 @@ impl<Backend: FSBackend> ConcreteFS<Backend> {
                     .map(|update| vec![update])
             }
             // There is nothing to do on the backend for a dir modified, this update is just used to
-            // propgate the SyncInfo to the vfs
-            UpdateKind::DirModified => {
-                let loaded_dir = ref_fs.find_loaded_dir(&path)?;
-                let dir_mod = DirModification::new(
-                    &path,
-                    loaded_dir.last_modified(),
-                    loaded_dir.metadata().clone(),
-                );
-
-                Ok(vec![AppliedUpdate::DirModified(dir_mod)])
-            }
+            // update the SyncInfo
+            UpdateKind::DirModified => try_join!(
+                ref_fs.concrete().get_dir_info(&path),
+                self.get_dir_info(&path)
+            )
+            .and_then(|(src_info, dst_info)| {
+                Ok(AppliedUpdate::DirModified(AppliedDirModification::new(
+                    &path, src_info, dst_info,
+                )))
+            })
+            .or_else(|e| {
+                Ok(AppliedUpdate::FailedApplication(
+                    FailedUpdateApplication::new(update, e),
+                ))
+            })
+            .map(|update| vec![update]),
             UpdateKind::FileCreated => self
                 .clone_file(ref_fs.concrete(), &path)
                 .await

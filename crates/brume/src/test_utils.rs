@@ -25,6 +25,7 @@ use crate::{
         TryFromBytes, local::path::LocalPath,
     },
     filesystem::FileSystem,
+    sorted_vec::{Sortable, SortedVec},
     update::{FailedUpdateApplication, IsModified, ModificationState, VfsDiff},
     vfs::{
         DirInfo, DirTree, FileInfo, NodeInfo, NodeState, StatefulDirTree, StatefulVfsNode, Vfs,
@@ -455,13 +456,27 @@ fn get_testbackends_list() -> MutexGuard<'static, HashMap<u64, Arc<RwLock<Concre
 /// Like a TestNode, but own its content, which allows modifications.
 ///
 /// Can be used to define a test concrete fs
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConcreteTestNode {
-    D(String, Vec<ConcreteTestNode>),
-    DH(String, u64, Vec<ConcreteTestNode>),
+    D(String, SortedVec<ConcreteTestNode>),
+    DH(String, u64, SortedVec<ConcreteTestNode>),
     FF(String, Vec<u8>),
     FE(String, String),
     DE(String, String),
+}
+
+impl Sortable for ConcreteTestNode {
+    type Key = str;
+
+    fn key(&self) -> &Self::Key {
+        match self {
+            ConcreteTestNode::D(name, _) => name,
+            ConcreteTestNode::DH(name, _, _) => name,
+            ConcreteTestNode::FF(name, _) => name,
+            ConcreteTestNode::FE(name, _) => name,
+            ConcreteTestNode::DE(name, _) => name,
+        }
+    }
 }
 
 impl<'a> From<TestNode<'a>> for ConcreteTestNode {
@@ -470,12 +485,12 @@ impl<'a> From<TestNode<'a>> for ConcreteTestNode {
             TestNode::F(_) | TestNode::FH(_, _) => panic!(),
             TestNode::D(name, children) => Self::D(
                 name.to_string(),
-                children.into_iter().map(|child| child.into()).collect(),
+                SortedVec::from_vec(children.into_iter().map(|child| child.into()).collect()),
             ),
             TestNode::DH(name, hash, children) => Self::DH(
                 name.to_string(),
                 hash,
-                children.into_iter().map(|child| child.into()).collect(),
+                SortedVec::from_vec(children.into_iter().map(|child| child.into()).collect()),
             ),
             TestNode::FF(name, content) => Self::FF(name.to_string(), content.to_vec()),
             TestNode::L(_, target) => {
@@ -554,7 +569,7 @@ impl ConcreteTestNode {
 
         match self {
             Self::D(_, children) | Self::DH(_, _, children) => {
-                for child in children {
+                for child in children.iter() {
                     if child.name() == top_level {
                         if remainder.is_root() {
                             return child;
@@ -582,7 +597,7 @@ impl ConcreteTestNode {
 
         match self {
             Self::D(_, children) | Self::DH(_, _, children) => {
-                for child in children {
+                for child in children.iter_mut() {
                     if child.name() == top_level {
                         if remainder.is_root() {
                             return child;
@@ -719,10 +734,12 @@ impl FSBackend for TestFsBackend {
         &'a self,
         path: &'a VirtualPath,
     ) -> BoxFuture<'a, Result<NodeInfo<Self::SyncInfo>, Self::IoError>> {
-        Box::pin(async {
+        Box::pin(async move {
             let inner: VfsNode<_> = self.into();
 
-            let node = inner.find_node(path).unwrap();
+            let node = inner
+                .find_node(path)
+                .unwrap_or_else(|| panic!("Missing node {path}"));
             Ok(node.into())
         })
     }
@@ -814,7 +831,7 @@ impl FSBackend for TestFsBackend {
                     // Create file
                     let hash = xxh3_64(&content);
                     let size = content.len() as u64;
-                    children.push(ConcreteTestNode::FF(path.name().to_owned(), content));
+                    children.insert(ConcreteTestNode::FF(path.name().to_owned(), content));
                     Ok(FileInfo::new(
                         path.name(),
                         size,
@@ -841,11 +858,13 @@ impl FSBackend for TestFsBackend {
             match parent {
                 ConcreteTestNode::D(_, children) | ConcreteTestNode::DH(_, _, children) => {
                     let init_len = children.len();
-                    *children = children
-                        .iter()
-                        .filter(|child| child.name() != path.name() || child.is_dir())
-                        .cloned()
-                        .collect();
+                    *children = SortedVec::from_vec(
+                        children
+                            .iter()
+                            .filter(|child| child.name() != path.name() || child.is_dir())
+                            .cloned()
+                            .collect(),
+                    );
 
                     if children.len() != init_len - 1 {
                         panic!("{path}")
@@ -874,14 +893,12 @@ impl FSBackend for TestFsBackend {
 
             match parent {
                 ConcreteTestNode::D(_, children) | ConcreteTestNode::DH(_, _, children) => {
-                    children.push(ConcreteTestNode::D(path.name().to_string(), Vec::new()));
+                    children.insert(ConcreteTestNode::D(
+                        path.name().to_string(),
+                        SortedVec::new(),
+                    ));
 
-                    let hash = xxh3_64(
-                        &children
-                            .iter()
-                            .flat_map(|node| xxh3_64(node.name().as_bytes()).to_le_bytes())
-                            .collect::<Vec<_>>(),
-                    );
+                    let hash = xxh3_64(&[]);
 
                     Ok(DirInfo::new(
                         path.name(),
@@ -909,11 +926,13 @@ impl FSBackend for TestFsBackend {
             match parent {
                 ConcreteTestNode::D(_, children) | ConcreteTestNode::DH(_, _, children) => {
                     let init_len = children.len();
-                    *children = children
-                        .iter()
-                        .filter(|child| child.name() != path.name() || child.is_file())
-                        .cloned()
-                        .collect();
+                    *children = SortedVec::from_vec(
+                        children
+                            .iter()
+                            .filter(|child| child.name() != path.name() || child.is_file())
+                            .cloned()
+                            .collect(),
+                    );
 
                     if children.len() != init_len - 1 {
                         panic!("{path} ({} - {})", children.len(), init_len)

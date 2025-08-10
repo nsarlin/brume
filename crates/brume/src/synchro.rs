@@ -141,8 +141,18 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         &self.local
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn local_mut(&mut self) -> &mut FileSystem<LocalBackend> {
+        &mut self.local
+    }
+
     pub fn remote(&self) -> &FileSystem<RemoteBackend> {
         &self.remote
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn remote_mut(&mut self) -> &mut FileSystem<RemoteBackend> {
+        &mut self.remote
     }
 
     pub fn get_status(&self) -> FullSyncStatus {
@@ -252,16 +262,19 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         let (local_conflicts, remote_conflicts) = conflicts.split_local_remote();
         let (local_skipped, remote_skipped) = skipped.split_local_remote();
 
-        // Apply the updates
+        // Apply the updates in reverse order such that updates affecting the content of a dir
+        // happen before updates on the dir itself
         let local_futures = try_join_all(
             local_updates
                 .into_iter()
+                .rev()
                 .map(|update| self.local.concrete().apply_update(&self.remote, update)),
         );
 
         let remote_futures = try_join_all(
             remote_updates
                 .into_iter()
+                .rev()
                 .map(|update| self.remote.concrete().apply_update(&self.local, update)),
         );
 
@@ -273,23 +286,23 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         let mut local_res = Vec::new();
         let mut remote_res = Vec::new();
 
-        for applied in local_applied.into_iter().flatten() {
-            let (remote, local) = applied.into();
+        for local_applied in local_applied.into_iter().flatten() {
+            let (remote, local) = local_applied.into();
             remote_res.push(remote);
             if let Some(local) = local {
                 local_res.push(local);
             }
         }
 
-        for applied in remote_applied.into_iter().flatten() {
-            let (local, remote) = applied.into();
+        for remote_applied in remote_applied.into_iter().flatten() {
+            let (local, remote) = remote_applied.into();
             local_res.push(local);
             if let Some(remote) = remote {
                 remote_res.push(remote);
             }
         }
 
-        local_res.extend(local_conflicts.into_iter().map(VfsUpdate::Conflict));
+        local_res.extend(local_conflicts.into_iter().map(VfsUpdate::conflict));
         local_res.extend(
             local_skipped
                 .into_iter()
@@ -298,7 +311,7 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
                 .map_err(|e| (e.into(), LocalBackend::TYPE_NAME))?,
         );
 
-        remote_res.extend(remote_conflicts.into_iter().map(VfsUpdate::Conflict));
+        remote_res.extend(remote_conflicts.into_iter().map(VfsUpdate::conflict));
         remote_res.extend(
             remote_skipped
                 .into_iter()
@@ -380,6 +393,14 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
             SynchroSide::Local => self.local.vfs().find_conflict(path).cloned(),
             SynchroSide::Remote => self.remote.vfs().find_conflict(path).cloned(),
         }
+    }
+
+    /// checks if the vfs correctly match the concrete contents for both fs and any full_sync would
+    /// be a noop
+    #[cfg(test)]
+    async fn is_stable(&mut self) -> bool {
+        let (local_diff, remote_diff) = self.diff_vfs().await.unwrap();
+        local_diff.is_empty() && remote_diff.is_empty()
     }
 }
 
@@ -501,10 +522,25 @@ where
                 for to_recreate in conflict.otherside_dir_to_recreate() {
                     result.merge(self.apply_update(side.invert(), to_recreate).await?);
                 }
-                result.merge(
-                    self.apply_update(side.invert(), conflict.update().clone())
+
+                // If the conflict is with a removed node, we must re-create it
+                if let Some(otherside_conflict) =
+                    self.get_conflict_update(conflict.path(), side.invert())
+                    && otherside_conflict.update().is_removal()
+                {
+                    result.merge(
+                        self.apply_update(
+                            side.invert(),
+                            otherside_conflict.update().clone().invert(),
+                        )
                         .await?,
-                );
+                    );
+                } else {
+                    result.merge(
+                        self.apply_update(side.invert(), conflict.update().clone())
+                            .await?,
+                    );
+                }
             } else {
                 // If no conflict is found, it probably means that it has been resolved in the
                 // meantime, so we just log it
@@ -567,7 +603,7 @@ async fn apply_to_fs<TargetBackend: FSBackend, RefBackend: FSBackend>(
         // are detected on the target side. So we need to move them
         // from one fs to the other.
         if let AppliedUpdate::FailedApplication(failed_update) = update {
-            let failed = VfsUpdate::FailedApplication(failed_update);
+            let failed = VfsUpdate::failed_application(failed_update);
             ref_fs
                 .apply_update_vfs(&failed)
                 .inspect(|_| ref_updates.push(failed))
@@ -807,16 +843,25 @@ mod test {
         let reconciled = synchro.reconcile(local_diff, remote_diff).await.unwrap();
 
         let reconciled_ref = SortedVec::from([
-            ReconciledUpdate::skip_both(&VfsDiff::dir_modified(VirtualPathBuf::root())),
+            ReconciledUpdate::applicable_both(&VfsDiff::dir_modified(VirtualPathBuf::root())),
+            ReconciledUpdate::applicable_both(&VfsDiff::dir_modified(
+                VirtualPathBuf::new("/Doc").unwrap(),
+            )),
             ReconciledUpdate::skip_both(&VfsDiff::dir_created(
                 VirtualPathBuf::new("/Doc").unwrap(),
             )),
             ReconciledUpdate::conflict_both(&VfsDiff::file_created(
                 VirtualPathBuf::new("/Doc/f1.md").unwrap(),
             )),
+            ReconciledUpdate::applicable_both(&VfsDiff::dir_modified(
+                VirtualPathBuf::new("/a").unwrap(),
+            )),
             ReconciledUpdate::skip_both(&VfsDiff::dir_created(VirtualPathBuf::new("/a").unwrap())),
             ReconciledUpdate::applicable_local(&VfsDiff::file_created(
                 VirtualPathBuf::new("/a/b/test.log").unwrap(),
+            )),
+            ReconciledUpdate::applicable_both(&VfsDiff::dir_modified(
+                VirtualPathBuf::new("/e").unwrap(),
             )),
             ReconciledUpdate::skip_both(&VfsDiff::dir_created(VirtualPathBuf::new("/e").unwrap())),
             ReconciledUpdate::applicable_remote(&VfsDiff::dir_created(
@@ -850,6 +895,7 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await)
     }
 
     /// Test conflict handling in synchro
@@ -911,6 +957,7 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await);
         assert!(
             synchro
                 .local
@@ -946,6 +993,7 @@ mod test {
             FullSyncStatus::Ok
         );
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await)
     }
 
     /// Test conflict handling in synchro where a file is modified on one side and removed on the
@@ -1040,6 +1088,10 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+
+        // Because of the conflict, we need 2 full sync to reach stability
+        synchro.full_sync().await.unwrap();
+        assert!(synchro.is_stable().await);
     }
 
     /// Test conflict handling in synchro where a file is modified on one side and removed on the
@@ -1134,6 +1186,10 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+
+        // Because of the conflict, we need 2 full sync to reach stability
+        synchro.full_sync().await.unwrap();
+        assert!(synchro.is_stable().await);
     }
 
     /// Test conflict handling in synchro where a file is modified on one side and its parent is
@@ -1222,6 +1278,10 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+
+        // Because of the conflict, we need 2 full sync to reach stability
+        synchro.full_sync().await.unwrap();
+        assert!(synchro.is_stable().await);
     }
 
     /// Test conflict handling in synchro where a file is modified on one side and its parent is
@@ -1310,6 +1370,97 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+
+        // Because of the conflict, we need 2 full sync to reach stability
+        synchro.full_sync().await.unwrap();
+        assert!(synchro.is_stable().await);
+    }
+
+    /// Test a conflict between a modified directory and a removed one
+    #[tokio::test]
+    async fn test_full_sync_conflict_dir_mod() {
+        // Synchronize both fs
+        let local_base = D("", vec![]);
+        let local_fs = FileSystem::new(TestFsBackend::from(local_base.clone()));
+
+        let remote_base = D(
+            "",
+            vec![D(
+                "Doc",
+                vec![FF("f1.md", b"hello"), FF("f2.pdf", b"world")],
+            )],
+        );
+
+        let remote_fs = FileSystem::new(TestFsBackend::from(remote_base.clone()));
+
+        let mut synchro = Synchro::new(local_fs, remote_fs);
+
+        synchro.full_sync().await.unwrap().status();
+
+        // create a conflict: modify the remote and remove the local dir
+        synchro
+            .local_mut()
+            .set_backend(TestFsBackend::from(local_base));
+
+        let remote_mod = D(
+            "",
+            vec![D(
+                "Doc",
+                vec![
+                    FF("f1.md", b"hallo"),
+                    FF("f2.pdf", b"cruel"),
+                    FF("f3.doc", b"world"),
+                ],
+            )],
+        );
+        synchro
+            .remote_mut()
+            .set_backend(TestFsBackend::from(remote_mod));
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        assert!(
+            synchro
+                .local
+                .vfs()
+                .find_node("/Doc".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+        assert!(
+            synchro
+                .remote
+                .vfs()
+                .find_node("/Doc".try_into().unwrap())
+                .unwrap()
+                .state()
+                .is_conflict()
+        );
+
+        // Do a second sync to check that the conflict is not lost
+        assert_eq!(
+            synchro.full_sync().await.unwrap().status(),
+            FullSyncStatus::Conflict
+        );
+
+        // Resolve the conflict
+        assert_eq!(
+            synchro
+                .resolve_conflict("/Doc".try_into().unwrap(), SynchroSide::Remote)
+                .await
+                .unwrap()
+                .status(),
+            FullSyncStatus::Ok
+        );
+
+        assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+
+        // Because of the conflict, we need 2 full sync to reach stability
+        synchro.full_sync().await.unwrap();
+        assert!(synchro.is_stable().await);
     }
 
     // Test synchro with from scratch with a file where the concrete FS return an error
@@ -1380,6 +1531,10 @@ mod test {
 
         // Both filesystems should be perfectly in sync
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+
+        // Because of the error, we need 2 full sync to reach stability
+        synchro.full_sync().await.unwrap();
+        assert!(synchro.is_stable().await);
     }
 
     /// Test synchro with an error on a file that is only modified
@@ -1466,6 +1621,7 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await);
     }
 
     /// test with a created file in error that is then removed
@@ -1617,6 +1773,7 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await);
     }
 
     /// test with a modified file in error that is modified on the local side before the error is
@@ -1721,6 +1878,7 @@ mod test {
 
         // This should create a conflict
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await);
         assert!(
             synchro
                 .local
@@ -1781,6 +1939,7 @@ mod test {
         );
 
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await);
     }
 
     impl<LocalBackend: FSBackend + 'static, RemoteBackend: FSBackend + 'static>
@@ -1857,6 +2016,7 @@ mod test {
 
         // Everything should be ok now
         assert!(synchro.local.vfs().structural_eq(synchro.remote.vfs()));
+        assert!(synchro.is_stable().await);
 
         // Do another full_sync to validate
         let local_modif = D(
