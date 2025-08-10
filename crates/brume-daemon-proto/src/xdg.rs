@@ -126,7 +126,7 @@ mod test {
         );
         unsafe { env::set_var(DATA_DIR.additional_dirs_var, data_dirs) }
 
-        let app_data_dir = home_data_dir.into_path().join(APP_NAME);
+        let app_data_dir = home_data_dir.path().join(APP_NAME);
         create_dir(&app_data_dir).unwrap();
 
         let resolved = DATA_DIR.resolve_dir().unwrap();
@@ -154,7 +154,7 @@ mod test {
         unsafe { env::set_var(DATA_DIR.additional_dirs_var, data_dirs) }
 
         let app_data_dir = home_dir
-            .into_path()
+            .path()
             .join(DATA_DIR.base_dir_default)
             .join(APP_NAME);
         create_dir_all(&app_data_dir).unwrap();
@@ -182,7 +182,7 @@ mod test {
         );
         unsafe { env::set_var(DATA_DIR.additional_dirs_var, data_dirs) }
 
-        let app_data_dir = data_dir_1.into_path().join(APP_NAME);
+        let app_data_dir = data_dir_1.path().join(APP_NAME);
         create_dir_all(&app_data_dir).unwrap();
 
         let resolved = DATA_DIR.resolve_dir().unwrap();
@@ -208,11 +208,11 @@ mod test {
         );
         unsafe { env::set_var(DATA_DIR.additional_dirs_var, data_dirs) }
 
-        let app_data_dir_home = home_data_dir.into_path().join(APP_NAME);
+        let app_data_dir_home = home_data_dir.path().join(APP_NAME);
         create_dir_all(&app_data_dir_home).unwrap();
-        let app_data_dir_1 = data_dir_1.into_path().join(APP_NAME);
+        let app_data_dir_1 = data_dir_1.path().join(APP_NAME);
         create_dir_all(&app_data_dir_1).unwrap();
-        let app_data_dir_2 = data_dir_2.into_path().join(APP_NAME);
+        let app_data_dir_2 = data_dir_2.path().join(APP_NAME);
         create_dir_all(&app_data_dir_2).unwrap();
 
         let resolved = DATA_DIR.resolve_dir().unwrap();
