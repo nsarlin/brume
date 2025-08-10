@@ -293,6 +293,8 @@ impl Database {
     }
 
     /// Inserts a dir node at the provided path
+    ///
+    /// If a node already exists at the given path, its content is replaced
     async fn insert_dir(
         &self,
         root: &DbVfsNode,
@@ -300,11 +302,7 @@ impl Database {
         tree: &StatefulDirTree<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         if self.find_node(root, path).await.is_ok() {
-            return Err(DatabaseError::invalid_data(
-                "parent",
-                "node",
-                Some(format!("Trying to insert an already existing dir: {path}").into()),
-            ));
+            self.delete_node(root, path).await?;
         }
 
         let parent_node = path
@@ -386,6 +384,8 @@ impl Database {
     }
 
     /// Inserts a file node at the provided path
+    ///
+    /// If a node already exists at the given path, its content is replaced
     async fn insert_file(
         &self,
         root: &DbVfsNode,
@@ -393,11 +393,7 @@ impl Database {
         file: &FileState<Vec<u8>>,
     ) -> Result<(), DatabaseError> {
         if self.find_node(root, path).await.is_ok() {
-            return Err(DatabaseError::invalid_data(
-                "parent",
-                "node",
-                Some(format!("Trying to insert an already existing file: {path}").into()),
-            ));
+            self.delete_node(root, path).await?;
         }
 
         let parent_node = path
