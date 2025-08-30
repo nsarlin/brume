@@ -668,7 +668,10 @@ impl Database {
 
 #[cfg(test)]
 mod test {
-    use std::io::{self, ErrorKind};
+    use std::{
+        io::{self, ErrorKind},
+        slice,
+    };
 
     use brume::{
         concrete::{ToBytes, local::LocalDirError},
@@ -826,7 +829,7 @@ mod test {
         let vfs_node = VfsNode::try_from(&node).unwrap();
         assert!(vfs_node.state().is_err());
 
-        let conflict = VfsUpdate::conflict(VfsConflict::new(diff, &[f2_path.clone()]));
+        let conflict = VfsUpdate::conflict(VfsConflict::new(diff, slice::from_ref(&f2_path)));
         db.update_vfs(fs_ref.id(), &conflict).await.unwrap();
 
         let nodes = db.list_all_nodes().await.unwrap();

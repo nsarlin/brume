@@ -116,7 +116,7 @@ pub struct ReadOnlySynchroList {
 }
 
 impl ReadOnlySynchroList {
-    pub async fn read(&self) -> RwLockReadGuard<SynchroList> {
+    pub async fn read(&self) -> RwLockReadGuard<'_, SynchroList> {
         self.maps.read().await
     }
 
@@ -706,7 +706,7 @@ impl From<SynchroList> for ReadWriteSynchroList {
 }
 
 impl ReadWriteSynchroList {
-    pub async fn read(&self) -> RwLockReadGuard<SynchroList> {
+    pub async fn read(&self) -> RwLockReadGuard<'_, SynchroList> {
         self.maps.read().await
     }
 
