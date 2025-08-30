@@ -203,7 +203,7 @@ impl VirtualPath {
     }
 
     /// Return an iterator over the components of the path
-    pub fn iter(&self) -> VirtualPathIterator {
+    pub fn iter(&self) -> VirtualPathIterator<'_> {
         VirtualPathIterator { path: self }
     }
 }

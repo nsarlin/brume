@@ -141,7 +141,7 @@ struct DavEntity {
 impl DavEntity {
     /// Return the name of the entity, without its path. Can fail if the path is not valid for the
     /// dav folder.
-    fn name(&self) -> Result<Cow<str>, NextcloudFsError> {
+    fn name(&self) -> Result<Cow<'_, str>, NextcloudFsError> {
         self.path()
             .map(|path| path.name())
             .map_err(|e| e.into())

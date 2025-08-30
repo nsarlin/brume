@@ -180,12 +180,12 @@ impl<T: Sortable> SortedVec<T> {
     }
 
     /// Returns an iterator over T, by reference.
-    pub fn iter(&self) -> std::slice::Iter<T> {
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
 
     /// Returns an iterator over T, by mutable reference.
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<T> {
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
         self.0.iter_mut()
     }
 
