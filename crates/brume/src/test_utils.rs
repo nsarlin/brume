@@ -713,6 +713,10 @@ impl<'a> From<&'a TestFsBackend> for VfsNode<ShallowTestSyncInfo> {
     }
 }
 
+impl Named for TestFsBackend {
+    const TYPE_NAME: &'static str = "Test FileSystem";
+}
+
 impl FSBackend for TestFsBackend {
     type SyncInfo = ShallowTestSyncInfo;
 
@@ -1023,10 +1027,6 @@ impl TryFromBytes for ShallowTestSyncInfo {
             hash: u64::from_le_bytes(array),
         })
     }
-}
-
-impl Named for ShallowTestSyncInfo {
-    const TYPE_NAME: &'static str = "Test FileSystem";
 }
 
 impl IsModified for ShallowTestSyncInfo {

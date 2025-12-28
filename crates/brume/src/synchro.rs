@@ -204,7 +204,11 @@ impl<LocalBackend: FSBackend, RemoteBackend: FSBackend> Synchro<LocalBackend, Re
         };
 
         // Merge updates only looking at their content relative to the Vfs
-        let merged = local_updates.merge_updates(remote_updates, local_vfs, remote_vfs)?;
+        let merged = local_updates.merge_updates::<LocalBackend, RemoteBackend>(
+            remote_updates,
+            local_vfs,
+            remote_vfs,
+        )?;
 
         // Check with concrete backend if the file differ, if duplicates are to be removed or if
         // they are conflicts

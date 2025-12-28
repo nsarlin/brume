@@ -103,6 +103,10 @@ impl Nextcloud {
     }
 }
 
+impl Named for Nextcloud {
+    const TYPE_NAME: &'static str = "Nextcloud";
+}
+
 impl FSBackend for Nextcloud {
     type SyncInfo = NextcloudSyncInfo;
 
@@ -243,10 +247,6 @@ impl NextcloudSyncInfo {
     pub fn new(tag: u128) -> Self {
         Self { tag }
     }
-}
-
-impl Named for NextcloudSyncInfo {
-    const TYPE_NAME: &'static str = "Nextcloud";
 }
 
 impl IsModified for NextcloudSyncInfo {
