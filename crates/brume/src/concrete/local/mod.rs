@@ -120,6 +120,10 @@ impl LocalDir {
     }
 }
 
+impl Named for LocalDir {
+    const TYPE_NAME: &'static str = "local FileSystem";
+}
+
 impl FSBackend for LocalDir {
     type SyncInfo = LocalSyncInfo;
 
@@ -356,10 +360,6 @@ impl IsModified for LocalSyncInfo {
             ModificationState::ShallowUnmodified
         }
     }
-}
-
-impl Named for LocalSyncInfo {
-    const TYPE_NAME: &'static str = "local FileSystem";
 }
 
 impl<'a> From<&'a LocalSyncInfo> for LocalSyncInfo {
