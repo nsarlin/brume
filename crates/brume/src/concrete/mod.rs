@@ -147,7 +147,7 @@ pub trait FSBackend:
     Named + TryFrom<Self::CreationInfo, Error = <Self as FSBackend>::IoError> + Send + Sync
 {
     /// Type used to detect updates on nodes of this filesystem. See [`IsModified`].
-    type SyncInfo: IsModified + Debug + Named + Clone + Send + Sync;
+    type SyncInfo: IsModified + Debug + Clone + Send + Sync;
     /// Errors returned by this FileSystem type
     type IoError: Error + Send + Sync + 'static + Into<FsBackendError>;
     /// Info needed to create a new filesystem of this type (url, login,...)
@@ -218,10 +218,6 @@ pub trait FSBackend:
 
     /// Removes a directory on the concrete filesystem
     fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>>;
-}
-
-impl<T: FSBackend> Named for T {
-    const TYPE_NAME: &'static str = T::SyncInfo::TYPE_NAME;
 }
 
 /// Return value of a successful [`ConcreteFS::clone_file`].

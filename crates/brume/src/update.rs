@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, NameMismatchError,
-    concrete::{ConcreteFileCloneResult, FsBackendError, Named, ToBytes},
+    concrete::{ConcreteFileCloneResult, FSBackend, FsBackendError, ToBytes},
     sorted_vec::{Sortable, SortedVec},
     vfs::{
         DeleteNodeError, DirInfo, FileInfo, InvalidPathError, NodeState, StatefulDirTree, Vfs,
@@ -278,11 +278,11 @@ impl VfsDiff {
     /// This step is performed without access to the concrete filesystems. This means that only
     /// obvious conflicts are detected. Files that are modified on both fs will be flagged as
     /// `NeedBackendCheck` so they can be resolved later with concrete fs access.
-    fn merge<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
+    fn merge<LocalBackend: FSBackend, RemoteBackend: FSBackend>(
         &self,
         remote_update: &VfsDiff,
-        vfs_local: &Vfs<LocalSyncInfo>,
-        vfs_remote: &Vfs<RemoteSyncInfo>,
+        vfs_local: &Vfs<LocalBackend::SyncInfo>,
+        vfs_remote: &Vfs<RemoteBackend::SyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
         if self.path() != remote_update.path() {
             return Err(NameMismatchError {
@@ -301,10 +301,10 @@ impl VfsDiff {
                 // nodes.
                 let dir_local = vfs_local
                     .find_dir(&self.path)
-                    .map_err(|e| ReconciliationError::invalid_path(LocalSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(LocalBackend::TYPE_NAME, e))?;
                 let dir_remote = vfs_remote
                     .find_dir(&remote_update.path)
-                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(RemoteBackend::TYPE_NAME, e))?;
 
                 let self_update = VirtualReconciledUpdate::skip_both(self);
 
@@ -330,10 +330,10 @@ impl VfsDiff {
             | (UpdateKind::FileCreated, UpdateKind::FileCreated) => {
                 let file_local = vfs_local
                     .find_file(&self.path)
-                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(LocalBackend::TYPE_NAME, e))?;
                 let file_remote = vfs_remote
                     .find_file(&remote_update.path)
-                    .map_err(|e| ReconciliationError::invalid_path(RemoteSyncInfo::TYPE_NAME, e))?;
+                    .map_err(|e| ReconciliationError::invalid_path(RemoteBackend::TYPE_NAME, e))?;
 
                 let update = if file_local.size() == file_remote.size() {
                     VirtualReconciledUpdate::backend_check_both(self)
@@ -413,11 +413,11 @@ pub type VfsDiffList = SortedVec<VfsDiff>;
 impl VfsDiffList {
     /// Merge two update lists by calling [`VfsDiff::merge`] on their elements one by
     /// one
-    pub(crate) fn merge_updates<LocalSyncInfo: Named, RemoteSyncInfo: Named>(
+    pub(crate) fn merge_updates<LocalBackend: FSBackend, RemoteBackend: FSBackend>(
         &self,
         remote_updates: VfsDiffList,
-        local_vfs: &Vfs<LocalSyncInfo>,
-        remote_vfs: &Vfs<RemoteSyncInfo>,
+        local_vfs: &Vfs<LocalBackend::SyncInfo>,
+        remote_vfs: &Vfs<RemoteBackend::SyncInfo>,
     ) -> Result<SortedVec<VirtualReconciledUpdate>, ReconciliationError> {
         let res = self
             .iter_zip_map(
@@ -427,7 +427,13 @@ impl VfsDiffList {
                         VirtualReconciledUpdate::applicable_remote(local_item),
                     ]))
                 },
-                |local_item, remote_item| local_item.merge(remote_item, local_vfs, remote_vfs),
+                |local_item, remote_item| {
+                    local_item.merge::<LocalBackend, RemoteBackend>(
+                        remote_item,
+                        local_vfs,
+                        remote_vfs,
+                    )
+                },
                 |remote_item| {
                     Ok(SortedVec::from_vec(vec![
                         VirtualReconciledUpdate::applicable_local(remote_item),
