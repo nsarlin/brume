@@ -253,6 +253,7 @@ mod test {
             quota_used_bytes: Some(39044475),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fe2a304\"),
+            address_book: false,
         ),
     ),
     Folder(
@@ -262,6 +263,7 @@ mod test {
             quota_used_bytes: Some(1108865),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fd36676\"),
+            address_book: false,
         ),
     ),
     File(
@@ -289,6 +291,7 @@ mod test {
             quota_used_bytes: Some(1108865),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fd36676\"),
+            address_book: false,
         ),
     ),
     Folder(
@@ -298,6 +301,7 @@ mod test {
             quota_used_bytes: Some(1108865),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fd36676\"),
+            address_book: false,
         ),
     ),
     Folder(
@@ -307,6 +311,7 @@ mod test {
             quota_used_bytes: Some(1108865),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fd36676\"),
+            address_book: false,
         ),
     ),
 ]";
@@ -328,6 +333,7 @@ mod test {
             quota_used_bytes: Some(39044475),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fe2a304\"),
+            address_book: false,
         ),
     ),
     Folder(
@@ -337,6 +343,7 @@ mod test {
             quota_used_bytes: Some(1108865),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fd36676\"),
+            address_book: false,
         ),
     ),
 ]
@@ -354,6 +361,7 @@ mod test {
             quota_used_bytes: Some(39044475),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fe2a304\"),
+            address_book: false,
         ),
     ),
     Folder(
@@ -363,6 +371,7 @@ mod test {
             quota_used_bytes: Some(1108865),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fd36676\"),
+            address_book: false,
         ),
     ),
     File(
@@ -389,6 +398,7 @@ mod test {
             quota_used_bytes: Some(39044475),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fe2a304\"),
+            address_book: false,
         ),
     ),
     Folder(
@@ -398,6 +408,7 @@ mod test {
             quota_used_bytes: Some(1108865),
             quota_available_bytes: Some(-3),
             tag: Some(\"66f345fd36676\"),
+            address_book: false,
         ),
     ),
     File(

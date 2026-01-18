@@ -13,10 +13,10 @@ documentation.workspace = true
 keywords.workspace = true
 
 [dependencies]
-tarpc = { version = "0.35", features = ["serde-transport-bincode"] }
+tarpc = { version = "0.37", features = ["serde-transport-bincode"] }
 serde = "1.0"
 uuid = { version = "1.11", features = ["v4", "serde"] }
-toml = "0.8"
+toml = "0.9"
 thiserror = { version = "2.0" }
 
 brume = { version = "0.1.0", path = "../brume" }
