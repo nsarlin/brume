@@ -46,7 +46,7 @@ async fn main() {
     // Start daemon
     let sock_name = get_random_sock_name();
     info!("using sock name {sock_name}");
-    let sync_interval = Duration::from_secs(2);
+    let sync_interval = Duration::from_secs(3);
     let config = DaemonConfig::default()
         .with_sync_interval(sync_interval)
         .with_error_mode(ErrorMode::Exit)
