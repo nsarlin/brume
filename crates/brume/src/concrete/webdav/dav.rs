@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-use super::{NC_DAV_PATH_STR, NextcloudFsError, NextcloudSyncInfo};
+use super::{WebDavError, WebDavSyncInfo};
 
 /// Error encountered when parsing a tag in the WebDAV response
 #[derive(Error, Debug)]
@@ -40,18 +40,18 @@ impl Sortable for ListEntity {
 /// valid tree structure.
 pub(crate) fn dav_parse_vfs(
     entities: Vec<ListEntity>,
-    folder_name: &str,
-) -> Result<VfsNode<NextcloudSyncInfo>, NextcloudFsError> {
+    dav_path: &VirtualPath,
+) -> Result<VfsNode<WebDavSyncInfo>, WebDavError> {
     let entities = SortedVec::from_vec(entities);
 
     let mut entities_iter = entities.into_iter().map(|entity| DavEntity {
         entity,
-        folder_name: folder_name.to_string(),
+        dav_path: dav_path.to_owned(),
     });
 
-    let root_entity = entities_iter.next().ok_or(NextcloudFsError::BadStructure)?;
+    let root_entity = entities_iter.next().ok_or(WebDavError::BadStructure)?;
     if !root_entity.name()?.is_empty() {
-        return Err(NextcloudFsError::BadStructure);
+        return Err(WebDavError::BadStructure);
     }
 
     let empty_root_node = root_entity.try_into()?;
@@ -66,13 +66,13 @@ pub(crate) fn dav_parse_vfs(
 
 pub(crate) fn dav_parse_entity_meta(
     entity: ListEntity,
-) -> Result<NodeInfo<NextcloudSyncInfo>, NextcloudFsError> {
+) -> Result<NodeInfo<WebDavSyncInfo>, WebDavError> {
     let entity = DavEntity {
         entity,
-        folder_name: String::new(),
+        dav_path: VirtualPathBuf::root(),
     };
 
-    let sync_info = entity.tag().map(NextcloudSyncInfo::new)?;
+    let sync_info = entity.tag().map(WebDavSyncInfo::new)?;
 
     match &entity.entity {
         ListEntity::File(list_file) => Ok(NodeInfo::File(FileInfo::new(
@@ -93,11 +93,11 @@ pub(crate) fn dav_parse_entity_meta(
 /// this list have already been sorted in a way that a directory is directly followed by its
 /// children.
 fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
-    root: DirTree<NextcloudSyncInfo>,
+    root: DirTree<WebDavSyncInfo>,
     entities: &mut I,
-) -> Result<DirTree<NextcloudSyncInfo>, NextcloudFsError> {
+) -> Result<DirTree<WebDavSyncInfo>, WebDavError> {
     // This is used to store the currently worked on stack of directories
-    let mut dirs: Vec<DirTree<NextcloudSyncInfo>> = Vec::with_capacity(entities.len());
+    let mut dirs: Vec<DirTree<WebDavSyncInfo>> = Vec::with_capacity(entities.len());
     let mut current_dir = root;
 
     for entity in entities {
@@ -109,7 +109,7 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
                 parent.insert_child(VfsNode::Dir(current_dir));
                 current_dir = parent;
             } else {
-                return Err(NextcloudFsError::BadStructure);
+                return Err(WebDavError::BadStructure);
             }
         }
 
@@ -135,13 +135,13 @@ fn dav_build_tree<I: ExactSizeIterator<Item = DavEntity>>(
 /// A single Entity in the dav response, representing a File or a Directory
 struct DavEntity {
     entity: ListEntity,
-    folder_name: String,
+    dav_path: VirtualPathBuf,
 }
 
 impl DavEntity {
     /// Return the name of the entity, without its path. Can fail if the path is not valid for the
     /// dav folder.
-    fn name(&self) -> Result<Cow<'_, str>, NextcloudFsError> {
+    fn name(&self) -> Result<Cow<'_, str>, WebDavError> {
         self.path()
             .map(|path| path.name())
             .map_err(|e| e.into())
@@ -163,11 +163,8 @@ impl DavEntity {
     /// name of the folder.
     fn path(&self) -> Result<&VirtualPath, VirtualPathError> {
         let dav_path: &VirtualPath = self.href().try_into()?;
-        // Ok to unwrap because NC_DAV_PATH is known to be valid
-        let mut path_to_folder = VirtualPathBuf::new(NC_DAV_PATH_STR).unwrap();
-        path_to_folder.push(&self.folder_name);
 
-        dav_path.chroot(&path_to_folder)
+        dav_path.chroot(&self.dav_path)
     }
 
     fn tag(&self) -> Result<u128, TagError> {
@@ -189,14 +186,14 @@ impl DavEntity {
     }
 }
 
-impl TryFrom<DavEntity> for VfsNode<NextcloudSyncInfo> {
-    type Error = NextcloudFsError;
+impl TryFrom<DavEntity> for VfsNode<WebDavSyncInfo> {
+    type Error = WebDavError;
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
         let name = value.name()?;
         let tag = value.tag()?;
 
-        let sync = NextcloudSyncInfo::new(tag);
+        let sync = WebDavSyncInfo::new(tag);
 
         match &value.entity {
             ListEntity::File(file) => Ok(VfsNode::File(FileInfo::new(
@@ -231,6 +228,8 @@ fn dav_entity_href(entity: &ListEntity) -> &str {
 mod test {
     use reqwest_dav::list_cmd::ListEntity;
 
+    use crate::vfs::VirtualPath;
+
     use super::dav_parse_vfs;
 
     #[test]
@@ -244,6 +243,8 @@ mod test {
             ],
         )
         .into_node();
+
+        let dav_path: &VirtualPath = "/remote.php/dav/files/admin/".try_into().unwrap();
 
         let dav_folder = "[
     Folder(
@@ -318,13 +319,15 @@ mod test {
 
         let elements: Vec<ListEntity> = ron::from_str(dav_folder).unwrap();
 
-        let res = dav_parse_vfs(elements, "admin").unwrap().as_ok();
+        let res = dav_parse_vfs(elements, dav_path).unwrap().as_ok();
 
         assert!(res.structural_eq(&reference))
     }
 
     #[test]
     fn test_invalid_tree() {
+        let dav_path: &VirtualPath = "/remote.php/dav/files/admin/".try_into().unwrap();
+
         let no_root = "[
     Folder(
         ListFolder (
@@ -351,7 +354,7 @@ mod test {
 
         let elements: Vec<ListEntity> = ron::from_str(no_root).unwrap();
 
-        assert!(dav_parse_vfs(elements, "admin").is_err());
+        assert!(dav_parse_vfs(elements, dav_path).is_err());
 
         let bad_hierarchy = "[
     Folder(
@@ -388,7 +391,7 @@ mod test {
 
         let elements: Vec<ListEntity> = ron::from_str(bad_hierarchy).unwrap();
 
-        assert!(dav_parse_vfs(elements, "admin").is_err());
+        assert!(dav_parse_vfs(elements, dav_path).is_err());
 
         let bad_root = "[
     Folder(
@@ -425,6 +428,6 @@ mod test {
 
         let elements: Vec<ListEntity> = ron::from_str(bad_root).unwrap();
 
-        assert!(dav_parse_vfs(elements, "admin").is_err());
+        assert!(dav_parse_vfs(elements, dav_path).is_err());
     }
 }
