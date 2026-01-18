@@ -2,6 +2,7 @@
 
 pub mod local;
 pub mod nextcloud;
+pub mod webdav;
 
 use std::error::Error;
 use std::fmt::{Debug, Display};

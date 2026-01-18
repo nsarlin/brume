@@ -1,105 +1,36 @@
 //! Manipulation of a Nextcloud filesystem with WebDAV
 
-use std::{
-    error::Error,
-    fmt::{Display, Formatter},
-    io::{self},
-    string::FromUtf8Error,
-    sync::Arc,
-};
+use std::fmt::{Display, Formatter};
 
 use bytes::Bytes;
-use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture};
-use reqwest::Body;
-use reqwest_dav::{Auth, Client, ClientBuilder, Depth};
+use futures::{Stream, TryStream, future::BoxFuture};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
-mod dav;
 
 use crate::{
     update::{IsModified, ModificationState},
-    vfs::{DirInfo, FileInfo, NodeInfo, Vfs, VirtualPath, VirtualPathError},
+    vfs::{DirInfo, FileInfo, NodeInfo, Vfs, VirtualPath},
 };
 
-use dav::{TagError, dav_parse_entity_meta, dav_parse_vfs};
-
 use super::{
-    FSBackend, FsBackendError, FsInstanceDescription, InvalidBytesSyncInfo, Named, ToBytes,
-    TryFromBytes,
+    FSBackend, FsInstanceDescription, InvalidBytesSyncInfo, Named, ToBytes, TryFromBytes,
+    webdav::{WebDav, WebDavError, WebDavFsCreationInfo, WebDavFsDescription, WebDavSyncInfo},
 };
 
 const NC_DAV_PATH_STR: &str = "/remote.php/dav/files/";
 
-/// An error during synchronisation with the nextcloud file system
-#[derive(Error, Debug)]
-pub enum NextcloudFsError {
-    #[error("a path provided by the server is invalid")]
-    InvalidPath(#[from] VirtualPathError),
-    #[error("a tag provided by the server is invalid")]
-    InvalidTag(#[from] TagError),
-    #[error("the structure of the nextcloud FS is not valid")]
-    BadStructure,
-    #[error("failed to decode server provided url")]
-    UrlDecode(#[from] FromUtf8Error),
-    #[error("a dav protocol error occurred during communication with the nextcloud server")]
-    ProtocolError(#[from] reqwest_dav::Error),
-    #[error("io error while sending or receiving a file")]
-    IoError(#[from] io::Error),
-}
-
-impl NextcloudFsError {
-    /// Return the inner error message in case of protocol error
-    pub fn protocol_error_message(&self) -> Option<String> {
-        match self {
-            NextcloudFsError::ProtocolError(reqwest_dav::Error::Reqwest(error)) => {
-                if let Some(source) = error.source() {
-                    if let Some(source2) = source.source() {
-                        Some(source2.to_string())
-                    } else {
-                        Some(source.to_string())
-                    }
-                } else {
-                    Some(error.to_string())
-                }
-            }
-            _ => None,
-        }
-    }
-}
-
-impl From<reqwest::Error> for NextcloudFsError {
-    fn from(value: reqwest::Error) -> Self {
-        Self::ProtocolError(value.into())
-    }
-}
-
-impl From<NextcloudFsError> for FsBackendError {
-    fn from(value: NextcloudFsError) -> Self {
-        Self(Arc::new(value))
-    }
-}
-
 /// The nextcloud FileSystem, accessed with the dav protocol
 #[derive(Debug)]
 pub struct Nextcloud {
-    client: Client,
-    name: String,
+    dav: WebDav,
 }
 
 impl Nextcloud {
     // TODO: handle folders that are not the user root folder
-    pub fn new(url: &str, login: &str, password: &str) -> Result<Self, NextcloudFsError> {
-        let name = login.to_string();
-        let client = ClientBuilder::new()
-            .set_host(format!("{}{}{}/", url, NC_DAV_PATH_STR, &name))
-            .set_auth(Auth::Basic(login.to_string(), password.to_string()))
-            .build()?;
+    pub fn new(url: &str, login: &str, password: &str) -> Result<Self, WebDavError> {
+        let dav_url = format!("{}{}", url, NC_DAV_PATH_STR);
+        let dav = WebDav::new(&dav_url, login, password)?;
 
-        Ok(Self {
-            client,
-            name: name.to_string(),
-        })
+        Ok(Self { dav })
     }
 }
 
@@ -108,9 +39,9 @@ impl Named for Nextcloud {
 }
 
 impl FSBackend for Nextcloud {
-    type SyncInfo = NextcloudSyncInfo;
+    type SyncInfo = WebDavSyncInfo;
 
-    type IoError = NextcloudFsError;
+    type IoError = WebDavError;
 
     type CreationInfo = NextcloudFsCreationInfo;
 
@@ -118,51 +49,25 @@ impl FSBackend for Nextcloud {
 
     fn validate(info: &Self::CreationInfo) -> BoxFuture<'_, Result<(), Self::IoError>> {
         Box::pin(async {
-            // Try to create a nextcloud client instance and access the remote url
-            let nextcloud: Self = info.clone().try_into()?;
-            nextcloud
-                .client
-                .list("", Depth::Number(0))
-                .await
-                .map(|_| ())
-                .map_err(|e| e.into())
+            let dav_info = WebDavFsCreationInfo::from(info.clone());
+            WebDav::validate(&dav_info).await
         })
     }
 
     fn description(&self) -> Self::Description {
-        NextcloudFsDescription {
-            server_url: self
-                .client
-                .host
-                .trim_end_matches('/')
-                .trim_end_matches(&self.name)
-                .trim_end_matches(&NC_DAV_PATH_STR)
-                .to_string(),
-            name: self.name.clone(),
-        }
+        let dav_description = self.dav.description();
+        dav_description.into()
     }
 
     fn get_node_info<'a>(
         &'a self,
         path: &'a VirtualPath,
     ) -> BoxFuture<'a, Result<NodeInfo<Self::SyncInfo>, Self::IoError>> {
-        Box::pin(async {
-            let elements = self.client.list(path.into(), Depth::Number(0)).await?;
-
-            let elem = elements.first().ok_or(NextcloudFsError::BadStructure)?;
-
-            dav_parse_entity_meta(elem.clone())
-        })
+        self.dav.get_node_info(path)
     }
 
     fn load_virtual(&self) -> BoxFuture<'_, Result<Vfs<Self::SyncInfo>, Self::IoError>> {
-        Box::pin(async {
-            let elements = self.client.list("", Depth::Infinity).await?;
-
-            let vfs_root = dav_parse_vfs(elements, &self.name)?;
-
-            Ok(Vfs::new(vfs_root))
-        })
+        self.dav.load_virtual()
     }
 
     fn read_file<'a>(
@@ -172,17 +77,10 @@ impl FSBackend for Nextcloud {
         'a,
         Result<impl Stream<Item = Result<Bytes, Self::IoError>> + 'static, Self::IoError>,
     > {
-        Box::pin(async {
-            Ok(self
-                .client
-                .get(path.into())
-                .await?
-                .bytes_stream()
-                .map_err(|e| e.into()))
-        })
+        self.dav.read_file(path)
     }
 
-    fn write_file<'a, Data: TryStream + Send + 'static>(
+    fn write_file<'a, Data: TryStream + Send + Unpin + 'static>(
         &'a self,
         path: &'a VirtualPath,
         data: Data,
@@ -191,44 +89,22 @@ impl FSBackend for Nextcloud {
         Data::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<Data::Ok>,
     {
-        Box::pin(async {
-            let body = Body::wrap_stream(data);
-
-            self.client.put(path.into(), body).await?;
-
-            // Extract the tag of the created file
-            let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
-            entities
-                .pop()
-                .ok_or(NextcloudFsError::BadStructure)
-                .and_then(dav_parse_entity_meta)
-                .and_then(|info| info.into_file_info().ok_or(NextcloudFsError::BadStructure))
-        })
+        self.dav.write_file(path, data)
     }
 
     fn rm<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
-        Box::pin(async { self.client.delete(path.into()).await.map_err(|e| e.into()) })
+        self.dav.rm(path)
     }
 
     fn mkdir<'a>(
         &'a self,
         path: &'a VirtualPath,
     ) -> BoxFuture<'a, Result<DirInfo<Self::SyncInfo>, Self::IoError>> {
-        Box::pin(async {
-            self.client.mkcol(path.into()).await?;
-
-            // Extract the tag of the created dir
-            let mut entities = self.client.list(path.into(), Depth::Number(0)).await?;
-            entities
-                .pop()
-                .ok_or(NextcloudFsError::BadStructure)
-                .and_then(dav_parse_entity_meta)
-                .and_then(|info| info.into_dir_info().ok_or(NextcloudFsError::BadStructure))
-        })
+        self.dav.mkdir(path)
     }
 
     fn rmdir<'a>(&'a self, path: &'a VirtualPath) -> BoxFuture<'a, Result<(), Self::IoError>> {
-        Box::pin(async { self.client.delete(path.into()).await.map_err(|e| e.into()) })
+        self.dav.rmdir(path)
     }
 }
 
@@ -297,6 +173,15 @@ impl FsInstanceDescription for NextcloudFsDescription {
     }
 }
 
+impl From<WebDavFsDescription> for NextcloudFsDescription {
+    fn from(value: WebDavFsDescription) -> Self {
+        Self {
+            server_url: value.server_url().to_string(),
+            name: value.name().to_string(),
+        }
+    }
+}
+
 impl Display for NextcloudFsDescription {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "url: {}, folder: {}", self.server_url, self.name)
@@ -327,6 +212,13 @@ impl From<NextcloudFsCreationInfo> for NextcloudFsDescription {
             server_url: value.server_url,
             name: value.login,
         }
+    }
+}
+
+impl From<NextcloudFsCreationInfo> for WebDavFsCreationInfo {
+    fn from(value: NextcloudFsCreationInfo) -> Self {
+        let dav_url = format!("{}{}", value.server_url, NC_DAV_PATH_STR);
+        Self::new(&dav_url, &value.login, &value.password)
     }
 }
 
