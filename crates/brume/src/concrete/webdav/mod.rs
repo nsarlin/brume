@@ -1,4 +1,4 @@
-//! Manipulation of a Nextcloud filesystem with WebDAV
+//! A backend for filesystems accessed using webdav
 
 use std::{
     error::Error,
@@ -29,7 +29,7 @@ use super::{
     TryFromBytes,
 };
 
-/// An error during synchronisation with the nextcloud file system
+/// An error during synchronisation with the webdav file system
 #[derive(Error, Debug)]
 pub enum WebDavError {
     #[error("user provided webdav config is invalid")]
