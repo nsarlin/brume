@@ -25,9 +25,9 @@ pub struct Nextcloud {
 }
 
 impl Nextcloud {
-    // TODO: handle folders that are not the user root folder
     pub fn new(url: &str, login: &str, password: &str) -> Result<Self, WebDavError> {
-        let dav_url = format!("{}{}", url, NC_DAV_PATH_STR);
+        // TODO: handle folders that are not the user root folder
+        let dav_url = format!("{}{}{}", url, NC_DAV_PATH_STR, login);
         let dav = WebDav::new(&dav_url, login, password)?;
 
         Ok(Self { dav })

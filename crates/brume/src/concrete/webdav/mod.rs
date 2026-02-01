@@ -102,21 +102,21 @@ pub struct WebDav {
 }
 
 impl WebDav {
-    // TODO: handle folders that are not the user root folder
+    // TODO: handle folders that are not the root folder
     pub fn new(url: &str, login: &str, password: &str) -> Result<Self, WebDavError> {
         let name = login.to_string();
         let url = Url::parse(url).map_err(WebDavConfigError::from)?;
-        let full_url = url.join(&name).map_err(WebDavConfigError::from)?;
-        let path_to_dav = VirtualPathBuf::new(full_url.path()).map_err(WebDavConfigError::from)?;
-        let host = full_url
+
+        let path_to_dav = VirtualPathBuf::new(url.path()).map_err(WebDavConfigError::from)?;
+        let host = url
             .host_str()
             .ok_or(WebDavConfigError::InvalidUrlScheme(
-                full_url.scheme().to_string(),
+                url.scheme().to_string(),
             ))?
             .to_string();
 
         let client = ClientBuilder::new()
-            .set_host(full_url.to_string())
+            .set_host(url.to_string())
             // TODO: handle different auth types
             .set_auth(Auth::Basic(login.to_string(), password.to_string()))
             .build()?;
