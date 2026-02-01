@@ -1,10 +1,11 @@
 use std::{process::exit, sync::Arc, time::Duration};
 
-use brume::{concrete::local::LocalDir, filesystem::FileSystem};
-
-use brume_daemon_proto::{
-    AnyFsCreationInfo, LocalDirCreationInfo, NextcloudFsCreationInfo, config::ErrorMode,
+use brume::{
+    concrete::{local::LocalDir, webdav::WebDavFsCreationInfo},
+    filesystem::FileSystem,
 };
+
+use brume_daemon_proto::{AnyFsCreationInfo, LocalDirCreationInfo, config::ErrorMode};
 
 use brume_daemon::{
     daemon::{Daemon, DaemonConfig},
@@ -19,7 +20,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 mod utils;
 
 use utils::{
-    connect_to_daemon, get_random_port, get_random_sock_name, start_nextcloud, stop_container,
+    connect_to_daemon, get_random_port, get_random_sock_name, start_webdav, stop_container,
     wait_full_sync,
 };
 
@@ -64,22 +65,19 @@ async fn main() {
     info!("dir_a: {:?}", dir_a.path());
     info!("dir_b: {:?}", dir_b.path());
 
-    // Create a nextcloud server
-    let nextcloud_port = get_random_port();
-    let nextcloud_url = format!("http://localhost:{nextcloud_port}");
-    info!("nextcloud url: {}", &nextcloud_url);
+    // Create a webdav server
+    let webdav_port = get_random_port();
+    let webdav_url = format!("http://localhost:{webdav_port}");
+    info!("webdav url: {}", &webdav_url);
 
-    // Start nextcloud container
-    let container = start_nextcloud(nextcloud_port, &nextcloud_url).await;
+    // Start webdav container
+    let container = start_webdav(webdav_port, &webdav_url).await;
     info!("container started: {}", container.id());
 
     // Initiate the first synchro
     let local_a = AnyFsCreationInfo::LocalDir(LocalDirCreationInfo::new(dir_a.path()));
-    let remote = AnyFsCreationInfo::Nextcloud(NextcloudFsCreationInfo::new(
-        &nextcloud_url,
-        "admin",
-        "admin",
-    ));
+    let remote =
+        AnyFsCreationInfo::WebDav(WebDavFsCreationInfo::new(&webdav_url, "admin", "admin"));
 
     let rpc = connect_to_daemon(&sock_name).await.unwrap();
 

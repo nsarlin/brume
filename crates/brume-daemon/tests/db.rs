@@ -17,7 +17,7 @@ use tracing_subscriber::FmtSubscriber;
 mod utils;
 
 use utils::{
-    connect_to_daemon, get_random_port, get_random_sock_name, start_nextcloud, stop_nextcloud,
+    connect_to_daemon, get_random_port, get_random_sock_name, start_nextcloud, stop_container,
     wait_full_sync,
 };
 
@@ -79,7 +79,7 @@ async fn main() {
     wait_full_sync(sync_interval, &rpc).await;
 
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
+        stop_container(container).await;
         exit(1)
     }
 
@@ -122,7 +122,7 @@ async fn main() {
 
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
+        stop_container(container).await;
         exit(1)
     }
 
@@ -152,7 +152,7 @@ async fn main() {
 
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
+        stop_container(container).await;
         exit(1)
     }
 
@@ -164,7 +164,7 @@ async fn main() {
 
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
+        stop_container(container).await;
         exit(1)
     }
 
@@ -185,7 +185,7 @@ async fn main() {
 
     wait_full_sync(sync_interval, &rpc).await;
     if !daemon.is_running() {
-        stop_nextcloud(container).await;
+        stop_container(container).await;
         exit(1)
     }
 

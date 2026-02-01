@@ -9,9 +9,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{Stream, TryStream, TryStreamExt, future::BoxFuture};
+use futures::{future::BoxFuture, Stream, TryStream, TryStreamExt};
 use reqwest::{Body, Url};
-use reqwest_dav::{Auth, Client, ClientBuilder, Depth, re_exports::url::ParseError};
+use reqwest_dav::{re_exports::url::ParseError, Auth, Client, ClientBuilder, Depth};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -137,6 +137,8 @@ impl WebDav {
 impl Named for WebDav {
     const TYPE_NAME: &'static str = "WebDAV";
 }
+
+// TODO: Depth::Infinity is not always supported
 
 impl FSBackend for WebDav {
     type SyncInfo = WebDavSyncInfo;

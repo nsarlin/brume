@@ -69,7 +69,23 @@ pub async fn start_nextcloud(exposed_port: u16, url: &str) -> ContainerAsync<Gen
         .expect("Failed to start Nextcloud server")
 }
 
-pub async fn stop_nextcloud(container: ContainerAsync<GenericImage>) {
+pub async fn start_webdav(exposed_port: u16, url: &str) -> ContainerAsync<GenericImage> {
+    GenericImage::new("bytemark/webdav", "2.4")
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new(url)
+                .with_port(80.tcp())
+                .with_expected_status_code(401u16),
+        ))
+        .with_env_var("AUTH_TYPE", "Basic") // TODO: test Digest
+        .with_env_var("USERNAME", "admin")
+        .with_env_var("PASSWORD", "admin")
+        .with_mapped_port(exposed_port, 80.tcp())
+        .start()
+        .await
+        .expect("Failed to start WebDav server")
+}
+
+pub async fn stop_container(container: ContainerAsync<GenericImage>) {
     container.stop().await.unwrap();
     container.rm().await.unwrap();
 }

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, thread::sleep, time::Duration};
 
 use brume::{
-    concrete::{FsBackendError, local::LocalDir, nextcloud::Nextcloud},
+    concrete::{FsBackendError, local::LocalDir, nextcloud::Nextcloud, webdav::WebDav},
     filesystem::FileSystem,
     synchro::{FullSyncResult, FullSyncStatus, Synchro, SynchroSide, Synchronized},
     vfs::{StatefulVfs, VirtualPath},
@@ -212,7 +212,7 @@ impl NamedSynchroCreationInfo {
         }
     }
 
-    generate_synchro_constructor!([LocalDir, Nextcloud]);
+    generate_synchro_constructor!([LocalDir, Nextcloud, WebDav]);
 
     pub fn name(&self) -> &str {
         &self.name
