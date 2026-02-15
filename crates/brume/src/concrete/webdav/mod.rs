@@ -22,7 +22,7 @@ use crate::{
     vfs::{DirInfo, FileInfo, NodeInfo, Vfs, VirtualPath, VirtualPathBuf, VirtualPathError},
 };
 
-use dav::{TagError, dav_parse_entity_meta, dav_parse_vfs};
+use dav::{dav_parse_entity_meta, dav_parse_vfs};
 
 use super::{
     FSBackend, FsBackendError, FsInstanceDescription, InvalidBytesSyncInfo, Named, ToBytes,
@@ -36,8 +36,8 @@ pub enum WebDavError {
     ConfigError(#[from] WebDavConfigError),
     #[error("a path provided by the server is invalid")]
     InvalidPath(#[from] VirtualPathError),
-    #[error("a tag provided by the server is invalid")]
-    InvalidTag(#[from] TagError),
+    #[error("missing tag in the server's response")]
+    MissingTag,
     #[error("the structure of the webdav FS is not valid")]
     BadStructure,
     #[error("failed to decode server provided url")]
@@ -268,11 +268,11 @@ impl FSBackend for WebDav {
 // TODO: handle servers that do not support etag
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebDavSyncInfo {
-    tag: u128,
+    tag: Vec<u8>,
 }
 
 impl WebDavSyncInfo {
-    pub fn new(tag: u128) -> Self {
+    pub fn new(tag: Vec<u8>) -> Self {
         Self { tag }
     }
 }
@@ -299,16 +299,13 @@ impl<'a> From<&'a WebDavSyncInfo> for () {
 
 impl ToBytes for WebDavSyncInfo {
     fn to_bytes(&self) -> Vec<u8> {
-        self.tag.to_le_bytes().to_vec()
+        self.tag.to_vec()
     }
 }
 
 impl TryFromBytes for WebDavSyncInfo {
     fn try_from_bytes(bytes: Vec<u8>) -> Result<Self, InvalidBytesSyncInfo> {
-        let byte_array: [u8; 16] = bytes.try_into().map_err(|_| InvalidBytesSyncInfo)?;
-        let tag = u128::from_le_bytes(byte_array);
-
-        Ok(Self { tag })
+        Ok(Self { tag: bytes })
     }
 }
 

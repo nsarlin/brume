@@ -4,7 +4,6 @@ use std::borrow::Cow;
 
 use chrono::{DateTime, Utc};
 use reqwest_dav::list_cmd::ListEntity;
-use thiserror::Error;
 use urlencoding::decode;
 
 use crate::{
@@ -16,15 +15,6 @@ use crate::{
 };
 
 use super::{WebDavError, WebDavSyncInfo};
-
-/// Error encountered when parsing a tag in the WebDAV response
-#[derive(Error, Debug)]
-pub enum TagError {
-    #[error("the tag is not present")]
-    MissingTag,
-    #[error("the tag is not a valid number: {0}")]
-    InvalidTag(String),
-}
 
 impl Sortable for ListEntity {
     type Key = str;
@@ -72,7 +62,10 @@ pub(crate) fn dav_parse_entity_meta(
         dav_path: VirtualPathBuf::root(),
     };
 
-    let sync_info = entity.tag().map(WebDavSyncInfo::new)?;
+    let sync_info = entity
+        .tag()
+        .map(WebDavSyncInfo::new)
+        .ok_or(WebDavError::MissingTag)?;
 
     match &entity.entity {
         ListEntity::File(list_file) => Ok(NodeInfo::File(FileInfo::new(
@@ -167,15 +160,13 @@ impl DavEntity {
         dav_path.chroot(&self.dav_path)
     }
 
-    fn tag(&self) -> Result<u128, TagError> {
+    fn tag(&self) -> Option<Vec<u8>> {
         let tag_opt = match &self.entity {
             ListEntity::File(file) => file.tag.as_ref(),
             ListEntity::Folder(folder) => folder.tag.as_ref(),
         };
 
-        tag_opt
-            .ok_or(TagError::MissingTag)
-            .and_then(|tag| parse_dav_tag(tag).map_err(|_| TagError::InvalidTag(tag.to_string())))
+        tag_opt.map(|tag| tag.as_bytes().to_vec())
     }
 
     fn last_modified(&self) -> DateTime<Utc> {
@@ -191,7 +182,7 @@ impl TryFrom<DavEntity> for VfsNode<WebDavSyncInfo> {
 
     fn try_from(value: DavEntity) -> Result<Self, Self::Error> {
         let name = value.name()?;
-        let tag = value.tag()?;
+        let tag = value.tag().ok_or(WebDavError::MissingTag)?;
 
         let sync = WebDavSyncInfo::new(tag);
 
@@ -209,11 +200,6 @@ impl TryFrom<DavEntity> for VfsNode<WebDavSyncInfo> {
             ))),
         }
     }
-}
-
-fn parse_dav_tag(tag: &str) -> Result<u128, ()> {
-    let trimmed = tag.trim_matches('"');
-    u128::from_str_radix(trimmed, 16).map_err(|_| ())
 }
 
 /// Return the relative url from the server root of the entity
